@@ -206,6 +206,16 @@ function putEntry(dateStr,label,catId,start,end,replaceId){
   else push(dateStr,label,catId,start,end);
 }
 function push(d,label,catId,s,e){ if(!state.entries[d]) state.entries[d]=[]; state.entries[d].push({id:uid(),label:label,cat:catId,start:s,end:e}); }
+
+/* splits one block into up to three: activity, break, activity — skipping
+   either activity segment if the break sits flush against an edge. Caller
+   is responsible for validating s<bs<be<e first (see saveSheet). */
+function putEntryWithBreak(dateStr,label,catId,start,end,breakStart,breakEnd,replaceId){
+  if(replaceId) removeEntry(replaceId);
+  if(breakStart>start) push(dateStr,label,catId,start,breakStart);
+  push(dateStr,"Break",null,breakStart,breakEnd);
+  if(breakEnd<end) push(dateStr,label,catId,breakEnd,end);
+}
 function removeEntry(id){
   for(var k in state.entries){
     state.entries[k]=state.entries[k].filter(function(e){ return e.id!==id; });
@@ -401,6 +411,10 @@ function openSheet(dayIdx,start,end,entryId){
   }).join("");
   document.getElementById("fStart").value=toHM(start);
   document.getElementById("fEnd").value=toHM(Math.min(end,1439));
+  document.getElementById("fBreakToggle").checked=false;
+  document.getElementById("breakFields").hidden=true;
+  document.getElementById("fBreakStart").value="";
+  document.getElementById("fBreakEnd").value="";
 
   var lbl="";
   if(entryId){
@@ -456,22 +470,42 @@ document.getElementById("fRepeat").addEventListener("click",function(ev){
   b.setAttribute("aria-pressed",b.getAttribute("aria-pressed")==="true"?"false":"true");
 });
 
+document.getElementById("fBreakToggle").addEventListener("change",function(){
+  document.getElementById("breakFields").hidden=!this.checked;
+});
+
 document.getElementById("fSave").addEventListener("click",saveSheet);
 function saveSheet(){
   var s=fromHM(document.getElementById("fStart").value||"00:00");
   var e=fromHM(document.getElementById("fEnd").value||"00:00");
   if(s===e){ showToast("Start and end time are the same — nothing saved",false); return; }
+
+  var breakOn=document.getElementById("fBreakToggle").checked, bs=0, be=0;
+  if(breakOn){
+    bs=fromHM(document.getElementById("fBreakStart").value||"00:00");
+    be=fromHM(document.getElementById("fBreakEnd").value||"00:00");
+    if(e<=s){ showToast("A break can't be added to an entry that crosses midnight",false); return; }
+    if(bs>=be||bs<s||be>e){ showToast("The break has to fall inside the entry's start and end time",false); return; }
+    if(bs===s&&be===e){ showToast("That's the whole entry — just log it as a break directly",false); return; }
+  }
+
   snapshot(editing?"edit entry":"add entry");
   var label=fLabel.value.trim();
   if(!label){ var c=catById(chosenCat); label=c?c.name:"Untitled"; }
   var days=weekDates();
+
+  function writeDay(dateStr,replaceId){
+    if(breakOn) putEntryWithBreak(dateStr,label,chosenCat,s,e,bs,be,replaceId);
+    else putEntry(dateStr,label,chosenCat,s,e,replaceId);
+  }
+
   if(editing){
-    putEntry(iso(days[+document.getElementById("fDay").value]),label,chosenCat,s,e,editing);
+    writeDay(iso(days[+document.getElementById("fDay").value]),editing);
   }else{
     var picked=[].filter.call(document.querySelectorAll("#fRepeat button"),function(b){ return b.getAttribute("aria-pressed")==="true"; })
                  .map(function(b){ return +b.dataset.d; });
     if(!picked.length) picked=[+document.getElementById("fDay").value];
-    picked.forEach(function(i){ putEntry(iso(days[i]),label,chosenCat,s,e,null); });
+    picked.forEach(function(i){ writeDay(iso(days[i]),null); });
   }
   persist(); renderGrid(); renderTotals();
   closeSheet();
@@ -748,6 +782,7 @@ setStatus("Saved "+clockNow());
 if(TEST_MODE){
   window.__HL_TEST__={
     putEntry:putEntry,
+    putEntryWithBreak:putEntryWithBreak,
     entriesFor:entriesFor,
     findEntry:findEntry,
     removeEntry:removeEntry,

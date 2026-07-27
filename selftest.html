@@ -108,6 +108,21 @@ function runTests(H){
   assert("clearing one week's dates leaves other weeks' entries intact",
     H.entriesFor(H.iso(otherWeek)).length===1);
 
+  /* 6. a break in the middle splits one block into three: work, Break, work */
+  H.getState().entries={};
+  H.putEntryWithBreak(H.iso(weekStart),"Work",catId,9*60,17*60,12*60,13*60,null);
+  var withBreak=H.entriesFor(H.iso(weekStart)).slice().sort(function(a,b){ return a.start-b.start; });
+  assert("break in the middle produces three entries", withBreak.length===3);
+  assert("first segment runs up to the break", withBreak[0]&&withBreak[0].start===9*60&&withBreak[0].end===12*60&&withBreak[0].label==="Work");
+  assert("middle segment is an uncategorised Break", withBreak[1]&&withBreak[1].label==="Break"&&withBreak[1].cat===null&&withBreak[1].start===12*60&&withBreak[1].end===13*60);
+  assert("last segment resumes after the break", withBreak[2]&&withBreak[2].start===13*60&&withBreak[2].end===17*60&&withBreak[2].label==="Work");
+
+  /* 7. a break flush against the start produces only two entries (no empty sliver) */
+  H.getState().entries={};
+  H.putEntryWithBreak(H.iso(weekStart),"Work",catId,9*60,17*60,9*60,10*60,null);
+  var flushStart=H.entriesFor(H.iso(weekStart));
+  assert("break flush with the start skips the empty leading segment", flushStart.length===2);
+
   return results;
 }
 })();
