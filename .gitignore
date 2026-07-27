@@ -1,0 +1,4 @@
+# Exported/backup copies of your own data (from "Export a copy" or a browser
+# page save) — these hold real logged entries and should never be committed.
+hours-ledger*.json
+hours-ledger*.txt
