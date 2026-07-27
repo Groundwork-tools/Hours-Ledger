@@ -110,7 +110,7 @@ function runTests(H){
 
   /* 6. a break in the middle splits one block into three: work, Break, work */
   H.getState().entries={};
-  H.putEntryWithBreak(H.iso(weekStart),"Work",catId,9*60,17*60,12*60,13*60,null);
+  H.putEntryWithBreaks(H.iso(weekStart),"Work",catId,9*60,17*60,[{start:12*60,end:13*60}],null);
   var withBreak=H.entriesFor(H.iso(weekStart)).slice().sort(function(a,b){ return a.start-b.start; });
   assert("break in the middle produces three entries", withBreak.length===3);
   assert("first segment runs up to the break", withBreak[0]&&withBreak[0].start===9*60&&withBreak[0].end===12*60&&withBreak[0].label==="Work");
@@ -119,9 +119,20 @@ function runTests(H){
 
   /* 7. a break flush against the start produces only two entries (no empty sliver) */
   H.getState().entries={};
-  H.putEntryWithBreak(H.iso(weekStart),"Work",catId,9*60,17*60,9*60,10*60,null);
+  H.putEntryWithBreaks(H.iso(weekStart),"Work",catId,9*60,17*60,[{start:9*60,end:10*60}],null);
   var flushStart=H.entriesFor(H.iso(weekStart));
   assert("break flush with the start skips the empty leading segment", flushStart.length===2);
+
+  /* 8. two breaks in one entry produce five entries in the right order */
+  H.getState().entries={};
+  H.putEntryWithBreaks(H.iso(weekStart),"Work",catId,9*60,17*60,
+    [{start:15*60,end:15*60+15},{start:12*60,end:13*60}],null); /* deliberately unsorted input */
+  var twoBreaks=H.entriesFor(H.iso(weekStart)).slice().sort(function(a,b){ return a.start-b.start; });
+  assert("two breaks produce five entries", twoBreaks.length===5);
+  assert("segments land in start-time order regardless of input order",
+    twoBreaks.every(function(seg,i){ return i===0||seg.start>=twoBreaks[i-1].end; }));
+  assert("both breaks are labeled Break", twoBreaks[1].label==="Break"&&twoBreaks[3].label==="Break");
+  assert("last segment ends at the entry's end", twoBreaks[4].end===17*60);
 
   return results;
 }

@@ -207,14 +207,20 @@ function putEntry(dateStr,label,catId,start,end,replaceId){
 }
 function push(d,label,catId,s,e){ if(!state.entries[d]) state.entries[d]=[]; state.entries[d].push({id:uid(),label:label,cat:catId,start:s,end:e}); }
 
-/* splits one block into up to three: activity, break, activity — skipping
-   either activity segment if the break sits flush against an edge. Caller
-   is responsible for validating s<bs<be<e first (see saveSheet). */
-function putEntryWithBreak(dateStr,label,catId,start,end,breakStart,breakEnd,replaceId){
+/* splits one block around 1-3 breaks into activity/Break/activity/Break/...
+   segments, skipping an activity segment if a break sits flush against an
+   edge or against the previous break. Breaks are sorted here regardless of
+   input order; caller must still ensure each falls within start-end with
+   no overlaps (see saveSheet). */
+function putEntryWithBreaks(dateStr,label,catId,start,end,breaks,replaceId){
   if(replaceId) removeEntry(replaceId);
-  if(breakStart>start) push(dateStr,label,catId,start,breakStart);
-  push(dateStr,"Break",null,breakStart,breakEnd);
-  if(breakEnd<end) push(dateStr,label,catId,breakEnd,end);
+  var cursor=start;
+  breaks.slice().sort(function(a,b){ return a.start-b.start; }).forEach(function(b){
+    if(b.start>cursor) push(dateStr,label,catId,cursor,b.start);
+    push(dateStr,"Break",null,b.start,b.end);
+    cursor=b.end;
+  });
+  if(cursor<end) push(dateStr,label,catId,cursor,end);
 }
 function removeEntry(id){
   for(var k in state.entries){
@@ -413,8 +419,8 @@ function openSheet(dayIdx,start,end,entryId){
   document.getElementById("fEnd").value=toHM(Math.min(end,1439));
   document.getElementById("fBreakToggle").checked=false;
   document.getElementById("breakFields").hidden=true;
-  document.getElementById("fBreakStart").value="";
-  document.getElementById("fBreakEnd").value="";
+  document.getElementById("breakRows").innerHTML="";
+  updateAddBreakVisibility();
 
   var lbl="";
   if(entryId){
@@ -470,9 +476,47 @@ document.getElementById("fRepeat").addEventListener("click",function(ev){
   b.setAttribute("aria-pressed",b.getAttribute("aria-pressed")==="true"?"false":"true");
 });
 
+/* up to 3 break rows, added/removed as individual DOM nodes so typing in
+   one row is never disturbed by adding or removing another */
+var MAX_BREAKS=3;
+function makeBreakRow(){
+  var row=document.createElement("div");
+  row.className="breakrow";
+  row.innerHTML=
+    '<div class="two">'+
+      '<div class="field"><label>Break from</label><input type="time" class="bstart" step="300"></div>'+
+      '<div class="field"><label>Break to</label><input type="time" class="bend" step="300"></div>'+
+    "</div>"+
+    '<button type="button" class="delbreak">Remove this break</button>';
+  row.querySelector(".delbreak").addEventListener("click",function(){
+    row.remove();
+    updateAddBreakVisibility();
+  });
+  return row;
+}
+function updateAddBreakVisibility(){
+  var rows=document.getElementById("breakRows").children;
+  document.getElementById("addBreakRow").hidden=rows.length>=MAX_BREAKS;
+  [].forEach.call(rows,function(r){ r.querySelector(".delbreak").hidden=rows.length<2; });
+}
 document.getElementById("fBreakToggle").addEventListener("change",function(){
   document.getElementById("breakFields").hidden=!this.checked;
+  if(this.checked&&!document.getElementById("breakRows").children.length){
+    document.getElementById("breakRows").appendChild(makeBreakRow());
+    updateAddBreakVisibility();
+  }
 });
+document.getElementById("addBreakRow").addEventListener("click",function(){
+  if(document.getElementById("breakRows").children.length>=MAX_BREAKS) return;
+  document.getElementById("breakRows").appendChild(makeBreakRow());
+  updateAddBreakVisibility();
+});
+function collectBreakRows(){
+  return [].map.call(document.querySelectorAll("#breakRows .breakrow"),function(row){
+    return {startRaw:row.querySelector(".bstart").value,endRaw:row.querySelector(".bend").value};
+  }).filter(function(r){ return r.startRaw&&r.endRaw; })
+    .map(function(r){ return {start:fromHM(r.startRaw),end:fromHM(r.endRaw)}; });
+}
 
 document.getElementById("fSave").addEventListener("click",saveSheet);
 function saveSheet(){
@@ -480,13 +524,17 @@ function saveSheet(){
   var e=fromHM(document.getElementById("fEnd").value||"00:00");
   if(s===e){ showToast("Start and end time are the same — nothing saved",false); return; }
 
-  var breakOn=document.getElementById("fBreakToggle").checked, bs=0, be=0;
+  var breakOn=document.getElementById("fBreakToggle").checked, breaks=[];
   if(breakOn){
-    bs=fromHM(document.getElementById("fBreakStart").value||"00:00");
-    be=fromHM(document.getElementById("fBreakEnd").value||"00:00");
+    breaks=collectBreakRows();
+    if(!breaks.length){ showToast("Add at least one break time, or uncheck 'Add a break'",false); return; }
     if(e<=s){ showToast("A break can't be added to an entry that crosses midnight",false); return; }
-    if(bs>=be||bs<s||be>e){ showToast("The break has to fall inside the entry's start and end time",false); return; }
-    if(bs===s&&be===e){ showToast("That's the whole entry — just log it as a break directly",false); return; }
+    breaks.sort(function(a,b){ return a.start-b.start; });
+    for(var i=0;i<breaks.length;i++){
+      var b=breaks[i];
+      if(b.start>=b.end||b.start<s||b.end>e){ showToast("Each break has to fall inside the entry's start and end time",false); return; }
+      if(i>0&&b.start<breaks[i-1].end){ showToast("Breaks can't overlap each other",false); return; }
+    }
   }
 
   snapshot(editing?"edit entry":"add entry");
@@ -495,7 +543,7 @@ function saveSheet(){
   var days=weekDates();
 
   function writeDay(dateStr,replaceId){
-    if(breakOn) putEntryWithBreak(dateStr,label,chosenCat,s,e,bs,be,replaceId);
+    if(breakOn) putEntryWithBreaks(dateStr,label,chosenCat,s,e,breaks,replaceId);
     else putEntry(dateStr,label,chosenCat,s,e,replaceId);
   }
 
@@ -782,7 +830,7 @@ setStatus("Saved "+clockNow());
 if(TEST_MODE){
   window.__HL_TEST__={
     putEntry:putEntry,
-    putEntryWithBreak:putEntryWithBreak,
+    putEntryWithBreaks:putEntryWithBreaks,
     entriesFor:entriesFor,
     findEntry:findEntry,
     removeEntry:removeEntry,
