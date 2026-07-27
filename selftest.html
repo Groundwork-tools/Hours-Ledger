@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hours Ledger — self-test</title>
+<style>
+  body{font-family:ui-monospace,"SF Mono",Menlo,monospace;background:#FAFAF7;color:#16211B;padding:24px;line-height:1.6}
+  h1{font-size:15px;text-transform:uppercase;letter-spacing:.08em}
+  .pass{color:#2F6B4F}
+  .fail{color:#B23A2F;font-weight:700}
+  .row{padding:2px 0}
+  #summary{margin-top:16px;padding-top:12px;border-top:1px solid #C2CDC1;font-weight:700}
+  iframe{display:none}
+</style>
+</head>
+<body>
+<h1>Hours Ledger — self-test</h1>
+<p>Runs a handful of checks against the real app logic (not a copy of it) in
+<code>index.html?hltest=1</code>, which is isolated from your real saved weeks —
+see the <code>TEST_MODE</code> switch at the top of index.html's storage section.
+This file is never linked from the real app; open it by hand before deploying.</p>
+<div id="out">Loading index.html…</div>
+
+<iframe id="sandbox" src="index.html?hltest=1"></iframe>
+
+<script>
+(function(){
+"use strict";
+var out=document.getElementById("out");
+
+function report(results,error){
+  if(error){
+    out.innerHTML='<p class="fail">Could not run tests: '+error+'</p>'+
+      '<p>If this is a cross-origin error, you\'re probably opening this file '+
+      'directly as <code>file://</code>. Serve the folder over a local server instead, e.g.:<br>'+
+      '<code>python3 -m http.server</code> — then open <code>http://localhost:8000/selftest.html</code>.</p>';
+    return;
+  }
+  var failing=results.filter(function(r){ return !r.pass; }).length;
+  out.innerHTML=results.map(function(r){
+    return '<div class="row"><span class="'+(r.pass?"pass":"fail")+'">'+(r.pass?"PASS":"FAIL")+'</span>  '+r.name+'</div>';
+  }).join("")+'<div id="summary">'+failing+' failing / '+results.length+' total</div>';
+}
+
+document.getElementById("sandbox").addEventListener("load",function(){
+  try{
+    var hook=this.contentWindow.__HL_TEST__;
+    if(!hook) throw "index.html?hltest=1 didn't expose __HL_TEST__ — is TEST_MODE wired up?";
+    report(runTests(hook));
+  }catch(e){
+    report(null,e);
+  }
+});
+
+function runTests(H){
+  var results=[];
+  function assert(name,cond){ results.push({name:name,pass:!!cond}); }
+
+  /* start from a clean, deterministic slate each run */
+  var fresh=H.getState();
+  fresh.entries={};
+  H.setState(fresh);
+
+  /* 1. an entry crossing midnight splits into two, one per day */
+  H.putEntry("2026-01-05","Sleep",null,23*60+30,7*60,null);
+  var d1=H.entriesFor("2026-01-05"), d2=H.entriesFor("2026-01-06");
+  assert("midnight-crossing entry: day 1 runs to 24:00",
+    d1.length===1 && d1[0].start===23*60+30 && d1[0].end===1440);
+  assert("midnight-crossing entry: day 2 runs from 00:00",
+    d2.length===1 && d2[0].start===0 && d2[0].end===7*60);
+
+  /* 2. weekTotals sums minutes per category across the visible week only */
+  H.getState().entries={};
+  var weekStart=H.mondayOf(H.parseIso("2026-01-05"));
+  H.setWeekStart(weekStart);
+  var catId=H.getState().categories[0].id;
+  H.putEntry(H.iso(weekStart),"Work",catId,9*60,12*60,null);
+  H.putEntry(H.iso(H.addDays(weekStart,1)),"Work",catId,9*60,10*60,null);
+  var wt=H.weekTotals();
+  assert("weekTotals sums same-category minutes across the week", wt.t[catId]===240);
+  assert("weekTotals.logged matches the sum", wt.logged===240);
+
+  /* 3. undo restores the exact prior state */
+  var before=JSON.stringify(H.getState());
+  H.snapshot("test snapshot");
+  H.putEntry(H.iso(weekStart),"Extra",null,13*60,14*60,null);
+  var changed=JSON.stringify(H.getState())!==before;
+  H.undo();
+  assert("mutation actually changed state before undo", changed);
+  assert("undo restores the exact previous state", JSON.stringify(H.getState())===before);
+
+  /* 4. deleting one entry doesn't touch its neighbours */
+  H.getState().entries={};
+  H.putEntry(H.iso(weekStart),"A",null,9*60,10*60,null);
+  H.putEntry(H.iso(weekStart),"B",null,10*60,11*60,null);
+  var targetId=H.entriesFor(H.iso(weekStart))[0].id;
+  H.removeEntry(targetId);
+  var remaining=H.entriesFor(H.iso(weekStart));
+  assert("removeEntry deletes only the targeted entry",
+    remaining.length===1 && remaining[0].label==="B");
+
+  /* 5. entries are keyed by date, so clearing one week can't reach another */
+  H.getState().entries={};
+  var otherWeek=H.addDays(weekStart,7);
+  H.putEntry(H.iso(weekStart),"WeekA",null,9*60,10*60,null);
+  H.putEntry(H.iso(otherWeek),"WeekB",null,9*60,10*60,null);
+  delete H.getState().entries[H.iso(weekStart)];
+  assert("clearing one week's dates leaves other weeks' entries intact",
+    H.entriesFor(H.iso(otherWeek)).length===1);
+
+  return results;
+}
+})();
+</script>
+</body>
+</html>

@@ -358,7 +358,10 @@ try{ localStorage.setItem("__t","1"); localStorage.removeItem("__t"); }catch(e){
 function readStore(k){ try{ return storageOK?localStorage.getItem(k):(mem[k]||null); }catch(e){ return mem[k]||null; } }
 function writeStore(k,v){ try{ storageOK?localStorage.setItem(k,v):(mem[k]=v); }catch(e){ mem[k]=v; } }
 
-var KEY="hours-ledger-v1";
+/* hltest=1 is only ever set by selftest.html, so it can exercise real save/undo
+   logic without ever touching the real saved weeks under KEY/UKEY below */
+var TEST_MODE=location.search.indexOf("hltest=1")>-1;
+var KEY=TEST_MODE?"hours-ledger-selftest-v1":"hours-ledger-v1";
 var SWATCHES=["#2B4C7E","#2F6B4F","#A8762A","#3E7F87","#6E4B7A","#B23A2F","#5A6570","#7A7B32"];
 function uid(){ return Math.random().toString(36).slice(2,9); }
 
@@ -450,7 +453,7 @@ function refreshHint(){
 }
 
 /* ---------------- undo / redo ---------------- */
-var UKEY="hours-ledger-undo-v1";
+var UKEY=TEST_MODE?"hours-ledger-selftest-undo-v1":"hours-ledger-undo-v1";
 var undoStack=[], redoStack=[];
 try{ undoStack=JSON.parse(readStore(UKEY))||[]; }catch(e){ undoStack=[]; }
 
@@ -606,7 +609,10 @@ function renderGrid(){
     var slots="";
     for(var m=sh*60;m<eh*60;m+=30)
       slots+='<div class="slot'+((m%60)?" half":"")+((m%60)===30?" hour":"")+'" data-day="'+di+'" data-min="'+m+'"></div>';
-    var blocks=layout(entriesFor(iso(d)).slice()).map(function(e){
+    /* layout() annotates each entry with _lane/_lanes for side-by-side placement —
+       copy the entries first so that scratch data never lands on the objects
+       stored in state.entries (and from there into persist()/export/sync) */
+    var blocks=layout(entriesFor(iso(d)).map(function(e){ return Object.assign({},e); })).map(function(e){
       if(e.end<=sh*60||e.start>=eh*60) return "";
       var top=Math.max(((e.start-sh*60)/30)*ROW,0);
       var hgt=((Math.min(e.end,eh*60)-Math.max(e.start,sh*60))/30)*ROW;
@@ -788,9 +794,10 @@ document.getElementById("fRepeat").addEventListener("click",function(ev){
 
 document.getElementById("fSave").addEventListener("click",saveSheet);
 function saveSheet(){
-  snapshot(editing?"edit entry":"add entry");
   var s=fromHM(document.getElementById("fStart").value||"00:00");
   var e=fromHM(document.getElementById("fEnd").value||"00:00");
+  if(s===e){ showToast("Start and end time are the same — nothing saved",false); return; }
+  snapshot(editing?"edit entry":"add entry");
   var label=fLabel.value.trim();
   if(!label){ var c=catById(chosenCat); label=c?c.name:"Untitled"; }
   var days=weekDates();
@@ -926,6 +933,15 @@ document.getElementById("addCat").addEventListener("click",function(){
   if(last){ last.placeholder="Name it…"; last.focus(); }
 });
 
+/* category name/colour edits are debounced (see nameTimer above) so typing
+   doesn't spam persist(); flush any pending one immediately if the page is
+   about to go away, so a fast tab-close can't drop the last edit */
+function flushPendingCatEdit(){
+  if(nameTimer){ clearTimeout(nameTimer); nameTimer=null; persist(); }
+}
+window.addEventListener("beforeunload",flushPendingCatEdit);
+document.addEventListener("visibilitychange",function(){ if(document.hidden) flushPendingCatEdit(); });
+
 /* ---------------- nav & tools ---------------- */
 function goto(d){ weekStart=d; renderGrid(); renderTotals(); }
 document.getElementById("prev").addEventListener("click",function(){ goto(addDays(weekStart,-7)); });
@@ -1049,6 +1065,29 @@ if(!readStore(SEEN)) openIntro();
 
 render();
 setStatus("Saved "+clockNow());
+
+/* only present when opened as index.html?hltest=1 — see selftest.html.
+   Exposes real functions so tests exercise actual app logic instead of a
+   copy of it; storage is already isolated above via TEST_MODE. */
+if(TEST_MODE){
+  window.__HL_TEST__={
+    putEntry:putEntry,
+    entriesFor:entriesFor,
+    findEntry:findEntry,
+    removeEntry:removeEntry,
+    weekTotals:weekTotals,
+    snapshot:snapshot,
+    undo:undo,
+    redo:redo,
+    iso:iso,
+    addDays:addDays,
+    mondayOf:mondayOf,
+    parseIso:parseIso,
+    getState:function(){ return state; },
+    setState:function(s){ state=s; },
+    setWeekStart:function(d){ weekStart=d; }
+  };
+}
 })();
 </script>
 </body>
