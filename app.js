@@ -152,22 +152,28 @@ function redo(){
   showToast("Redone: "+step.d,false);
 }
 
-var toastTimer=null, toastExpiresAt=0;
+var toastTimer=null, toastCollapseTimer=null, toastExpiresAt=0;
 function showToast(text,withUndo){
   var t=document.getElementById("toast");
   document.getElementById("toastText").textContent=text;
+  document.getElementById("toastText").hidden=false;
   document.getElementById("toastUndo").hidden=!withUndo;
   t.classList.add("on");
-  document.body.classList.add("toast-on");
   var ms=withUndo?14000:4000;
   toastExpiresAt=Date.now()+ms;
   clearTimeout(toastTimer);
+  clearTimeout(toastCollapseTimer);
+  /* the message ("Deleted X") only needs to be read once — after a few
+     seconds collapse down to just the Undo button, which stays clickable
+     (and correctly still undoes the same change) for the rest of the window */
+  if(withUndo) toastCollapseTimer=setTimeout(function(){ document.getElementById("toastText").hidden=true; },5000);
   toastTimer=setTimeout(hideToast,ms);
 }
 function hideToast(){
   clearTimeout(toastTimer);
+  clearTimeout(toastCollapseTimer);
   document.getElementById("toast").classList.remove("on");
-  document.body.classList.remove("toast-on");
+  document.getElementById("toastText").hidden=false;
 }
 /* mobile browsers pause timers while the tab is backgrounded (phone locked,
    switched apps) — if we come back after the toast should already have
@@ -721,7 +727,22 @@ document.getElementById("prev").addEventListener("click",function(){ goto(addDay
 document.getElementById("next").addEventListener("click",function(){ goto(addDays(weekStart,7)); });
 document.getElementById("thisweek").addEventListener("click",function(){ goto(mondayOf(new Date())); });
 document.getElementById("anchor").addEventListener("change",function(){ if(this.value) goto(mondayOf(parseIso(this.value))); });
-document.getElementById("addBtn").addEventListener("click",function(){ openSheet(0,9*60,10*60,null); });
+/* which day "Add entry" should default to: the focused day in day view,
+   today if the displayed week is the current one, else Monday */
+function defaultAddDay(){
+  if(viewMode==="day") return focusDay;
+  var today=new Date();
+  if(iso(mondayOf(today))===iso(weekStart)) return (today.getDay()+6)%7;
+  return 0;
+}
+document.getElementById("addBtn").addEventListener("click",function(){
+  var dayIdx=defaultAddDay();
+  var entries=entriesFor(iso(weekDates()[dayIdx]));
+  var last=entries.length?Math.max.apply(null,entries.map(function(e){ return e.end; })):null;
+  var start=(last!==null)?Math.min(last,23*60+30):9*60;
+  var end=Math.min(start+60,1440);
+  openSheet(dayIdx,start,end,null);
+});
 document.getElementById("range").addEventListener("click",function(){
   var s=state.settings;
   if(s.startHour===0&&s.endHour===24){ s.startHour=6; s.endHour=24; } else { s.startHour=0; s.endHour=24; }
