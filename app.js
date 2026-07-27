@@ -152,17 +152,31 @@ function redo(){
   showToast("Redone: "+step.d,false);
 }
 
-var toastTimer=null;
+var toastTimer=null, toastExpiresAt=0;
 function showToast(text,withUndo){
   var t=document.getElementById("toast");
   document.getElementById("toastText").textContent=text;
   document.getElementById("toastUndo").hidden=!withUndo;
   t.classList.add("on");
+  document.body.classList.add("toast-on");
+  var ms=withUndo?14000:4000;
+  toastExpiresAt=Date.now()+ms;
   clearTimeout(toastTimer);
-  toastTimer=setTimeout(function(){ t.classList.remove("on"); },withUndo?14000:4000);
+  toastTimer=setTimeout(hideToast,ms);
 }
-document.getElementById("toastUndo").addEventListener("click",function(){
+function hideToast(){
+  clearTimeout(toastTimer);
   document.getElementById("toast").classList.remove("on");
+  document.body.classList.remove("toast-on");
+}
+/* mobile browsers pause timers while the tab is backgrounded (phone locked,
+   switched apps) — if we come back after the toast should already have
+   expired, clear it right away instead of leaving a stale "Undo" on screen */
+document.addEventListener("visibilitychange",function(){
+  if(!document.hidden&&toastExpiresAt&&Date.now()>=toastExpiresAt) hideToast();
+});
+document.getElementById("toastUndo").addEventListener("click",function(){
+  hideToast();
   undo();
 });
 document.addEventListener("keydown",function(ev){
@@ -408,6 +422,7 @@ function paintChips(){
 }
 
 function openSheet(dayIdx,start,end,entryId){
+  hideToast();
   editing=entryId||null;
   chosenCat=null;
   labelTouched=false;
@@ -813,7 +828,7 @@ document.getElementById("fab").addEventListener("click",function(){
 
 var SEEN="hours-ledger-seen";
 var introEl=document.getElementById("intro");
-function openIntro(){ introEl.classList.add("on"); }
+function openIntro(){ hideToast(); introEl.classList.add("on"); }
 function closeIntro(){ introEl.classList.remove("on"); writeStore(SEEN,"1"); }
 document.getElementById("introGo").addEventListener("click",closeIntro);
 document.getElementById("howto").addEventListener("click",openIntro);

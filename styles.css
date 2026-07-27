@@ -109,6 +109,10 @@ button{cursor:pointer}
 .toast button{border:1px solid var(--paper);background:transparent;color:var(--paper);
   padding:5px 11px;font-family:var(--mono);font-size:11px;letter-spacing:.11em;text-transform:uppercase}
 .toast button:hover{background:var(--paper);color:var(--ink)}
+/* the toast sits bottom-center and can span most of a phone's width, right
+   where the mobile "Log now" button lives — hide the button rather than
+   try to out-guess every toast message's wrapped height */
+body.toast-on .fab{display:none}
 .hint{font-family:var(--mono);font-size:10.5px;line-height:1.7;color:var(--muted);margin-top:10px}
 .status{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:6px}
 .status i{width:6px;height:6px;background:#2F6B4F;display:block;border-radius:50%}
