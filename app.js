@@ -525,8 +525,20 @@ gridbody.addEventListener("click",function(ev){
   var di=weekDates().map(iso).indexOf(f.date);
   openSheet(di<0?0:di,f.e.start,f.e.end,f.e.id);
 });
-gridbody.addEventListener("touchend",function(ev){
+/* a scroll starts with a touchstart over a slot too — only open the entry
+   box if the finger never moved more than a few pixels, i.e. it was a tap */
+var touchStart=null;
+gridbody.addEventListener("touchstart",function(ev){
   var slot=ev.target.closest(".slot"); if(!slot) return;
+  var t=ev.touches[0];
+  touchStart={x:t.clientX,y:t.clientY};
+},{passive:true});
+gridbody.addEventListener("touchend",function(ev){
+  var slot=ev.target.closest(".slot"); if(!slot||!touchStart) return;
+  var t=ev.changedTouches[0];
+  var moved=Math.abs(t.clientX-touchStart.x)>10||Math.abs(t.clientY-touchStart.y)>10;
+  touchStart=null;
+  if(moved) return;
   openSheet(+slot.dataset.day,+slot.dataset.min,+slot.dataset.min+30,null); ev.preventDefault();
 },{passive:false});
 
