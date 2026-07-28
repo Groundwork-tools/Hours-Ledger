@@ -283,7 +283,10 @@ function layout(list){
 }
 
 /* ---------------- render ---------------- */
-var ROW=26;
+/* must match --row in styles.css (same value CSS uses for .gutter .hr and
+   .day .slot) or entry blocks drift out of alignment with the grid under
+   them — read it from CSS instead of hardcoding it a third time */
+var ROW=parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--row"))||26;
 
 function renderGrid(){
   var days=weekDates();

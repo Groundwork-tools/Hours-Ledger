@@ -7,7 +7,9 @@
   --muted:#6C7A70;
   --flag:#B23A2F;
   --none:#9AA5A0;
-  --row:26px;
+  --row:26px; /* height of one half-hour slot — .gutter .hr and .day .slot
+    both derive from this, and app.js reads it too for entry block sizing,
+    so it's the one place to change, not any of those three */
   --display:"Archivo","Helvetica Neue",system-ui,sans-serif;
   --mono:"Spline Sans Mono",ui-monospace,"SF Mono",Menlo,monospace;
 }
@@ -160,10 +162,14 @@ button{cursor:pointer}
   background:var(--ink);color:var(--paper);padding:15px 20px;font-size:12px;letter-spacing:.12em;
   text-transform:uppercase;font-weight:700;box-shadow:0 3px 0 rgba(22,33,27,.3)}
 @media(max-width:820px){
+  /* .gutter .hr and .day .slot both size themselves off --row (see :root
+     above) — override the variable itself here, not either rule directly,
+     so the hour labels and the slots they're meant to line up with can
+     never drift apart again */
+  :root{--row:30px}
   .fab{display:block}
   .field input[type=text],.field select,.field input[type=time]{font-size:16px}
   button,a{-webkit-tap-highlight-color:rgba(22,33,27,.12)}
-  .day .slot{height:30px}
 }
 @media(max-width:700px){
   .wordmark{font-size:30px}
