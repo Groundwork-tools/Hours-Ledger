@@ -628,16 +628,47 @@ gridbody.addEventListener("click",function(ev){
   var di=weekDates().map(iso).indexOf(f.date);
   openSheet(di<0?0:di,f.e.start,f.e.end,f.e.id);
 });
-/* a scroll starts with a touchstart over a slot too — only open the entry
-   box if the finger never moved more than a few pixels, i.e. it was a tap */
-var touchStart=null;
+/* touch is trickier than mouse: a finger moving down the grid could mean
+   "scroll the page" or "drag-select a range", and there's no way to tell
+   which until it happens. Convention used here (same as most mobile
+   calendar apps): a quick tap opens a single slot, a normal swipe just
+   scrolls the page like anywhere else, and holding still for ~350ms before
+   moving is what commits to a drag-select — only then do we take over the
+   gesture and stop the page scrolling under it. */
+var touchStart=null, touchDragTimer=null;
 gridbody.addEventListener("touchstart",function(ev){
   var slot=ev.target.closest(".slot"); if(!slot) return;
   var t=ev.touches[0];
   touchStart={x:t.clientX,y:t.clientY};
+  var day=+slot.dataset.day, min=+slot.dataset.min;
+  clearTimeout(touchDragTimer);
+  touchDragTimer=setTimeout(function(){
+    dragging={day:day,from:min,to:min};
+    paint();
+  },350);
 },{passive:true});
+gridbody.addEventListener("touchmove",function(ev){
+  if(!touchStart) return;
+  var t=ev.touches[0];
+  if(!dragging){
+    var movedFar=Math.abs(t.clientX-touchStart.x)>10||Math.abs(t.clientY-touchStart.y)>10;
+    if(movedFar) clearTimeout(touchDragTimer); /* this is a scroll — let it scroll */
+    return;
+  }
+  ev.preventDefault(); /* a drag has committed — take over from here */
+  var el=document.elementFromPoint(t.clientX,t.clientY);
+  var slot=el&&el.closest&&el.closest(".slot");
+  if(slot&&+slot.dataset.day===dragging.day){ dragging.to=+slot.dataset.min; paint(); }
+},{passive:false});
 gridbody.addEventListener("touchend",function(ev){
-  var slot=ev.target.closest(".slot"); if(!slot||!touchStart) return;
+  clearTimeout(touchDragTimer);
+  if(dragging){
+    var a=Math.min(dragging.from,dragging.to), b=Math.max(dragging.from,dragging.to)+30, d=dragging.day;
+    dragging=null; clearPaint(); touchStart=null;
+    openSheet(d,a,b,null); ev.preventDefault();
+    return;
+  }
+  var slot=ev.target.closest(".slot"); if(!slot||!touchStart){ touchStart=null; return; }
   var t=ev.changedTouches[0];
   var moved=Math.abs(t.clientX-touchStart.x)>10||Math.abs(t.clientY-touchStart.y)>10;
   touchStart=null;
