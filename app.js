@@ -146,8 +146,10 @@ function refreshHint(){
   var el=document.getElementById("dataHint");
   if(fileHandle){
     el.innerHTML="Every change is written to <b>"+escapeHtml(fileName)+"</b> automatically. One file, no versions. Nothing leaves your machine.";
-  }else if(storageOK){
+  }else if(storageOK&&window.showSaveFilePicker){
     el.innerHTML="Every change saves to this browser automatically &mdash; there is nothing to press. <b>Keep a file in sync</b> pins it to one file on your disk that overwrites itself, so you never end up with twelve copies.";
+  }else if(storageOK){
+    el.innerHTML="Every change saves to this browser automatically &mdash; there is nothing to press. <b>Keep a file in sync</b> needs desktop Chrome or Edge, so it's not available on a phone or tablet &mdash; use <b>Export a copy</b> if you want a backup file.";
   }else{
     el.innerHTML="This browser won't let the page save on its own. Use <b>Export a copy</b> before you close the tab.";
   }
@@ -938,7 +940,7 @@ document.getElementById("clear").addEventListener("click",function(){
 
 document.getElementById("linkFile").addEventListener("click",function(){
   if(!window.showSaveFilePicker){
-    alert("Your browser can't keep a file in sync (Chrome or Edge can). Use Export a copy instead.");
+    alert("Keeping a file in sync needs a feature only desktop Chrome or Edge have (not a phone or tablet browser, even Chrome). Use Export a copy instead.");
     return;
   }
   (async function(){
