@@ -195,6 +195,42 @@ function runTests(H,d){
   H.migrateVerdicts(oldShaped);
   assert("migrateVerdicts is a no-op on already-migrated data", JSON.stringify(oldShaped.weeklyVerdicts)===beforeRerun);
 
+  /* 12. two entries in the SAME category overlapping each other: the real
+     time they cover (logged) is deduped, but that's not cross-category
+     "multitasking" - overlap for that category stays 0 */
+  H.getState().entries={};
+  var catId2=H.getState().categories[1].id;
+  H.putEntry(H.iso(weekStart),"Work A",catId,9*60,12*60,null);
+  H.putEntry(H.iso(weekStart),"Work B",catId,10*60,11*60,null);
+  var sameCat=H.weekTotals();
+  assert("same-category overlap: logged dedupes to the real covered time", sameCat.logged===180);
+  assert("same-category overlap: each entry still counts fully toward the category total", sameCat.t[catId]===240);
+  assert("same-category overlap: not counted as cross-category overlap", !(sameCat.overlap[catId]>0));
+
+  /* 13. two entries in DIFFERENT categories overlapping: each category keeps
+     its own full total, logged dedupes, and both categories' overlap
+     figures reflect the shared minutes */
+  H.getState().entries={};
+  H.putEntry(H.iso(weekStart),"Work",catId,9*60,12*60,null);
+  H.putEntry(H.iso(weekStart),"Meeting",catId2,10*60,11*60,null);
+  var diffCat=H.weekTotals();
+  assert("cross-category overlap: logged dedupes to the real covered time", diffCat.logged===180);
+  assert("cross-category overlap: category totals stay full, honest sums", diffCat.t[catId]===180&&diffCat.t[catId2]===60);
+  assert("cross-category overlap: both categories show the shared minutes", diffCat.overlap[catId]===60&&diffCat.overlap[catId2]===60);
+
+  /* 14. a gap between entries isn't merged - logged is a plain sum */
+  H.getState().entries={};
+  H.putEntry(H.iso(weekStart),"A",null,9*60,10*60,null);
+  H.putEntry(H.iso(weekStart),"B",null,11*60,12*60,null);
+  assert("non-overlapping entries with a gap aren't merged", H.weekTotals().logged===120);
+
+  /* 15. same time-of-day on two different days must never be mistaken for
+     an overlap just because their minute-of-day ranges match */
+  H.getState().entries={};
+  H.putEntry(H.iso(weekStart),"A",null,9*60,10*60,null);
+  H.putEntry(H.iso(H.addDays(weekStart,1)),"B",null,9*60,10*60,null);
+  assert("same time-of-day on different days isn't mistaken for an overlap", H.weekTotals().logged===120);
+
   return results;
 }
 })();

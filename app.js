@@ -388,16 +388,65 @@ function recolorEntries(){
   });
 }
 
+/* collapses a set of [start,end) ranges into the fewest non-overlapping
+   ranges that cover the same total time, sorted by start */
+function mergeRanges(ranges){
+  if(!ranges.length) return [];
+  var sorted=ranges.slice().sort(function(a,b){ return a.start-b.start; });
+  var out=[{start:sorted[0].start,end:sorted[0].end}];
+  for(var i=1;i<sorted.length;i++){
+    var r=sorted[i], last=out[out.length-1];
+    if(r.start<=last.end) last.end=Math.max(last.end,r.end);
+    else out.push({start:r.start,end:r.end});
+  }
+  return out;
+}
+/* sums the total time actually covered by a set of ranges, counting any
+   overlap only once - two entries double-booking the same half hour
+   don't make the week longer than 168 hours */
+function unionMinutes(ranges){
+  return mergeRanges(ranges).reduce(function(sum,r){ return sum+(r.end-r.start); },0);
+}
+/* how much of rangesA's own covered time is also covered by rangesB -
+   used to show "23m of this also overlaps something else" per category */
+function intersectionMinutes(rangesA,rangesB){
+  var a=mergeRanges(rangesA), b=mergeRanges(rangesB);
+  var i=0,j=0,total=0;
+  while(i<a.length&&j<b.length){
+    var s=Math.max(a[i].start,b[j].start), e=Math.min(a[i].end,b[j].end);
+    if(s<e) total+=e-s;
+    if(a[i].end<b[j].end) i++; else j++;
+  }
+  return total;
+}
 function weekTotals(ws){
   var days=ws?(function(){ var o=[]; for(var i=0;i<7;i++) o.push(addDays(ws,i)); return o; })():weekDates();
-  var t={},logged=0,none=0;
-  days.forEach(function(d){
+  var t={},none=0,ranges=[],byCat={},noneRanges=[];
+  days.forEach(function(d,di){
     entriesFor(iso(d)).forEach(function(e){
-      var m=e.end-e.start; logged+=m;
-      if(catById(e.cat)) t[e.cat]=(t[e.cat]||0)+m; else none+=m;
+      var m=e.end-e.start;
+      /* offset by day so entries on different days at the same time of
+         day are never mistaken for overlapping each other */
+      var r={start:di*1440+e.start,end:di*1440+e.end};
+      ranges.push(r);
+      if(catById(e.cat)){
+        t[e.cat]=(t[e.cat]||0)+m;
+        (byCat[e.cat]=byCat[e.cat]||[]).push(r);
+      }else{ none+=m; noneRanges.push(r); }
     });
   });
-  return {t:t,logged:logged,none:none};
+  /* how much of each category's own time is also covered by something
+     else this week - a category's total stays an honest sum of what you
+     logged for it, this just surfaces how much of that was multitasked */
+  var overlap={};
+  Object.keys(byCat).forEach(function(catId){
+    var others=noneRanges.slice();
+    Object.keys(byCat).forEach(function(otherId){
+      if(otherId!==catId) others=others.concat(byCat[otherId]);
+    });
+    overlap[catId]=intersectionMinutes(byCat[catId],others);
+  });
+  return {t:t,logged:unionMinutes(ranges),none:none,overlap:overlap};
 }
 
 function renderTotals(){
@@ -406,9 +455,10 @@ function renderTotals(){
   var thisWeek=iso(weekStart);
 
   var rows=state.categories.slice().sort(function(a,b){ return (r.t[b.id]||0)-(r.t[a.id]||0); }).map(function(c){
-    var m=r.t[c.id]||0, pct=max?Math.round(m/max*100):0, v=getVerdict(c.id,thisWeek);
+    var m=r.t[c.id]||0, pct=max?Math.round(m/max*100):0, v=getVerdict(c.id,thisWeek), ov=r.overlap[c.id]||0;
     return '<div class="tot"><div class="tot-top"><span class="dot" style="background:'+c.color+'"></span>'+
       escapeHtml(c.name)+'<span class="h">'+dur(m)+'</span></div>'+
+      (ov>0?'<div class="tot-overlap">overlaps '+dur(ov)+' with another entry</div>':'')+
       '<div class="tot-bar"><i style="width:'+pct+"%;background:"+c.color+'"></i></div>'+
       '<div class="verdict" data-cat="'+c.id+'">'+["keep","compress","cut"].map(function(dv){
         return '<button data-v="'+dv+'" aria-pressed="'+(v===dv)+'">'+dv+"</button>";
@@ -1045,6 +1095,7 @@ if(TEST_MODE){
     findEntry:findEntry,
     removeEntry:removeEntry,
     weekTotals:weekTotals,
+    unionMinutes:unionMinutes,
     getVerdict:getVerdict,
     setVerdict:setVerdict,
     migrateVerdicts:migrateVerdicts,
