@@ -794,7 +794,9 @@ function renderReview(){
   document.getElementById("reviewRange").textContent=
     fmtShort(cols[0])+" – "+fmtShort(addDays(cols[cols.length-1],6));
 
-  var head="<tr><th>Category</th>"+cols.map(function(ws){ return "<th>"+fmtShort(ws)+"</th>"; }).join("")+"<th>Verdict</th></tr>";
+  var head="<tr><th>Category</th>"+cols.map(function(ws){
+    return "<th>"+fmtShort(ws)+"&ndash;"+fmtShort(addDays(ws,6))+"</th>";
+  }).join("")+"<th>Verdict</th></tr>";
 
   var rows=state.categories.map(function(c){
     var cells=totals.map(function(r){ return "<td>"+dur(r.t[c.id]||0)+"</td>"; }).join("");
