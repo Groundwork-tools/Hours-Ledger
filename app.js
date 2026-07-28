@@ -25,7 +25,12 @@ function writeStore(k,v){ try{ storageOK?localStorage.setItem(k,v):(mem[k]=v); }
 /* hltest=1 is only ever set by selftest.html, so it can exercise real save/undo
    logic without ever touching the real saved weeks under KEY/UKEY below */
 var TEST_MODE=location.search.indexOf("hltest=1")>-1;
-var KEY=TEST_MODE?"hours-ledger-selftest-v1":"hours-ledger-v1";
+var KEY=TEST_MODE?"hours-ledger-selftest-v2":"hours-ledger-v2";
+/* v1's category.verdict (one verdict, shared by every week) was replaced by
+   weeklyVerdicts (one verdict per category per week) below - this is the
+   real key-and-shape migration hard rule 1 asks for. v1 is read once here
+   to carry existing verdicts forward as "this week"'s, then left untouched. */
+var OLD_KEY="hours-ledger-v1";
 var SWATCHES=["#2B4C7E","#2F6B4F","#A8762A","#3E7F87","#6E4B7A","#B23A2F","#5A6570","#7A7B32"];
 function uid(){ return Math.random().toString(36).slice(2,9); }
 
@@ -33,23 +38,55 @@ var DEFAULTS={
   version:2,
   settings:{startHour:6,endHour:24},
   categories:[
-    {id:uid(),name:"Studies",color:"#2B4C7E",verdict:null},
-    {id:uid(),name:"Work / income",color:"#2F6B4F",verdict:null},
-    {id:uid(),name:"Side projects",color:"#A8762A",verdict:null},
-    {id:uid(),name:"Training",color:"#3E7F87",verdict:null},
-    {id:uid(),name:"People",color:"#6E4B7A",verdict:null},
-    {id:uid(),name:"Admin & errands",color:"#5A6570",verdict:null},
-    {id:uid(),name:"Sleep",color:"#7A7B32",verdict:null},
-    {id:uid(),name:"Drift",color:"#B23A2F",verdict:null}
+    {id:uid(),name:"Studies",color:"#2B4C7E"},
+    {id:uid(),name:"Work / income",color:"#2F6B4F"},
+    {id:uid(),name:"Side projects",color:"#A8762A"},
+    {id:uid(),name:"Training",color:"#3E7F87"},
+    {id:uid(),name:"People",color:"#6E4B7A"},
+    {id:uid(),name:"Admin & errands",color:"#5A6570"},
+    {id:uid(),name:"Sleep",color:"#7A7B32"},
+    {id:uid(),name:"Drift",color:"#B23A2F"}
   ],
-  entries:{}
+  entries:{},
+  weeklyVerdicts:{}
 };
+
+/* converts an old (or freshly-imported) state that stores verdict on each
+   category into one using weeklyVerdicts, carrying each category's current
+   verdict forward as this week's. No-op if already converted. */
+function migrateVerdicts(s){
+  if(!s.weeklyVerdicts) s.weeklyVerdicts={};
+  var hasOldVerdicts=s.categories.some(function(c){ return "verdict" in c; });
+  if(hasOldVerdicts){
+    var thisWeek=iso(mondayOf(new Date()));
+    if(!s.weeklyVerdicts[thisWeek]) s.weeklyVerdicts[thisWeek]={};
+    s.categories.forEach(function(c){
+      if(c.verdict) s.weeklyVerdicts[thisWeek][c.id]=c.verdict;
+      delete c.verdict;
+    });
+  }
+  return s;
+}
+function migrateFromOldKey(){
+  if(TEST_MODE) return null; /* test mode never reads or touches real data */
+  var raw=readStore(OLD_KEY);
+  if(!raw) return null;
+  var old;
+  try{ old=JSON.parse(raw); }catch(e){ return null; }
+  if(!old||!old.categories) return null;
+  migrateVerdicts(old);
+  old.version=2;
+  writeStore(KEY,JSON.stringify(old)); /* OLD_KEY itself is never written to */
+  return old;
+}
 
 var state;
 try{ state=JSON.parse(readStore(KEY))||null; }catch(e){ state=null; }
+if(!state||!state.categories) state=migrateFromOldKey();
 if(!state||!state.categories) state=JSON.parse(JSON.stringify(DEFAULTS));
 if(!state.settings) state.settings={startHour:6,endHour:24};
 if(!state.entries) state.entries={};
+migrateVerdicts(state);
 
 /* ---------------- file linking (Chrome / Edge) ---------------- */
 var fileHandle=null, fileName="", writeTimer=null;
@@ -131,6 +168,7 @@ function applyState(json){
   state=JSON.parse(json);
   if(!state.settings) state.settings={startHour:6,endHour:24};
   if(!state.entries) state.entries={};
+  migrateVerdicts(state);
   writeStore(KEY,JSON.stringify(state));
   if(fileHandle){ clearTimeout(writeTimer); writeTimer=setTimeout(writeLinkedFile,600); }
   render();
@@ -219,6 +257,12 @@ function escapeHtml(s){ return String(s).replace(/[&<>"]/g,function(c){ return {
 function entriesFor(d){ return state.entries[d]||[]; }
 function catById(id){ if(!id) return null; for(var i=0;i<state.categories.length;i++) if(state.categories[i].id===id) return state.categories[i]; return null; }
 function catColor(id){ var c=catById(id); return c?c.color:"#9AA5A0"; }
+function getVerdict(catId,weekIso){ var wv=state.weeklyVerdicts[weekIso]; return (wv&&wv[catId])||null; }
+function setVerdict(catId,weekIso,v){
+  if(!state.weeklyVerdicts[weekIso]) state.weeklyVerdicts[weekIso]={};
+  if(v) state.weeklyVerdicts[weekIso][catId]=v;
+  else delete state.weeklyVerdicts[weekIso][catId];
+}
 
 function putEntry(dateStr,label,catId,start,end,replaceId){
   if(replaceId) removeEntry(replaceId);
@@ -357,14 +401,15 @@ function weekTotals(ws){
 function renderTotals(){
   var r=weekTotals(),max=r.none;
   state.categories.forEach(function(c){ max=Math.max(max,r.t[c.id]||0); });
+  var thisWeek=iso(weekStart);
 
   var rows=state.categories.slice().sort(function(a,b){ return (r.t[b.id]||0)-(r.t[a.id]||0); }).map(function(c){
-    var m=r.t[c.id]||0, pct=max?Math.round(m/max*100):0;
+    var m=r.t[c.id]||0, pct=max?Math.round(m/max*100):0, v=getVerdict(c.id,thisWeek);
     return '<div class="tot"><div class="tot-top"><span class="dot" style="background:'+c.color+'"></span>'+
       escapeHtml(c.name)+'<span class="h">'+dur(m)+'</span></div>'+
       '<div class="tot-bar"><i style="width:'+pct+"%;background:"+c.color+'"></i></div>'+
-      '<div class="verdict" data-cat="'+c.id+'">'+["keep","compress","cut"].map(function(v){
-        return '<button data-v="'+v+'" aria-pressed="'+(c.verdict===v)+'">'+v+"</button>";
+      '<div class="verdict" data-cat="'+c.id+'">'+["keep","compress","cut"].map(function(dv){
+        return '<button data-v="'+dv+'" aria-pressed="'+(v===dv)+'">'+dv+"</button>";
       }).join("")+"</div></div>";
   }).join("");
 
@@ -703,7 +748,8 @@ gridbody.addEventListener("touchend",function(ev){
 document.getElementById("totals").addEventListener("click",function(ev){
   var b=ev.target.closest(".verdict button"); if(!b) return;
   var c=catById(b.parentNode.dataset.cat); if(!c) return;
-  c.verdict=(c.verdict===b.dataset.v)?null:b.dataset.v;
+  var thisWeek=iso(weekStart);
+  setVerdict(c.id,thisWeek,getVerdict(c.id,thisWeek)===b.dataset.v?null:b.dataset.v);
   persist(); renderTotals();
 });
 
@@ -760,7 +806,7 @@ document.addEventListener("click",function(ev){
 });
 
 document.getElementById("addCat").addEventListener("click",function(){
-  state.categories.push({id:uid(),name:"",color:SWATCHES[state.categories.length%SWATCHES.length],verdict:null});
+  state.categories.push({id:uid(),name:"",color:SWATCHES[state.categories.length%SWATCHES.length]});
   persist(); renderCats(); renderTotals();
   var last=cats.querySelector(".cat:last-child .nm");
   if(last){ last.placeholder="Name it…"; last.focus(); }
@@ -786,6 +832,26 @@ document.getElementById("anchor").addEventListener("change",function(){ if(this.
 var REVIEW_WEEKS=4;
 var reviewAnchor=mondayOf(new Date()); /* Monday of the most recent (rightmost) week shown */
 function fmtShort(d){ return d.getDate()+" "+MONTHS[d.getMonth()]; }
+/* the verdict shown for a category across several weeks is whichever
+   verdict was set on the most weeks; a tie shows all tied verdicts
+   (e.g. "keep/cut"); weeks with no verdict set don't count as a vote;
+   empty if no visible week has one set at all */
+function majorityVerdict(catId,cols){
+  var counts={};
+  cols.forEach(function(ws){
+    var v=getVerdict(catId,iso(ws));
+    if(v) counts[v]=(counts[v]||0)+1;
+  });
+  var order=["keep","compress","cut"];
+  var present=order.filter(function(k){ return counts[k]; });
+  if(!present.length) return "";
+  var max=Math.max.apply(null,present.map(function(k){ return counts[k]; }));
+  return order.filter(function(k){ return counts[k]===max; }).join("/");
+}
+function reviewCell(minutes,logged){
+  var pct=logged?Math.round(minutes/logged*100):0;
+  return "<td><div class=\"cell-h\">"+dur(minutes)+"</div>"+(minutes>0?"<div class=\"cell-pct\">"+pct+"%</div>":"")+"</td>";
+}
 function renderReview(){
   var cols=[];
   for(var i=REVIEW_WEEKS-1;i>=0;i--) cols.push(addDays(reviewAnchor,-7*i));
@@ -799,13 +865,14 @@ function renderReview(){
   }).join("")+"<th>Verdict</th></tr>";
 
   var rows=state.categories.map(function(c){
-    var cells=totals.map(function(r){ return "<td>"+dur(r.t[c.id]||0)+"</td>"; }).join("");
+    var cells=totals.map(function(r){ return reviewCell(r.t[c.id]||0,r.logged); }).join("");
+    var vt=majorityVerdict(c.id,cols);
     return "<tr><td><span class=\"cat-cell\"><span class=\"dot\" style=\"background:"+c.color+"\"></span>"+escapeHtml(c.name)+"</span></td>"+
-      cells+"<td class=\"verdict-tag"+(c.verdict==="cut"?" cut":"")+"\">"+(c.verdict||"")+"</td></tr>";
+      cells+"<td class=\"verdict-tag"+(vt.indexOf("cut")>-1?" cut":"")+"\">"+vt+"</td></tr>";
   }).join("");
 
   if(totals.some(function(r){ return r.none>0; })){
-    rows+="<tr><td>No category</td>"+totals.map(function(r){ return "<td>"+dur(r.none)+"</td>"; }).join("")+"<td></td></tr>";
+    rows+="<tr><td>No category</td>"+totals.map(function(r){ return reviewCell(r.none,r.logged); }).join("")+"<td></td></tr>";
   }
   rows+="<tr class=\"unlogged\"><td>Unlogged</td>"+totals.map(function(r){
     return "<td>"+dur(Math.max(10080-r.logged,0))+"</td>";
@@ -906,6 +973,7 @@ document.getElementById("fileInput").addEventListener("change",function(){
       snapshot("open a copy");
       state=d;
       if(!state.settings) state.settings={startHour:6,endHour:24};
+      migrateVerdicts(state);
       persist(); render();
     }catch(e){ alert("That file isn't an Hours Ledger backup."); }
   };
@@ -975,6 +1043,9 @@ if(TEST_MODE){
     findEntry:findEntry,
     removeEntry:removeEntry,
     weekTotals:weekTotals,
+    getVerdict:getVerdict,
+    setVerdict:setVerdict,
+    migrateVerdicts:migrateVerdicts,
     snapshot:snapshot,
     undo:undo,
     redo:redo,

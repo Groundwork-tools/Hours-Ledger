@@ -60,6 +60,8 @@ button{cursor:pointer}
 .reviewtable td{font-family:var(--mono)}
 .reviewtable .cat-cell{display:flex;align-items:center;gap:7px;font-family:var(--display);font-size:13px}
 .reviewtable tr.unlogged td{color:var(--muted)}
+.reviewtable .cell-h{font-size:13px}
+.reviewtable .cell-pct{font-size:9px;color:var(--muted);letter-spacing:.04em;margin-top:1px}
 .reviewtable .verdict-tag{font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .reviewtable .verdict-tag.cut{color:var(--flag)}
 

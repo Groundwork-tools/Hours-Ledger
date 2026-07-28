@@ -46,13 +46,13 @@ document.getElementById("sandbox").addEventListener("load",function(){
   try{
     var hook=this.contentWindow.__HL_TEST__;
     if(!hook) throw "index.html?hltest=1 didn't expose __HL_TEST__ — is TEST_MODE wired up?";
-    report(runTests(hook));
+    report(runTests(hook,this.contentDocument));
   }catch(e){
     report(null,e);
   }
 });
 
-function runTests(H){
+function runTests(H,d){
   var results=[];
   function assert(name,cond){ results.push({name:name,pass:!!cond}); }
 
@@ -142,6 +142,58 @@ function runTests(H){
     twoBreaks.every(function(seg,i){ return i===0||seg.start>=twoBreaks[i-1].end; }));
   assert("both breaks are labeled Break", twoBreaks[1].label==="Break"&&twoBreaks[3].label==="Break");
   assert("last segment ends at the entry's end", twoBreaks[4].end===17*60);
+
+  /* 9. verdicts are per-week, not global - this was the reported bug */
+  var todayMonday=H.mondayOf(new Date());
+  var wkA=H.iso(todayMonday), wkB=H.iso(H.addDays(todayMonday,-7));
+  H.setVerdict(catId,wkA,"cut");
+  H.setVerdict(catId,wkB,"keep");
+  assert("setting one week's verdict doesn't change another week's",
+    H.getVerdict(catId,wkA)==="cut"&&H.getVerdict(catId,wkB)==="keep");
+  H.setVerdict(catId,wkA,null); H.setVerdict(catId,wkB,null);
+
+  /* 10. the review table's verdict column is a majority vote across the
+     visible weeks: ties show every tied verdict, no verdicts anywhere shows blank */
+  var weeks=[]; for(var wi=3;wi>=0;wi--) weeks.push(H.iso(H.addDays(todayMonday,-7*wi)));
+  weeks.forEach(function(w){ H.setVerdict(catId,w,null); });
+  H.setVerdict(catId,weeks[0],"cut");
+  H.setVerdict(catId,weeks[1],"cut");
+  H.setVerdict(catId,weeks[2],"cut");
+  H.setVerdict(catId,weeks[3],"keep");
+  d.getElementById("reviewToggle").click();
+  var tag1=d.querySelector("#reviewTable tbody tr .verdict-tag").textContent.trim();
+  assert("3 cut + 1 keep shows the majority 'cut'", tag1==="cut");
+  d.getElementById("reviewClose").click();
+
+  H.setVerdict(catId,weeks[2],"keep");
+  d.getElementById("reviewToggle").click();
+  var tag2=d.querySelector("#reviewTable tbody tr .verdict-tag").textContent.trim();
+  assert("a 2-2 tie shows both verdicts joined", tag2==="keep/cut");
+  d.getElementById("reviewClose").click();
+
+  weeks.forEach(function(w){ H.setVerdict(catId,w,null); });
+  d.getElementById("reviewToggle").click();
+  var tag3=d.querySelector("#reviewTable tbody tr .verdict-tag").textContent.trim();
+  assert("no verdict set on any visible week shows blank", tag3==="");
+  d.getElementById("reviewClose").click();
+
+  /* 11. migrateVerdicts converts an old category.verdict-shaped state, carrying
+     a set verdict forward as this week's, and is a no-op run again afterward */
+  var oldShaped={
+    categories:[{id:"catX",name:"Old",color:"#000000",verdict:"cut"},
+                {id:"catY",name:"Old2",color:"#111111",verdict:null}],
+    entries:{}, settings:{startHour:6,endHour:24}
+  };
+  H.migrateVerdicts(oldShaped);
+  var thisWeekIso=H.iso(H.mondayOf(new Date()));
+  assert("migration creates a weeklyVerdicts entry for this week", !!oldShaped.weeklyVerdicts[thisWeekIso]);
+  assert("migration carries a set verdict forward as this week's", oldShaped.weeklyVerdicts[thisWeekIso].catX==="cut");
+  assert("migration doesn't create an entry for a null verdict", !("catY" in oldShaped.weeklyVerdicts[thisWeekIso]));
+  assert("migration removes the old per-category verdict field",
+    !("verdict" in oldShaped.categories[0])&&!("verdict" in oldShaped.categories[1]));
+  var beforeRerun=JSON.stringify(oldShaped.weeklyVerdicts);
+  H.migrateVerdicts(oldShaped);
+  assert("migrateVerdicts is a no-op on already-migrated data", JSON.stringify(oldShaped.weeklyVerdicts)===beforeRerun);
 
   return results;
 }

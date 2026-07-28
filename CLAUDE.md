@@ -13,11 +13,13 @@ Teaching matters here as much as shipping.
 
 ## Hard rules — do not break these
 
-1. **Never change the localStorage key `hours-ledger-v1` or the shape of the saved
+1. **Never change the localStorage key `hours-ledger-v2` or the shape of the saved
    state without writing a migration first.** Real logged weeks live in that key.
    Silently orphaning them is the worst thing this codebase can do to its user.
-   If the schema must change, bump to `-v2`, read `-v1`, convert, and keep the old
-   key untouched until the new one is verified.
+   If the schema must change, bump to the next `-vN`, read the old key, convert,
+   and keep it untouched until the new one is verified. (`hours-ledger-v1` is the
+   retired predecessor, kept only as the source a one-time migration reads from —
+   see `migrateFromOldKey()`/`migrateVerdicts()` in `app.js`.)
 2. **No runtime dependencies.** No npm packages shipped to the browser, no
    frameworks, no CDN scripts. Google Fonts is the only external request and it
    must degrade cleanly when offline.
@@ -55,9 +57,12 @@ two, and caches for up to ten. There is nothing else to run.
 {
   version: 2,
   settings: { startHour: 6, endHour: 24 },
-  categories: [ { id, name, color, verdict } ],   // verdict: 'keep'|'compress'|'cut'|null
+  categories: [ { id, name, color } ],
   entries: {
     "2026-07-27": [ { id, label, cat, start, end } ]   // start/end = minutes from midnight
+  },
+  weeklyVerdicts: {
+    "2026-07-27": { categoryId: 'keep'|'compress'|'cut' }   // keyed by that week's Monday
   }
 }
 ```
@@ -65,17 +70,24 @@ two, and caches for up to ten. There is nothing else to run.
 - Entries are keyed by real date, so every week ever logged is retained.
 - `cat` may be `null` — an uncategorised entry is deliberate, not an error state.
 - Times are minutes since midnight, `0`–`1440`. Never store strings.
+- A verdict is per category *per week* (keyed by that week's Monday), not global —
+  cutting a category one week doesn't cut it the next. The weekly review view
+  shows whichever verdict is set on the most weeks, ties shown as `"keep/cut"`
+  etc., blank if none of the visible weeks have one set. A category with no key
+  under a given week just means no verdict was chosen that week.
 - Undo history lives separately under `hours-ledger-undo-v1`, last 12 states.
 
 ## How the code is organised
 
-Currently one file, `index.html`, in rough order: styles, markup, then a single
+Three files: `index.html` (markup only), `styles.css`, and `app.js` — a single
 IIFE containing storage → dates → time helpers → entry CRUD → render → colour →
-modal → grid interaction → rail → nav/tools.
+modal → grid interaction → rail → nav/tools → weekly review.
 
 It was one file because it originally had to survive being downloaded. It is
-hosted now, so that constraint is gone. **First planned task is splitting it into
-`index.html`, `styles.css` and `app.js`.**
+hosted now, so that constraint is gone, and it has already been split. `selftest.html`
+(never linked from the real app) exercises the app's real logic in isolation via
+a `TEST_MODE` switch — open it by hand before deploying anything that touches
+`app.js`.
 
 ## Design constraints
 
@@ -98,17 +110,17 @@ dashboard styling.
 
 ## Backlog, roughly in order
 
-1. **Split into three files.** No behaviour change. Verify everything still works
-   before pushing. Good first task.
+1. ~~Split into three files.~~ Done.
 2. **Offline support.** A service worker so it opens on the train with no signal.
-   This is the main reason the repo exists.
-3. **Weekly review view.** Last 4–8 weeks of category totals side by side, so
-   trends show. Currently you can only see one week at a time.
+   Deliberately deprioritized for now (not a workflow gap for the current user) —
+   still worth doing eventually, not a dead item.
+3. ~~Weekly review view.~~ Done — last 4 weeks side by side, paged by full 4-week
+   windows, majority verdict per category, % of that week's logged time per cell.
 4. **Ideal-week layer.** A second grid where chosen blocks are placed first and
    everything else fits around them. This was in the original design and never got
    built. Arguably the whole point.
-5. **Touch drag on the grid.** Mobile can only tap a single slot; dragging a range
-   works on desktop only.
+5. ~~Touch drag on the grid.~~ Done, including auto-scroll near the screen edge
+   while dragging.
 6. **Duplicate a week** as a starting point for the next one.
 
 Do not add features that are not on this list without discussing them first.
