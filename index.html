@@ -30,10 +30,11 @@
       <input type="date" id="anchor" aria-label="Jump to week">
       <button class="stepper" id="next" aria-label="Next week">&rarr;</button>
       <button class="ghost" id="thisweek">This week</button>
+      <button class="ghost" id="reviewToggle">Review</button>
     </div>
   </header>
 
-  <div class="gauge">
+  <div class="gauge" id="gauge">
     <div class="gauge-head">
       <div class="gauge-title">The week, all 168 hours</div>
       <div class="gauge-count" id="gaugeCount"></div>
@@ -42,7 +43,23 @@
     <div class="ticks" id="ticks"></div>
   </div>
 
-  <div class="cols">
+  <section class="review" id="reviewSection" hidden>
+    <div class="panel-label">
+      <span>Weekly review</span>
+      <span style="display:flex;gap:8px;align-items:center">
+        <button class="stepper" id="reviewPrev" aria-label="Earlier weeks">&larr;</button>
+        <span class="reviewrange" id="reviewRange"></span>
+        <button class="stepper" id="reviewNext" aria-label="Later weeks">&rarr;</button>
+        <button class="ghost" id="reviewClose">Back to log</button>
+      </span>
+    </div>
+    <div class="reviewscroll">
+      <table class="reviewtable" id="reviewTable"></table>
+    </div>
+    <p class="emptyhint">Category totals for each week, so trends show instead of one week in isolation. Verdicts are set from the log view and just carried over here.</p>
+  </section>
+
+  <div class="cols" id="cols">
     <main>
       <div class="panel-label">
         <span>The log</span>

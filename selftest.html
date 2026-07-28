@@ -80,6 +80,15 @@ function runTests(H){
   assert("weekTotals sums same-category minutes across the week", wt.t[catId]===240);
   assert("weekTotals.logged matches the sum", wt.logged===240);
 
+  /* 2b. weekTotals(ws) reads a different, explicit week without needing
+     setWeekStart first — this is what the multi-week review view relies on */
+  var otherWeek=H.addDays(weekStart,7);
+  H.putEntry(H.iso(otherWeek),"Work",catId,9*60,10*60+30,null);
+  var currentStillSame=H.weekTotals().logged===240;
+  var otherWeekTotals=H.weekTotals(otherWeek);
+  assert("weekTotals(ws) reads the requested week, not the global one", otherWeekTotals.logged===90);
+  assert("weekTotals() with no arg is unaffected by passing an explicit week elsewhere", currentStillSame);
+
   /* 3. undo restores the exact prior state */
   var before=JSON.stringify(H.getState());
   H.snapshot("test snapshot");

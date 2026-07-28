@@ -342,9 +342,10 @@ function recolorEntries(){
   });
 }
 
-function weekTotals(){
+function weekTotals(ws){
+  var days=ws?(function(){ var o=[]; for(var i=0;i<7;i++) o.push(addDays(ws,i)); return o; })():weekDates();
   var t={},logged=0,none=0;
-  weekDates().forEach(function(d){
+  days.forEach(function(d){
     entriesFor(iso(d)).forEach(function(e){
       var m=e.end-e.start; logged+=m;
       if(catById(e.cat)) t[e.cat]=(t[e.cat]||0)+m; else none+=m;
@@ -780,6 +781,54 @@ document.getElementById("prev").addEventListener("click",function(){ goto(addDay
 document.getElementById("next").addEventListener("click",function(){ goto(addDays(weekStart,7)); });
 document.getElementById("thisweek").addEventListener("click",function(){ goto(mondayOf(new Date())); });
 document.getElementById("anchor").addEventListener("change",function(){ if(this.value) goto(mondayOf(parseIso(this.value))); });
+
+/* ---------------- weekly review ---------------- */
+var REVIEW_WEEKS=4;
+var reviewAnchor=mondayOf(new Date()); /* Monday of the most recent (rightmost) week shown */
+function fmtShort(d){ return d.getDate()+" "+MONTHS[d.getMonth()]; }
+function renderReview(){
+  var cols=[];
+  for(var i=REVIEW_WEEKS-1;i>=0;i--) cols.push(addDays(reviewAnchor,-7*i));
+  var totals=cols.map(function(ws){ return weekTotals(ws); });
+
+  document.getElementById("reviewRange").textContent=
+    fmtShort(cols[0])+" – "+fmtShort(addDays(cols[cols.length-1],6));
+
+  var head="<tr><th>Category</th>"+cols.map(function(ws){ return "<th>"+fmtShort(ws)+"</th>"; }).join("")+"<th>Verdict</th></tr>";
+
+  var rows=state.categories.map(function(c){
+    var cells=totals.map(function(r){ return "<td>"+dur(r.t[c.id]||0)+"</td>"; }).join("");
+    return "<tr><td><span class=\"cat-cell\"><span class=\"dot\" style=\"background:"+c.color+"\"></span>"+escapeHtml(c.name)+"</span></td>"+
+      cells+"<td class=\"verdict-tag"+(c.verdict==="cut"?" cut":"")+"\">"+(c.verdict||"")+"</td></tr>";
+  }).join("");
+
+  if(totals.some(function(r){ return r.none>0; })){
+    rows+="<tr><td>No category</td>"+totals.map(function(r){ return "<td>"+dur(r.none)+"</td>"; }).join("")+"<td></td></tr>";
+  }
+  rows+="<tr class=\"unlogged\"><td>Unlogged</td>"+totals.map(function(r){
+    return "<td>"+dur(Math.max(10080-r.logged,0))+"</td>";
+  }).join("")+"<td></td></tr>";
+
+  document.getElementById("reviewTable").innerHTML="<thead>"+head+"</thead><tbody>"+rows+"</tbody>";
+}
+document.getElementById("reviewToggle").addEventListener("click",function(){
+  document.getElementById("gauge").hidden=true;
+  document.getElementById("cols").hidden=true;
+  document.getElementById("reviewSection").hidden=false;
+  reviewAnchor=mondayOf(new Date());
+  renderReview();
+});
+document.getElementById("reviewClose").addEventListener("click",function(){
+  document.getElementById("reviewSection").hidden=true;
+  document.getElementById("gauge").hidden=false;
+  document.getElementById("cols").hidden=false;
+});
+document.getElementById("reviewPrev").addEventListener("click",function(){
+  reviewAnchor=addDays(reviewAnchor,-7*REVIEW_WEEKS); renderReview();
+});
+document.getElementById("reviewNext").addEventListener("click",function(){
+  reviewAnchor=addDays(reviewAnchor,7*REVIEW_WEEKS); renderReview();
+});
 /* which day "Add entry" should default to: the focused day in day view,
    today if the displayed week is the current one, else Monday */
 function defaultAddDay(){

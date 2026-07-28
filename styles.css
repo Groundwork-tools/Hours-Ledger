@@ -50,6 +50,19 @@ button{cursor:pointer}
 @media(max-width:1000px){.cols{grid-template-columns:1fr}}
 .panel-label{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--ink);padding-bottom:6px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;gap:10px}
 
+.review{margin-top:26px}
+.reviewrange{font-family:var(--mono);font-size:11px;color:var(--muted);min-width:150px;text-align:center}
+.reviewscroll{overflow-x:auto}
+.reviewtable{border-collapse:collapse;width:100%;min-width:560px;border:1px solid var(--ink)}
+.reviewtable th,.reviewtable td{padding:8px 12px;border-bottom:1px solid var(--rule-soft);text-align:right;font-size:13px}
+.reviewtable thead th{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--ink);text-align:right}
+.reviewtable th:first-child,.reviewtable td:first-child{text-align:left}
+.reviewtable td{font-family:var(--mono)}
+.reviewtable .cat-cell{display:flex;align-items:center;gap:7px;font-family:var(--display);font-size:13px}
+.reviewtable tr.unlogged td{color:var(--muted)}
+.reviewtable .verdict-tag{font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.reviewtable .verdict-tag.cut{color:var(--flag)}
+
 .gridscroll{overflow-x:auto}
 .grid{min-width:720px;border:1px solid var(--ink);background:var(--paper)}
 .dayhead{display:grid;grid-template-columns:56px repeat(7,1fr);border-bottom:1px solid var(--ink)}
