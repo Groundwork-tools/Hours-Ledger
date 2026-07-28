@@ -231,6 +231,50 @@ function runTests(H,d){
   H.putEntry(H.iso(H.addDays(weekStart,1)),"B",null,9*60,10*60,null);
   assert("same time-of-day on different days isn't mistaken for an overlap", H.weekTotals().logged===120);
 
+  /* 16. an uncategorised entry overlapping a categorised one shows up as
+     "No category"'s own overlap too, not just the category's */
+  H.getState().entries={};
+  H.putEntry(H.iso(weekStart),"Work",catId,9*60,12*60,null);
+  H.putEntry(H.iso(weekStart),"???",null,10*60,11*60,null);
+  var noneOverlap=H.weekTotals();
+  assert("No category shows overlap when it shares time with a category", noneOverlap.overlap.none===60);
+  H.getState().entries={};
+  H.putEntry(H.iso(weekStart),"???",null,14*60,15*60,null);
+  assert("No category has no overlap entry when nothing else overlaps it", !H.weekTotals().overlap.none);
+
+  /* 17-19: review table rendering - percentage denominator, the Multi
+     tasking row, and that Unlogged/Multi tasking stay aligned to their
+     header columns (regression test for the .unlogged class collision
+     that broke tr.unlogged's table-row layout) */
+  H.getState().entries={};
+  H.putEntry(H.iso(todayMonday),"Work",catId,9*60,17*60,null);   // 480min, fills the whole logged span
+  H.putEntry(H.iso(todayMonday),"School",catId2,9*60,17*60,null); // exact same span, fully overlapping
+  d.getElementById("reviewToggle").click();
+  var bodyRows=d.querySelectorAll("#reviewTable tbody tr");
+  var workPct=bodyRows[0].querySelector(".cell-pct").textContent.trim();
+  var schoolPct=bodyRows[1].querySelector(".cell-pct").textContent.trim();
+  /* rawSum (480+480=960) exceeds logged (480), so rawSum becomes the
+     percentage base - each shows its honest 480/960 share (50%), and
+     critically neither can ever read over 100% */
+  assert("two categories fully double-booking the same span split 50/50, never over 100%",
+    workPct==="50%"&&schoolPct==="50%");
+
+  var multitaskRow=[].slice.call(bodyRows).filter(function(tr){ return tr.textContent.indexOf("Multi tasking")===0; })[0];
+  var lastWeekCell=multitaskRow.children[4]; // this week is the 4th (rightmost) week column
+  assert("Multi tasking shows the full overlapping span for this week", lastWeekCell.textContent.trim()==="8h");
+
+  var headerCells=d.querySelectorAll("#reviewTable thead tr th");
+  var unloggedRow=[].slice.call(bodyRows).filter(function(tr){ return tr.textContent.indexOf("Unlogged")===0; })[0];
+  var alignedUnlogged=true, alignedMultitask=true;
+  for(var ci=0;ci<headerCells.length;ci++){
+    var hb=headerCells[ci].getBoundingClientRect();
+    if(Math.abs(unloggedRow.children[ci].getBoundingClientRect().left-hb.left)>1) alignedUnlogged=false;
+    if(Math.abs(multitaskRow.children[ci].getBoundingClientRect().left-hb.left)>1) alignedMultitask=false;
+  }
+  assert("Unlogged row's cells align with the header columns", alignedUnlogged);
+  assert("Multi tasking row's cells align with the header columns", alignedMultitask);
+  d.getElementById("reviewClose").click();
+
   return results;
 }
 })();

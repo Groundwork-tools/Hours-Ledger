@@ -446,6 +446,11 @@ function weekTotals(ws){
     });
     overlap[catId]=intersectionMinutes(byCat[catId],others);
   });
+  if(noneRanges.length){
+    var allCatRanges=[];
+    Object.keys(byCat).forEach(function(id){ allCatRanges=allCatRanges.concat(byCat[id]); });
+    overlap.none=intersectionMinutes(noneRanges,allCatRanges);
+  }
   return {t:t,logged:unionMinutes(ranges),none:none,overlap:overlap};
 }
 
@@ -466,8 +471,10 @@ function renderTotals(){
   }).join("");
 
   if(r.none>0){
+    var noneOv=r.overlap.none||0;
     rows+='<div class="tot"><div class="tot-top"><span class="dot" style="background:var(--none)"></span>No category'+
       '<span class="h">'+dur(r.none)+'</span></div>'+
+      (noneOv>0?'<div class="tot-overlap">overlaps '+dur(noneOv)+' with another entry</div>':'')+
       '<div class="tot-bar"><i style="width:'+(max?Math.round(r.none/max*100):0)+'%;background:var(--none)"></i></div></div>';
   }
 
@@ -900,14 +907,24 @@ function majorityVerdict(catId,cols){
   var max=Math.max.apply(null,present.map(function(k){ return counts[k]; }));
   return order.filter(function(k){ return counts[k]===max; }).join("/");
 }
-function reviewCell(minutes,logged){
-  var pct=logged?Math.round(minutes/logged*100):0;
+function reviewCell(minutes,denom){
+  var pct=denom?Math.round(minutes/denom*100):0;
   return "<td><div class=\"cell-h\">"+dur(minutes)+"</div>"+(minutes>0?"<div class=\"cell-pct\">"+pct+"%</div>":"")+"</td>";
 }
 function renderReview(){
   var cols=[];
   for(var i=REVIEW_WEEKS-1;i>=0;i--) cols.push(addDays(reviewAnchor,-7*i));
   var totals=cols.map(function(ws){ return weekTotals(ws); });
+  /* categories can overlap each other, so their raw hours can add up to
+     more than the week's actual logged time - percentages use whichever
+     is bigger as the base, so an overlap-heavy week still reads sensibly
+     instead of quietly exceeding 100% */
+  totals.forEach(function(r){
+    var rawSum=r.none;
+    Object.keys(r.t).forEach(function(k){ rawSum+=r.t[k]; });
+    r.rawSum=rawSum;
+    r.denom=Math.max(r.logged,rawSum);
+  });
 
   document.getElementById("reviewRange").textContent=
     fmtShort(cols[0])+" – "+fmtShort(addDays(cols[cols.length-1],6));
@@ -917,17 +934,20 @@ function renderReview(){
   }).join("")+"<th>Verdict</th></tr>";
 
   var rows=state.categories.map(function(c){
-    var cells=totals.map(function(r){ return reviewCell(r.t[c.id]||0,r.logged); }).join("");
+    var cells=totals.map(function(r){ return reviewCell(r.t[c.id]||0,r.denom); }).join("");
     var vt=majorityVerdict(c.id,cols);
     return "<tr><td><span class=\"cat-cell\"><span class=\"dot\" style=\"background:"+c.color+"\"></span>"+escapeHtml(c.name)+"</span></td>"+
       cells+"<td class=\"verdict-tag"+(vt.indexOf("cut")>-1?" cut":"")+"\">"+vt+"</td></tr>";
   }).join("");
 
   if(totals.some(function(r){ return r.none>0; })){
-    rows+="<tr><td>No category</td>"+totals.map(function(r){ return reviewCell(r.none,r.logged); }).join("")+"<td></td></tr>";
+    rows+="<tr><td>No category</td>"+totals.map(function(r){ return reviewCell(r.none,r.denom); }).join("")+"<td></td></tr>";
   }
-  rows+="<tr class=\"unlogged\"><td>Unlogged</td>"+totals.map(function(r){
+  rows+="<tr class=\"review-unlogged\"><td>Unlogged</td>"+totals.map(function(r){
     return "<td>"+dur(Math.max(10080-r.logged,0))+"</td>";
+  }).join("")+"<td></td></tr>";
+  rows+="<tr class=\"review-multitask\"><td>Multi tasking</td>"+totals.map(function(r){
+    return "<td>"+dur(r.rawSum-r.logged)+"</td>";
   }).join("")+"<td></td></tr>";
 
   document.getElementById("reviewTable").innerHTML="<thead>"+head+"</thead><tbody>"+rows+"</tbody>";
@@ -1080,6 +1100,11 @@ document.getElementById("howto").addEventListener("click",openIntro);
 introEl.addEventListener("click",function(ev){ if(ev.target===introEl) closeIntro(); });
 document.addEventListener("keydown",function(ev){ if(ev.key==="Escape"&&introEl.classList.contains("on")) closeIntro(); });
 if(!readStore(SEEN)) openIntro();
+
+/* file sync needs the File System Access API, which no mobile browser
+   (not even mobile Chrome) implements - hide the dead-end button rather
+   than let someone tap it just to be told it can't work here */
+if(!window.showSaveFilePicker) document.getElementById("linkFile").hidden=true;
 
 render();
 setStatus("Saved "+clockNow());
