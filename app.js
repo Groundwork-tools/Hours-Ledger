@@ -635,7 +635,23 @@ gridbody.addEventListener("click",function(ev){
    scrolls the page like anywhere else, and holding still for ~350ms before
    moving is what commits to a drag-select — only then do we take over the
    gesture and stop the page scrolling under it. */
-var touchStart=null, touchDragTimer=null;
+var touchStart=null, touchDragTimer=null, touchXY=null, autoScrollDir=0, autoScrollRAF=null;
+var EDGE_ZONE=60, EDGE_SPEED=14;
+function extendDragTo(x,y){
+  var el=document.elementFromPoint(x,y);
+  var slot=el&&el.closest&&el.closest(".slot");
+  if(slot&&+slot.dataset.day===dragging.day){ dragging.to=+slot.dataset.min; paint(); }
+}
+/* while dragging, holding near the top/bottom edge of the screen scrolls the
+   page so a range can extend past what's currently visible — touchmove only
+   fires when the finger actually moves, so this runs on its own fixed-rate
+   timer to keep scrolling (and keep extending the selection) while the
+   finger sits still at the edge */
+function autoScrollTick(){
+  if(!dragging||!autoScrollDir){ clearInterval(autoScrollRAF); autoScrollRAF=null; return; }
+  window.scrollBy(0,autoScrollDir*EDGE_SPEED);
+  if(touchXY) extendDragTo(touchXY.x,touchXY.y);
+}
 gridbody.addEventListener("touchstart",function(ev){
   var slot=ev.target.closest(".slot"); if(!slot) return;
   var t=ev.touches[0];
@@ -656,12 +672,15 @@ gridbody.addEventListener("touchmove",function(ev){
     return;
   }
   ev.preventDefault(); /* a drag has committed — take over from here */
-  var el=document.elementFromPoint(t.clientX,t.clientY);
-  var slot=el&&el.closest&&el.closest(".slot");
-  if(slot&&+slot.dataset.day===dragging.day){ dragging.to=+slot.dataset.min; paint(); }
+  touchXY={x:t.clientX,y:t.clientY};
+  autoScrollDir=t.clientY<EDGE_ZONE?-1:(t.clientY>window.innerHeight-EDGE_ZONE?1:0);
+  if(autoScrollDir&&!autoScrollRAF) autoScrollRAF=setInterval(autoScrollTick,16);
+  else if(!autoScrollDir&&autoScrollRAF){ clearInterval(autoScrollRAF); autoScrollRAF=null; }
+  extendDragTo(t.clientX,t.clientY);
 },{passive:false});
 gridbody.addEventListener("touchend",function(ev){
   clearTimeout(touchDragTimer);
+  autoScrollDir=0; touchXY=null; clearInterval(autoScrollRAF); autoScrollRAF=null;
   if(dragging){
     var a=Math.min(dragging.from,dragging.to), b=Math.max(dragging.from,dragging.to)+30, d=dragging.day;
     dragging=null; clearPaint(); touchStart=null;
