@@ -953,6 +953,7 @@ function renderReview(){
   document.getElementById("reviewTable").innerHTML="<thead>"+head+"</thead><tbody>"+rows+"</tbody>";
 }
 document.getElementById("reviewToggle").addEventListener("click",function(){
+  document.getElementById("weeknav").hidden=true;
   document.getElementById("gauge").hidden=true;
   document.getElementById("cols").hidden=true;
   document.getElementById("reviewSection").hidden=false;
@@ -961,6 +962,7 @@ document.getElementById("reviewToggle").addEventListener("click",function(){
 });
 document.getElementById("reviewClose").addEventListener("click",function(){
   document.getElementById("reviewSection").hidden=true;
+  document.getElementById("weeknav").hidden=false;
   document.getElementById("gauge").hidden=false;
   document.getElementById("cols").hidden=false;
 });
