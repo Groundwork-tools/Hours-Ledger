@@ -124,6 +124,25 @@ dashboard styling.
 6. **Duplicate a week** as a starting point for the next one.
 7. **Expand the color palette.** More options beyond the current 8 validated
    presets/hue-slider range. Low priority — a someday item, not a workflow gap.
+8. **Recruit test people.** Share the link with a handful of real users, get
+   structured feedback after a week or two of actual use. Do this *before*
+   committing to any of the bigger items below — it should decide whether
+   they're worth building at all, not the other way around.
+9. **Account system + cross-device sync.** A genuine architectural pivot, not
+   a feature — needs a backend, auth, and a database, and turns "no accounts,
+   nothing leaves your browser" into "true unless you opt in." This directly
+   conflicts with hard rules 2 and 4 above; if it moves forward, revisit those
+   rules explicitly rather than quietly break them, and keep local-only mode
+   working for anyone who doesn't want an account. Sequence after item 8.
+10. **Native app store listing.** Probably a wrapped version of the existing
+    web app (e.g. Capacitor) rather than a rewrite — only worth it if push
+    notifications or app-store discoverability specifically matter. Depends on
+    item 9: a phone app and a laptop both need the same sync layer underneath.
+11. **Energy-level tracking.** An hourly energy check-in, separate from the
+    time log, to spot patterns between energy and task timing. Real risk of
+    scope drift — this is a different axis of data (how you felt, not what you
+    did). If built, keep it a clearly optional layer beside the grid, not
+    merged into it, or treat it as its own separate experiment entirely.
 
 Do not add features that are not on this list without discussing them first.
 Feature creep is the known failure mode of this project.
