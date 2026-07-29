@@ -4,7 +4,8 @@
   --ink:#16211B;
   --rule:#C2CDC1;
   --rule-soft:#DDE4DB;
-  --muted:#6C7A70;
+  --muted:#616D64; /* darkened from #6C7A70 - that was 4.31:1 on paper, just under
+    WCAG AA's 4.5:1 for normal text; this clears it at 5.18:1 */
   --flag:#B23A2F;
   --none:#9AA5A0;
   --row:26px; /* height of one half-hour slot — .gutter .hr and .day .slot
