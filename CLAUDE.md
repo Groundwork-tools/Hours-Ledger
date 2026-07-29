@@ -122,6 +122,8 @@ dashboard styling.
 5. ~~Touch drag on the grid.~~ Done, including auto-scroll near the screen edge
    while dragging.
 6. **Duplicate a week** as a starting point for the next one.
+7. **Expand the color palette.** More options beyond the current 8 validated
+   presets/hue-slider range. Low priority — a someday item, not a workflow gap.
 
 Do not add features that are not on this list without discussing them first.
 Feature creep is the known failure mode of this project.
