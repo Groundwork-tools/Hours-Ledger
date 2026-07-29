@@ -31,20 +31,25 @@ var KEY=TEST_MODE?"hours-ledger-selftest-v2":"hours-ledger-v2";
    real key-and-shape migration hard rule 1 asks for. v1 is read once here
    to carry existing verdicts forward as "this week"'s, then left untouched. */
 var OLD_KEY="hours-ledger-v1";
-var SWATCHES=["#2B4C7E","#2F6B4F","#A8762A","#3E7F87","#6E4B7A","#B23A2F","#5A6570","#7A7B32"];
+/* validated categorical palette (blue/gold/slate/olive/teal/mauve/green/violet) -
+   passes lightness band, chroma floor, CVD + normal-vision adjacent separation,
+   and contrast against the paper surface (see dataviz skill's six checks).
+   Deliberately stays clear of red's hue range - that's reserved for the flag
+   color (destructive actions and Drift only) and mustn't be reused here. */
+var SWATCHES=["#2B52A1","#B18725","#1D669A","#758E29","#0E9DAA","#A63A9D","#27864F","#6C3BB0"];
 function uid(){ return Math.random().toString(36).slice(2,9); }
 
 var DEFAULTS={
   version:2,
   settings:{startHour:6,endHour:24},
   categories:[
-    {id:uid(),name:"Studies",color:"#2B4C7E"},
-    {id:uid(),name:"Work / income",color:"#2F6B4F"},
-    {id:uid(),name:"Side projects",color:"#A8762A"},
-    {id:uid(),name:"Training",color:"#3E7F87"},
-    {id:uid(),name:"People",color:"#6E4B7A"},
-    {id:uid(),name:"Admin & errands",color:"#5A6570"},
-    {id:uid(),name:"Sleep",color:"#7A7B32"},
+    {id:uid(),name:"Studies",color:"#2B52A1"},
+    {id:uid(),name:"Work / income",color:"#27864F"},
+    {id:uid(),name:"Side projects",color:"#B18725"},
+    {id:uid(),name:"Training",color:"#0E9DAA"},
+    {id:uid(),name:"People",color:"#A63A9D"},
+    {id:uid(),name:"Admin & errands",color:"#1D669A"},
+    {id:uid(),name:"Sleep",color:"#6C3BB0"},
     {id:uid(),name:"Drift",color:"#B23A2F"}
   ],
   entries:{},
@@ -146,10 +151,9 @@ function refreshHint(){
   var el=document.getElementById("dataHint");
   if(fileHandle){
     el.innerHTML="Every change is written to <b>"+escapeHtml(fileName)+"</b> automatically. One file, no versions. Nothing leaves your machine.";
-  }else if(storageOK&&window.showSaveFilePicker){
-    el.innerHTML="Every change saves to this browser automatically &mdash; there is nothing to press. <b>Keep a file in sync</b> pins it to one file on your disk that overwrites itself, so you never end up with twelve copies.";
   }else if(storageOK){
-    el.innerHTML="Every change saves to this browser automatically &mdash; there is nothing to press. <b>Keep a file in sync</b> needs desktop Chrome or Edge, so it's not available on a phone or tablet &mdash; use <b>Export a copy</b> if you want a backup file.";
+    el.innerHTML="Every change saves to this browser automatically &mdash; there is nothing to press."+
+      (window.showSaveFilePicker?" <b>Keep a file in sync</b> pins it to one file on your disk that overwrites itself, so you never end up with twelve copies.":"");
   }else{
     el.innerHTML="This browser won't let the page save on its own. Use <b>Export a copy</b> before you close the tab.";
   }
@@ -510,7 +514,9 @@ function render(){ renderGrid(); renderTotals(); renderCats(); refreshHint(); }
 
 /* ---------------- colour ---------------- */
 function hslHex(h){
-  var s=0.40,l=0.36;
+  /* bumped from 0.40/0.36 - the old values fell below OKLCH's chroma floor
+     across most of the hue wheel, which is what read as "very pale" */
+  var s=0.70,l=0.40;
   var c=(1-Math.abs(2*l-1))*s, x=c*(1-Math.abs((h/60)%2-1)), m=l-c/2, r,g,b;
   if(h<60){r=c;g=x;b=0;} else if(h<120){r=x;g=c;b=0;} else if(h<180){r=0;g=c;b=x;}
   else if(h<240){r=0;g=x;b=c;} else if(h<300){r=x;g=0;b=c;} else {r=c;g=0;b=x;}
