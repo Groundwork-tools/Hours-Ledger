@@ -35,9 +35,15 @@
       <input type="date" id="anchor" aria-label="Jump to week">
       <button class="stepper" id="next" aria-label="Next week">&rarr;</button>
       <button class="ghost" id="thisweek">This week</button>
+      <button class="ghost" id="closeoutBtn">Close out last week</button>
       <button class="ghost" id="reviewToggle">Review</button>
     </div>
   </header>
+
+  <div class="closeout-banner" id="closeoutBanner" hidden>
+    <span>Last week's ready to close out.</span>
+    <button class="ghost" id="closeoutBannerBtn">Close out last week</button>
+  </div>
 
   <div class="gauge" id="gauge">
     <div class="gauge-head">
@@ -180,6 +186,25 @@
       <button class="solid" id="fSave">Save entry</button>
       <button class="ghost" id="fCancel">Cancel</button>
       <button class="linkbtn" id="fDelete" hidden>Delete</button>
+    </div>
+  </div>
+</div>
+
+<div class="scrim" id="closeoutScrim">
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="closeoutTitle">
+    <h2 id="closeoutTitle">Close out <span id="closeoutRange"></span></h2>
+    <div id="closeoutTotals"></div>
+    <div class="field">
+      <label>Unlogged time</label>
+      <div class="closeout-gaps" id="closeoutGaps"></div>
+    </div>
+    <div class="field">
+      <label for="closeoutNote">Anything stand out? <span style="text-transform:none;letter-spacing:0">(optional)</span></label>
+      <input type="text" id="closeoutNote" placeholder="One line is plenty" autocomplete="off">
+    </div>
+    <div class="sheet-actions">
+      <button class="solid" id="closeoutSave">Close out this week</button>
+      <button class="ghost" id="closeoutCancel">Cancel</button>
     </div>
   </div>
 </div>

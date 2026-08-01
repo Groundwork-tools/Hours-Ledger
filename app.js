@@ -53,7 +53,8 @@ var DEFAULTS={
     {id:uid(),name:"Drift",color:"#B23A2F"}
   ],
   entries:{},
-  weeklyVerdicts:{}
+  weeklyVerdicts:{},
+  weekCloseouts:{}
 };
 
 /* converts an old (or freshly-imported) state that stores verdict on each
@@ -91,6 +92,7 @@ if(!state||!state.categories) state=migrateFromOldKey();
 if(!state||!state.categories) state=JSON.parse(JSON.stringify(DEFAULTS));
 if(!state.settings) state.settings={startHour:6,endHour:24};
 if(!state.entries) state.entries={};
+if(!state.weekCloseouts) state.weekCloseouts={};
 migrateVerdicts(state);
 
 /* ---------------- file linking (Chrome / Edge) ---------------- */
@@ -174,6 +176,7 @@ function applyState(json){
   state=JSON.parse(json);
   if(!state.settings) state.settings={startHour:6,endHour:24};
   if(!state.entries) state.entries={};
+  if(!state.weekCloseouts) state.weekCloseouts={};
   migrateVerdicts(state);
   writeStore(KEY,JSON.stringify(state));
   if(fileHandle){ clearTimeout(writeTimer); writeTimer=setTimeout(writeLinkedFile,600); }
@@ -423,6 +426,20 @@ function intersectionMinutes(rangesA,rangesB){
   }
   return total;
 }
+/* the unlogged stretches of a single day - the complement of its entries'
+   merged coverage within the full 0-1440 range, used by the weekly
+   close-out to name exactly where the blank time is, not just how much */
+function dayGaps(dateStr){
+  var ranges=entriesFor(dateStr).map(function(e){ return {start:e.start,end:e.end}; });
+  var covered=mergeRanges(ranges);
+  var gaps=[], cursor=0;
+  covered.forEach(function(r){
+    if(r.start>cursor) gaps.push({start:cursor,end:r.start});
+    cursor=Math.max(cursor,r.end);
+  });
+  if(cursor<1440) gaps.push({start:cursor,end:1440});
+  return gaps;
+}
 function weekTotals(ws){
   var days=ws?(function(){ var o=[]; for(var i=0;i<7;i++) o.push(addDays(ws,i)); return o; })():weekDates();
   var t={},none=0,ranges=[],byCat={},noneRanges=[];
@@ -510,7 +527,7 @@ function renderCats(){
   }).join("");
 }
 
-function render(){ renderGrid(); renderTotals(); renderCats(); refreshHint(); }
+function render(){ renderGrid(); renderTotals(); renderCats(); refreshHint(); updateCloseoutAvailability(); }
 
 /* ---------------- colour ---------------- */
 function hslHex(h){
@@ -936,7 +953,10 @@ function renderReview(){
     fmtShort(cols[0])+" – "+fmtShort(addDays(cols[cols.length-1],6));
 
   var head="<tr><th>Category</th>"+cols.map(function(ws){
-    return "<th>"+fmtShort(ws)+"&ndash;"+fmtShort(addDays(ws,6))+"</th>";
+    var wk=iso(ws), closeable=wk<iso(mondayOf(new Date())), closed=!!state.weekCloseouts[wk];
+    return "<th"+(closeable?' class="review-closeable" data-week="'+wk+'"':"")+">"+
+      fmtShort(ws)+"&ndash;"+fmtShort(addDays(ws,6))+
+      (closed?' <span class="closeout-mark" title="Closed out">&check;</span>':"")+"</th>";
   }).join("")+"<th>Verdict</th></tr>";
 
   var rows=state.categories.map(function(c){
@@ -978,6 +998,94 @@ document.getElementById("reviewPrev").addEventListener("click",function(){
 document.getElementById("reviewNext").addEventListener("click",function(){
   reviewAnchor=addDays(reviewAnchor,7*REVIEW_WEEKS); renderReview();
 });
+
+/* ---------------- weekly close-out ---------------- */
+/* the ritual can only ever look at a week that has fully finished - never
+   the one currently in progress, so "closing out" always means looking
+   back at a complete week, not judging one that's still half-logged */
+function lastCompleteWeekStart(){ return addDays(mondayOf(new Date()),-7); }
+function weekHasEntries(ws){
+  var days=[]; for(var i=0;i<7;i++) days.push(addDays(ws,i));
+  return days.some(function(d){ return entriesFor(iso(d)).length>0; });
+}
+var closeoutWeek=null; /* Monday of the week currently open in the sheet, or null */
+function openCloseout(ws){
+  if(iso(ws)>=iso(mondayOf(new Date()))){
+    showToast("Only a fully finished week can be closed out",false);
+    return;
+  }
+  hideToast();
+  closeoutWeek=ws;
+  document.getElementById("closeoutRange").textContent=fmtShort(ws)+"–"+fmtShort(addDays(ws,6));
+  renderCloseoutTotals();
+  renderCloseoutGaps();
+  var existing=state.weekCloseouts[iso(ws)];
+  document.getElementById("closeoutNote").value=existing?existing.note:"";
+  document.getElementById("closeoutScrim").classList.add("on");
+}
+function closeCloseoutSheet(){ document.getElementById("closeoutScrim").classList.remove("on"); closeoutWeek=null; }
+
+function renderCloseoutTotals(){
+  var wk=iso(closeoutWeek);
+  var r=weekTotals(closeoutWeek), max=r.none;
+  state.categories.forEach(function(c){ max=Math.max(max,r.t[c.id]||0); });
+  var rows=state.categories.slice().sort(function(a,b){ return (r.t[b.id]||0)-(r.t[a.id]||0); }).map(function(c){
+    var m=r.t[c.id]||0; if(!m) return "";
+    var pct=max?Math.round(m/max*100):0, v=getVerdict(c.id,wk);
+    return '<div class="tot"><div class="tot-top"><span class="dot" style="background:'+c.color+'"></span>'+
+      escapeHtml(c.name)+'<span class="h">'+dur(m)+'</span></div>'+
+      '<div class="tot-bar"><i style="width:'+pct+"%;background:"+c.color+'"></i></div>'+
+      '<div class="verdict" data-cat="'+c.id+'">'+["keep","compress","cut"].map(function(dv){
+        return '<button data-v="'+dv+'" aria-pressed="'+(v===dv)+'">'+dv+"</button>";
+      }).join("")+"</div></div>";
+  }).join("");
+  document.getElementById("closeoutTotals").innerHTML=rows||'<p class="emptyhint">Nothing logged this week.</p>';
+}
+document.getElementById("closeoutTotals").addEventListener("click",function(ev){
+  var b=ev.target.closest(".verdict button"); if(!b||!closeoutWeek) return;
+  var catId=b.closest(".verdict").dataset.cat, wk=iso(closeoutWeek);
+  var cur=getVerdict(catId,wk), v=b.dataset.v;
+  setVerdict(catId,wk,cur===v?null:v);
+  persist();
+  renderCloseoutTotals();
+});
+function renderCloseoutGaps(){
+  var days=[]; for(var i=0;i<7;i++) days.push(addDays(closeoutWeek,i));
+  var rows="";
+  days.forEach(function(d,di){
+    dayGaps(iso(d)).forEach(function(g){
+      if(g.end-g.start<30) return; /* skip slivers under half an hour - noise, not signal */
+      rows+='<div class="gap-row"><b>'+DAYNAMES[di]+'</b> '+dur(g.end-g.start)+" unlogged, "+toHM(g.start)+"–"+toHM(g.end)+"</div>";
+    });
+  });
+  document.getElementById("closeoutGaps").innerHTML=rows||'<div class="gap-row">Nothing unlogged this week.</div>';
+}
+document.getElementById("closeoutSave").addEventListener("click",function(){
+  if(!closeoutWeek) return;
+  var wk=iso(closeoutWeek), range=fmtShort(closeoutWeek)+"–"+fmtShort(addDays(closeoutWeek,6));
+  state.weekCloseouts[wk]={note:document.getElementById("closeoutNote").value.trim(),closedAt:new Date().toISOString()};
+  persist();
+  closeCloseoutSheet();
+  updateCloseoutAvailability();
+  showToast("Closed out "+range,false);
+});
+document.getElementById("closeoutCancel").addEventListener("click",closeCloseoutSheet);
+document.getElementById("closeoutBtn").addEventListener("click",function(){ openCloseout(lastCompleteWeekStart()); });
+document.getElementById("closeoutBannerBtn").addEventListener("click",function(){ openCloseout(lastCompleteWeekStart()); });
+
+/* the button stays available all week once last week has anything logged;
+   the banner is louder and only earns its place on Monday, then gets out
+   of the way for the rest of the week regardless of whether it was used */
+function updateCloseoutAvailability(){
+  var lw=lastCompleteWeekStart(), hasData=weekHasEntries(lw), closed=!!state.weekCloseouts[iso(lw)];
+  document.getElementById("closeoutBtn").hidden=!hasData;
+  document.getElementById("closeoutBanner").hidden=!(new Date().getDay()===1&&hasData&&!closed);
+}
+document.getElementById("reviewTable").addEventListener("click",function(ev){
+  var th=ev.target.closest(".review-closeable"); if(!th) return;
+  openCloseout(parseIso(th.dataset.week));
+});
+
 /* which day "Add entry" should default to: the focused day in day view,
    today if the displayed week is the current one, else Monday */
 function defaultAddDay(){
@@ -1053,6 +1161,7 @@ document.getElementById("fileInput").addEventListener("change",function(){
       snapshot("open a copy");
       state=d;
       if(!state.settings) state.settings={startHour:6,endHour:24};
+      if(!state.weekCloseouts) state.weekCloseouts={};
       migrateVerdicts(state);
       persist(); render();
     }catch(e){ alert("That file isn't an Hours Ledger backup."); }
@@ -1141,7 +1250,12 @@ if(TEST_MODE){
     parseIso:parseIso,
     getState:function(){ return state; },
     setState:function(s){ state=s; },
-    setWeekStart:function(d){ weekStart=d; }
+    setWeekStart:function(d){ weekStart=d; },
+    dayGaps:dayGaps,
+    lastCompleteWeekStart:lastCompleteWeekStart,
+    weekHasEntries:weekHasEntries,
+    openCloseout:openCloseout,
+    updateCloseoutAvailability:updateCloseoutAvailability
   };
 }
 })();

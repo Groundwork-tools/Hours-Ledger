@@ -275,6 +275,75 @@ function runTests(H,d){
   assert("Multi tasking row's cells align with the header columns", alignedMultitask);
   d.getElementById("reviewClose").click();
 
+  /* 20. dayGaps finds the true unlogged stretches of a day - the complement
+     of its entries' merged coverage within the full 0-1440 day */
+  H.getState().entries={};
+  var gapDate=H.iso(weekStart);
+  assert("dayGaps on an empty day returns the whole day as one gap",
+    (function(){ var g=H.dayGaps(gapDate); return g.length===1&&g[0].start===0&&g[0].end===1440; })());
+  H.putEntry(gapDate,"Work",catId,9*60,12*60,null);
+  assert("dayGaps around a single entry returns the gap before and after",
+    (function(){ var g=H.dayGaps(gapDate);
+      return g.length===2&&g[0].start===0&&g[0].end===9*60&&g[1].start===12*60&&g[1].end===1440; })());
+  H.getState().entries={};
+  H.putEntry(gapDate,"All day",catId,0,1440,null);
+  assert("dayGaps on a fully-covered day returns no gaps", H.dayGaps(gapDate).length===0);
+
+  /* 21. weekCloseouts exists on every loaded state - migration-safe fallback */
+  assert("state always has a weekCloseouts object",
+    typeof H.getState().weekCloseouts==="object"&&H.getState().weekCloseouts!==null);
+
+  /* 22. the close-out sheet must refuse the current (in-progress) week and
+     any future week - you can only close out a week that's actually over */
+  H.getState().entries={};
+  H.openCloseout(H.mondayOf(new Date()));
+  assert("opening close-out on the current week does not show the sheet",
+    !d.getElementById("closeoutScrim").classList.contains("on"));
+  H.openCloseout(H.addDays(H.mondayOf(new Date()),7));
+  assert("opening close-out on a future week does not show the sheet",
+    !d.getElementById("closeoutScrim").classList.contains("on"));
+
+  /* 23. saving a close-out note persists it, and reopening the same week
+     pre-fills the note field from what was saved */
+  var lastWeek=H.lastCompleteWeekStart();
+  H.openCloseout(lastWeek);
+  assert("opening a genuinely past week shows the sheet",
+    d.getElementById("closeoutScrim").classList.contains("on"));
+  d.getElementById("closeoutNote").value="Busy with exams";
+  d.getElementById("closeoutSave").click();
+  assert("saving closes the sheet", !d.getElementById("closeoutScrim").classList.contains("on"));
+  assert("saving records the note under the closed-out week",
+    H.getState().weekCloseouts[H.iso(lastWeek)]&&H.getState().weekCloseouts[H.iso(lastWeek)].note==="Busy with exams");
+  H.openCloseout(lastWeek);
+  assert("reopening the same week pre-fills the saved note",
+    d.getElementById("closeoutNote").value==="Busy with exams");
+  d.getElementById("closeoutCancel").click();
+
+  /* 24. the "Close out last week" button's visibility follows whether last
+     week actually has anything logged, independent of the day of week */
+  H.getState().entries={};
+  delete H.getState().weekCloseouts[H.iso(H.lastCompleteWeekStart())];
+  H.updateCloseoutAvailability();
+  assert("close-out button hides when last week is empty", d.getElementById("closeoutBtn").hidden);
+  H.putEntry(H.iso(H.lastCompleteWeekStart()),"Work",catId,9*60,10*60,null);
+  H.updateCloseoutAvailability();
+  assert("close-out button shows once last week has something logged", !d.getElementById("closeoutBtn").hidden);
+
+  /* 25. Review only makes strictly-past weeks clickable for close-out
+     (never the in-progress rightmost column), and marks a week that's
+     already been closed out */
+  H.getState().weekCloseouts[H.iso(H.lastCompleteWeekStart())]={note:"",closedAt:new Date().toISOString()};
+  d.getElementById("reviewToggle").click();
+  var headers=d.querySelectorAll("#reviewTable thead th");
+  var currentWeekHeader=headers[4], lastWeekHeader=headers[3];
+  assert("the current in-progress week's header is not clickable for close-out",
+    !currentWeekHeader.classList.contains("review-closeable"));
+  assert("last week's header (fully finished) is clickable for close-out",
+    lastWeekHeader.classList.contains("review-closeable")&&lastWeekHeader.dataset.week===H.iso(H.lastCompleteWeekStart()));
+  assert("a week with a saved close-out shows the closed mark",
+    lastWeekHeader.querySelector(".closeout-mark")!==null);
+  d.getElementById("reviewClose").click();
+
   return results;
 }
 })();

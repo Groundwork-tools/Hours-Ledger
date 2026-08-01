@@ -63,6 +63,9 @@ two, and caches for up to ten. There is nothing else to run.
   },
   weeklyVerdicts: {
     "2026-07-27": { categoryId: 'keep'|'compress'|'cut' }   // keyed by that week's Monday
+  },
+  weekCloseouts: {
+    "2026-07-27": { note: string, closedAt: isoString }   // keyed by that week's Monday
   }
 }
 ```
@@ -75,13 +78,20 @@ two, and caches for up to ten. There is nothing else to run.
   shows whichever verdict is set on the most weeks, ties shown as `"keep/cut"`
   etc., blank if none of the visible weeks have one set. A category with no key
   under a given week just means no verdict was chosen that week.
+- A close-out is keyed the same way, one per week, written only when the user
+  actually closes that week out. `note` is a single optional freeform line —
+  there is deliberately no separate notes-browsing view; it only ever surfaces
+  back inside that week's own close-out sheet. Only a week strictly before the
+  current one can ever be opened for close-out (see `openCloseout()` in
+  `app.js`) — the ritual looks back at a finished week, never judges one still
+  in progress.
 - Undo history lives separately under `hours-ledger-undo-v1`, last 12 states.
 
 ## How the code is organised
 
 Three files: `index.html` (markup only), `styles.css`, and `app.js` — a single
 IIFE containing storage → dates → time helpers → entry CRUD → render → colour →
-modal → grid interaction → rail → nav/tools → weekly review.
+modal → grid interaction → rail → nav/tools → weekly review → weekly close-out.
 
 It was one file because it originally had to survive being downloaded. It is
 hosted now, so that constraint is gone, and it has already been split. `selftest.html`
@@ -139,6 +149,15 @@ dashboard styling.
     scope drift — this is a different axis of data (how you felt, not what you
     did). If built, keep it a clearly optional layer beside the grid, not
     merged into it, or treat it as its own separate experiment entirely.
+11. ~~Weekly close-out ritual.~~ Done — a "Close out last week" entry point
+    (masthead button, a Monday-only banner that's gone by Tuesday, and
+    reopening a past week from Review) that shows that week's totals with
+    verdict-setting, exactly where its unlogged time fell, and one optional
+    freeform note. Only ever opens a week that's actually finished, never the
+    one still in progress. Added outside the numbered order above after an
+    explicit "is this actually needed or will it cloud the purpose" check —
+    kept deliberately narrow (no notes-browsing view, no required action) so
+    it stays a look-back ritual and not a second product.
 
 Do not add features that are not on this list without discussing them first.
 Feature creep is the known failure mode of this project.
