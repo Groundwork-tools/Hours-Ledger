@@ -588,6 +588,7 @@ function openSheet(dayIdx,start,end,entryId){
   document.getElementById("fRepeat").innerHTML=DAYNAMES.map(function(n,i){
     return '<button data-d="'+i+'" aria-pressed="'+(i===dayIdx)+'">'+n+"</button>";
   }).join("");
+  fDaySyncedIdx=dayIdx;
 
   var rec=recentLabels();
   document.getElementById("fRecent").innerHTML=entryId?"":rec.map(function(r){
@@ -595,7 +596,10 @@ function openSheet(dayIdx,start,end,entryId){
   }).join("");
 
   scrim.classList.add("on");
-  fLabel.focus();
+  /* autofocus only where there's no on-screen keyboard to fight - on a phone
+     it used to cover the category chips and time fields the instant the
+     sheet opened, before the user got a chance to see them */
+  if(window.innerWidth>=820) fLabel.focus();
 }
 function closeSheet(){ scrim.classList.remove("on"); editing=null; }
 
@@ -626,6 +630,25 @@ document.getElementById("fRecent").addEventListener("click",function(ev){
 document.getElementById("fRepeat").addEventListener("click",function(ev){
   var b=ev.target.closest("button"); if(!b) return;
   b.setAttribute("aria-pressed",b.getAttribute("aria-pressed")==="true"?"false":"true");
+  fDaySyncedIdx=null; /* the user is now driving Repeat directly - stop moving its toggle around under them */
+});
+
+/* "Also put it on" starts with only the chosen Day pre-toggled, standing in
+   for "just this one day" - if the user changes Day without ever touching
+   Repeat themselves, move that same single toggle to match, so Day stays the
+   thing that actually decides where a new entry lands (this was the bug:
+   changing Day silently did nothing because Repeat's stale toggle from the
+   day the sheet was opened on always won at save time) */
+var fDaySyncedIdx=null;
+document.getElementById("fDay").addEventListener("change",function(){
+  var newIdx=+this.value;
+  if(fDaySyncedIdx!==null){
+    var oldBtn=document.querySelector('#fRepeat button[data-d="'+fDaySyncedIdx+'"]');
+    if(oldBtn&&oldBtn.getAttribute("aria-pressed")==="true") oldBtn.setAttribute("aria-pressed","false");
+    var newBtn=document.querySelector('#fRepeat button[data-d="'+newIdx+'"]');
+    if(newBtn) newBtn.setAttribute("aria-pressed","true");
+    fDaySyncedIdx=newIdx;
+  }
 });
 
 /* up to 3 break rows, added/removed as individual DOM nodes so typing in

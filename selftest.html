@@ -344,6 +344,43 @@ function runTests(H,d){
     lastWeekHeader.querySelector(".closeout-mark")!==null);
   d.getElementById("reviewClose").click();
 
+  /* 26. changing the Day dropdown on a NEW entry must actually save it to
+     that day - regression test for a reported bug where "Also put it on"
+     kept its stale toggle from the day the sheet was opened on, silently
+     overriding a changed Day selection at save time. Doesn't assume which
+     day opens pre-toggled (that depends on defaultAddDay()'s viewMode/
+     focusDay state, which a hidden test iframe can reasonably disagree
+     with the real app about) - just that changing Day moves the save. */
+  H.getState().entries={};
+  H.setWeekStart(weekStart);
+  d.getElementById("addBtn").click();
+  var origToggled=d.querySelector('#fRepeat button[aria-pressed="true"]');
+  var origIdx=+origToggled.dataset.d, newIdx=(origIdx+2)%7;
+  var fDay=d.getElementById("fDay");
+  fDay.value=String(newIdx);
+  fDay.dispatchEvent(new Event("change"));
+  d.getElementById("fStart").value="09:00";
+  d.getElementById("fEnd").value="10:00";
+  d.getElementById("fSave").click();
+  var origIso=H.iso(H.addDays(weekStart,origIdx)), newIso=H.iso(H.addDays(weekStart,newIdx));
+  assert("changing Day on a new entry saves it to the newly chosen day, not the original one",
+    H.entriesFor(newIso).length===1&&H.entriesFor(origIso).length===0);
+
+  /* 27. manually toggling "Also put it on" for extra days still works and
+     isn't fought by the Day-dropdown sync once the user is driving it directly */
+  H.getState().entries={};
+  d.getElementById("addBtn").click();
+  var preToggled=d.querySelector('#fRepeat button[aria-pressed="true"]');
+  var preIdx=+preToggled.dataset.d, otherIdx=(preIdx+3)%7;
+  var otherToggle=d.querySelector('#fRepeat button[data-d="'+otherIdx+'"]');
+  otherToggle.click(); // manually add a second day alongside the pre-toggled one
+  d.getElementById("fStart").value="09:00";
+  d.getElementById("fEnd").value="10:00";
+  d.getElementById("fSave").click();
+  var preIso=H.iso(H.addDays(weekStart,preIdx)), otherIso=H.iso(H.addDays(weekStart,otherIdx));
+  assert("manually adding a Repeat day saves it alongside the original day",
+    H.entriesFor(preIso).length===1&&H.entriesFor(otherIso).length===1);
+
   return results;
 }
 })();
