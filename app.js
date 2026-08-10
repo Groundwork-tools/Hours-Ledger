@@ -564,9 +564,7 @@ function openSheet(dayIdx,start,end,entryId){
   chosenCat=null;
   labelTouched=false;
   var days=weekDates();
-  document.getElementById("fDay").innerHTML=days.map(function(d,i){
-    return '<option value="'+i+'"'+(i===dayIdx?" selected":"")+">"+DAYNAMES[i]+" "+d.getDate()+" "+MONTHS[d.getMonth()]+"</option>";
-  }).join("");
+  document.getElementById("fDay").value=iso(days[dayIdx]);
   document.getElementById("fStart").value=toHM(start);
   document.getElementById("fEnd").value=toHM(Math.min(end,1439));
   document.getElementById("fBreakToggle").checked=false;
@@ -633,21 +631,32 @@ document.getElementById("fRepeat").addEventListener("click",function(ev){
   fDaySyncedIdx=null; /* the user is now driving Repeat directly - stop moving its toggle around under them */
 });
 
-/* "Also put it on" starts with only the chosen Day pre-toggled, standing in
-   for "just this one day" - if the user changes Day without ever touching
-   Repeat themselves, move that same single toggle to match, so Day stays the
-   thing that actually decides where a new entry lands (this was the bug:
-   changing Day silently did nothing because Repeat's stale toggle from the
-   day the sheet was opened on always won at save time) */
+/* "Also put it on" only makes sense for days inside the week the sheet
+   opened on - it starts with the chosen Date's own day pre-toggled, standing
+   in for "just this one day". If the user changes Date without ever
+   touching Repeat themselves, move that same single toggle to match, so
+   Date stays the thing that actually decides where a new entry lands (this
+   was the bug: changing the day silently did nothing because Repeat's stale
+   toggle from wherever the sheet was opened always won at save time).
+   Picking a date outside that week hides Repeat entirely - repeating a date
+   from three weeks ago onto "this week's Wednesday" isn't a real thing. */
 var fDaySyncedIdx=null;
 document.getElementById("fDay").addEventListener("change",function(){
-  var newIdx=+this.value;
-  if(fDaySyncedIdx!==null){
-    var oldBtn=document.querySelector('#fRepeat button[data-d="'+fDaySyncedIdx+'"]');
-    if(oldBtn&&oldBtn.getAttribute("aria-pressed")==="true") oldBtn.setAttribute("aria-pressed","false");
+  var days=weekDates(), val=this.value, newIdx=-1;
+  days.forEach(function(d,i){ if(iso(d)===val) newIdx=i; });
+  var inWeek=newIdx>-1;
+  document.getElementById("repeatField").hidden=!!editing||!inWeek;
+  if(inWeek){
+    if(fDaySyncedIdx!==null){
+      var oldBtn=document.querySelector('#fRepeat button[data-d="'+fDaySyncedIdx+'"]');
+      if(oldBtn&&oldBtn.getAttribute("aria-pressed")==="true") oldBtn.setAttribute("aria-pressed","false");
+    }
     var newBtn=document.querySelector('#fRepeat button[data-d="'+newIdx+'"]');
     if(newBtn) newBtn.setAttribute("aria-pressed","true");
     fDaySyncedIdx=newIdx;
+  }else{
+    [].forEach.call(document.querySelectorAll("#fRepeat button"),function(b){ b.setAttribute("aria-pressed","false"); });
+    fDaySyncedIdx=null;
   }
 });
 
@@ -695,6 +704,8 @@ function collectBreakRows(){
 
 document.getElementById("fSave").addEventListener("click",saveSheet);
 function saveSheet(){
+  var fDayVal=document.getElementById("fDay").value;
+  if(!fDayVal){ showToast("Pick a date",false); return; }
   var s=fromHM(document.getElementById("fStart").value||"00:00");
   var e=fromHM(document.getElementById("fEnd").value||"00:00");
   if(s===e){ showToast("Start and end time are the same — nothing saved",false); return; }
@@ -715,7 +726,6 @@ function saveSheet(){
   snapshot(editing?"edit entry":"add entry");
   var label=fLabel.value.trim();
   if(!label){ var c=catById(chosenCat); label=c?c.name:"Untitled"; }
-  var days=weekDates();
 
   function writeDay(dateStr,replaceId){
     if(breakOn) putEntryWithBreaks(dateStr,label,chosenCat,s,e,breaks,replaceId);
@@ -723,13 +733,23 @@ function saveSheet(){
   }
 
   if(editing){
-    writeDay(iso(days[+document.getElementById("fDay").value]),editing);
-  }else{
+    writeDay(fDayVal,editing);
+  }else if(!document.getElementById("repeatField").hidden){
+    var days=weekDates();
     var picked=[].filter.call(document.querySelectorAll("#fRepeat button"),function(b){ return b.getAttribute("aria-pressed")==="true"; })
                  .map(function(b){ return +b.dataset.d; });
-    if(!picked.length) picked=[+document.getElementById("fDay").value];
+    if(!picked.length){ var idx=-1; days.forEach(function(d,i){ if(iso(d)===fDayVal) idx=i; }); picked=[idx>-1?idx:0]; }
     picked.forEach(function(i){ writeDay(iso(days[i]),null); });
+  }else{
+    writeDay(fDayVal,null);
   }
+
+  /* land wherever the entry actually went, even if that's a different week
+     than the one on screen - otherwise a cross-week save would vanish from
+     view with nothing but a toast to show for it */
+  var savedDate=parseIso(fDayVal);
+  weekStart=mondayOf(savedDate);
+  focusDay=(savedDate.getDay()+6)%7;
   persist(); renderGrid(); renderTotals();
   closeSheet();
 }
@@ -1217,17 +1237,26 @@ document.getElementById("dayNext").addEventListener("click",function(){
   renderGrid();
 });
 
-/* quick-log: fills the gap between your last entry and right now */
+/* quick-log: continues from wherever the day you're actually looking at left
+   off. On today, that's a gap up to right now; a day already fully logged
+   past the current moment (e.g. bedtime prep logged ahead of time) picks up
+   right after its own last entry instead of snapping back to "now". Any
+   other day (nothing to measure "now" against) just continues from its own
+   last entry, same as "Add entry" would. */
 document.getElementById("fab").addEventListener("click",function(){
-  var now=new Date();
-  var mins=Math.min(Math.round((now.getHours()*60+now.getMinutes())/5)*5,1439);
-  weekStart=mondayOf(now);
-  focusDay=(now.getDay()+6)%7;
-  var last=0;
-  entriesFor(iso(now)).forEach(function(e){ if(e.end<=mins&&e.end>last) last=e.end; });
-  var start=(last&&(mins-last)<=360)?last:Math.max(mins-30,0);
-  var end=(mins>start)?mins:start+30;
-  renderGrid(); renderTotals();
+  var dateStr=iso(weekDates()[focusDay]);
+  var entries=entriesFor(dateStr);
+  var last=entries.length?Math.max.apply(null,entries.map(function(e){ return e.end; })):null;
+  var start,end;
+  if(dateStr===iso(new Date())){
+    var now=new Date();
+    var mins=Math.min(Math.round((now.getHours()*60+now.getMinutes())/5)*5,1439);
+    start=(last!==null)?last:Math.max(mins-30,0);
+    end=(mins>start)?mins:start+30;
+  }else{
+    start=(last!==null)?last:9*60;
+    end=Math.min(start+60,1440);
+  }
   openSheet(focusDay,start,end,null);
 });
 
@@ -1274,6 +1303,9 @@ if(TEST_MODE){
     getState:function(){ return state; },
     setState:function(s){ state=s; },
     setWeekStart:function(d){ weekStart=d; },
+    getWeekStart:function(){ return weekStart; },
+    setFocusDay:function(i){ focusDay=i; },
+    getFocusDay:function(){ return focusDay; },
     dayGaps:dayGaps,
     lastCompleteWeekStart:lastCompleteWeekStart,
     weekHasEntries:weekHasEntries,

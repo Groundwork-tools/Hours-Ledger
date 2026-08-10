@@ -67,7 +67,7 @@
     <div class="reviewscroll">
       <table class="reviewtable" id="reviewTable"></table>
     </div>
-    <p class="emptyhint">Category totals for each week, so trends show instead of one week in isolation. Verdicts are set from the log view and just carried over here.</p>
+    <p class="emptyhint">Category totals for each week, so trends show instead of one week in isolation. Verdicts are set from the log view and just carried over here. A past week's dates are clickable to close it out.</p>
   </section>
 
   <div class="cols" id="cols">
@@ -133,6 +133,7 @@
     <span>Hours Ledger &mdash; free to use, free to pass on.</span>
     <span>Your week never leaves this browser. No account, no tracking, no server.</span>
     <span class="right">Built by Sebastian Poulsen</span>
+    <a class="moneylink" href="https://sebpoulsen.github.io/Money-Ledger/" target="_blank" rel="noopener">Money Ledger &rarr;</a>
   </footer>
 </div>
 
@@ -164,8 +165,8 @@
       <div class="chips" id="fChips"></div>
     </div>
     <div class="field">
-      <label for="fDay">Day</label>
-      <select id="fDay"></select>
+      <label for="fDay">Date</label>
+      <input type="date" id="fDay">
     </div>
     <div class="two">
       <div class="field"><label for="fStart">From</label><input type="time" id="fStart" step="300"></div>

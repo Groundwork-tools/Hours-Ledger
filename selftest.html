@@ -344,26 +344,28 @@ function runTests(H,d){
     lastWeekHeader.querySelector(".closeout-mark")!==null);
   d.getElementById("reviewClose").click();
 
-  /* 26. changing the Day dropdown on a NEW entry must actually save it to
+  /* 26. changing the Date field on a NEW entry must actually save it to
      that day - regression test for a reported bug where "Also put it on"
      kept its stale toggle from the day the sheet was opened on, silently
-     overriding a changed Day selection at save time. Doesn't assume which
-     day opens pre-toggled (that depends on defaultAddDay()'s viewMode/
-     focusDay state, which a hidden test iframe can reasonably disagree
-     with the real app about) - just that changing Day moves the save. */
+     overriding a changed Date at save time. Doesn't assume which day opens
+     pre-toggled (that depends on defaultAddDay()'s viewMode/focusDay state,
+     which a hidden test iframe can reasonably disagree with the real app
+     about) - just that changing Date moves the save. Date is a real date
+     input now (not a same-week dropdown), so it's set with an ISO string. */
   H.getState().entries={};
   H.setWeekStart(weekStart);
   d.getElementById("addBtn").click();
   var origToggled=d.querySelector('#fRepeat button[aria-pressed="true"]');
   var origIdx=+origToggled.dataset.d, newIdx=(origIdx+2)%7;
   var fDay=d.getElementById("fDay");
-  fDay.value=String(newIdx);
+  var newIso=H.iso(H.addDays(weekStart,newIdx));
+  fDay.value=newIso;
   fDay.dispatchEvent(new Event("change"));
   d.getElementById("fStart").value="09:00";
   d.getElementById("fEnd").value="10:00";
   d.getElementById("fSave").click();
-  var origIso=H.iso(H.addDays(weekStart,origIdx)), newIso=H.iso(H.addDays(weekStart,newIdx));
-  assert("changing Day on a new entry saves it to the newly chosen day, not the original one",
+  var origIso=H.iso(H.addDays(weekStart,origIdx));
+  assert("changing Date on a new entry saves it to the newly chosen day, not the original one",
     H.entriesFor(newIso).length===1&&H.entriesFor(origIso).length===0);
 
   /* 27. manually toggling "Also put it on" for extra days still works and
@@ -380,6 +382,104 @@ function runTests(H,d){
   var preIso=H.iso(H.addDays(weekStart,preIdx)), otherIso=H.iso(H.addDays(weekStart,otherIdx));
   assert("manually adding a Repeat day saves it alongside the original day",
     H.entriesFor(preIso).length===1&&H.entriesFor(otherIso).length===1);
+
+  /* 28. Date opens pre-filled with the entry's real ISO date, not a
+     same-week index - the field is a genuine date input now */
+  H.getState().entries={};
+  H.setWeekStart(weekStart);
+  d.getElementById("addBtn").click();
+  var openedIdx=+d.querySelector('#fRepeat button[aria-pressed="true"]').dataset.d;
+  assert("Date field opens pre-filled with the correct ISO date",
+    d.getElementById("fDay").value===H.iso(H.addDays(weekStart,openedIdx)));
+  d.getElementById("fCancel").click();
+
+  /* 29-30. picking a date outside the displayed week hides "Also put it
+     on" (repeating an out-of-week date onto this week's other days isn't a
+     real thing), saves only to that literal date, and jumps the grid to
+     that date's week so a cross-week save doesn't vanish from view */
+  H.getState().entries={};
+  d.getElementById("addBtn").click();
+  var outWeekIso=H.iso(H.addDays(weekStart,-7));
+  var fDay2=d.getElementById("fDay");
+  fDay2.value=outWeekIso;
+  fDay2.dispatchEvent(new Event("change"));
+  assert("Repeat hides once Date falls outside the displayed week",
+    d.getElementById("repeatField").hidden);
+  d.getElementById("fStart").value="09:00";
+  d.getElementById("fEnd").value="10:00";
+  d.getElementById("fSave").click();
+  var allDates=Object.keys(H.getState().entries);
+  assert("saving an out-of-week date creates exactly one entry, on that date only",
+    allDates.length===1&&allDates[0]===outWeekIso&&H.entriesFor(outWeekIso).length===1);
+  assert("saving an out-of-week date jumps the grid to that week",
+    H.iso(H.getWeekStart())===H.iso(H.mondayOf(H.addDays(weekStart,-7))));
+
+  /* 31-33. "Log now" stays on whichever day is currently focused in the
+     grid instead of snapping back to today, and - on a day that isn't
+     today - behaves like Add Entry: continues from that day's last entry
+     with no dependency on the real clock, or defaults to 09:00-10:00 when
+     that day is empty */
+  H.getState().entries={};
+  var farWeek=H.mondayOf(H.parseIso("2026-01-05"));
+  H.setWeekStart(farWeek);
+  H.setFocusDay(2);
+  d.getElementById("fab").click();
+  var farWed=H.iso(H.addDays(farWeek,2));
+  assert("Log now opens on the day currently shown in the grid, not today",
+    d.getElementById("fDay").value===farWed);
+  d.getElementById("fCancel").click();
+
+  H.getState().entries={};
+  H.putEntry(farWed,"Old",null,8*60,9*60,null);
+  d.getElementById("fab").click();
+  assert("Log now on a non-today day continues from that day's last entry",
+    d.getElementById("fStart").value==="09:00");
+  assert("...with a 60-minute default block, same as Add Entry",
+    d.getElementById("fEnd").value==="10:00");
+  d.getElementById("fCancel").click();
+
+  H.getState().entries={};
+  d.getElementById("fab").click();
+  assert("Log now on an empty non-today day defaults to 09:00, same as Add Entry",
+    d.getElementById("fStart").value==="09:00"&&d.getElementById("fEnd").value==="10:00");
+  d.getElementById("fCancel").click();
+
+  /* 34-36. on today specifically, Log now still fills the gap up to right
+     now, but with no cutoff on how long ago the last entry ended, and it
+     correctly picks up from an entry that ends LATER than right now (e.g.
+     bedtime prep logged ahead of time) instead of ignoring it */
+  H.getState().entries={};
+  var todayIso=H.iso(new Date());
+  H.setWeekStart(H.mondayOf(new Date()));
+  H.setFocusDay((new Date().getDay()+6)%7);
+  var nowMins=(function(){ var n=new Date(); return n.getHours()*60+n.getMinutes(); })();
+  var oldEnd=Math.max(Math.floor(nowMins/2),1);
+  var oldEndStr=String(Math.floor(oldEnd/60)).padStart(2,"0")+":"+String(oldEnd%60).padStart(2,"0");
+  H.putEntry(todayIso,"Old",null,0,oldEnd,null);
+  d.getElementById("fab").click();
+  assert("Log now on today continues from an entry that ended a while ago, no 6h cutoff",
+    d.getElementById("fStart").value===oldEndStr);
+  d.getElementById("fCancel").click();
+
+  H.getState().entries={};
+  var futureEnd=Math.min(nowMins+1,1439);
+  if(futureEnd>nowMins){
+    H.putEntry(todayIso,"Prep",null,nowMins,futureEnd,null);
+    d.getElementById("fab").click();
+    var futureEndStr=String(Math.floor(futureEnd/60)).padStart(2,"0")+":"+String(futureEnd%60).padStart(2,"0");
+    assert("Log now on today continues from an entry ending later than right now",
+      d.getElementById("fStart").value===futureEndStr);
+    d.getElementById("fCancel").click();
+  }
+
+  H.getState().entries={};
+  d.getElementById("fab").click();
+  var nowRounded=Math.min(Math.round(nowMins/5)*5,1439);
+  var expStart=Math.max(nowRounded-30,0);
+  var expStartStr=String(Math.floor(expStart/60)).padStart(2,"0")+":"+String(expStart%60).padStart(2,"0");
+  assert("Log now on today with nothing logged yet defaults to a 30-minute window ending near now",
+    d.getElementById("fStart").value===expStartStr);
+  d.getElementById("fCancel").click();
 
   return results;
 }

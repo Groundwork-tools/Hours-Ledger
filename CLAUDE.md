@@ -26,7 +26,11 @@ Teaching matters here as much as shipping.
 3. **No build step.** Files must be servable as-is by GitHub Pages. What is in the
    repo is what runs.
 4. **No data leaves the browser.** No telemetry, no error reporting, no fetch to
-   anything. The colophon promises this in writing; keep it true.
+   anything. The colophon promises this in writing; keep it true. (A plain
+   outbound `<a>` link the user chooses to click — like the Money Ledger link
+   in the footer — isn't the app sending data; nothing is transmitted
+   automatically. Google Drive sync, if it's ever built, is a different
+   matter — see the backlog.)
 5. **Every destructive action must be undoable.** Deleting an entry, deleting a
    category, clearing a week, importing over existing data — all go through
    `snapshot()` before mutating. New destructive features do too.
@@ -158,6 +162,16 @@ dashboard styling.
     explicit "is this actually needed or will it cloud the purpose" check —
     kept deliberately narrow (no notes-browsing view, no required action) so
     it stays a look-back ritual and not a second product.
+12. **Google Drive sync.** Lowest priority — explicitly last in line. A
+    lighter-weight alternative to full account system (item 8): no backend
+    of our own, just the Drive API. Still directly conflicts with hard
+    rules 2 (Google's OAuth/API client is a runtime dependency) and 4 (this
+    is real data leaving the browser, not just an outbound link) — revisit
+    both explicitly if this moves forward, same as item 8. Also worth
+    setting up some way to test changes against real users before they
+    reach the live site (a staging branch/deploy, most likely) once this —
+    or anything else risky — is actually being built, so bugs don't hit the
+    handful of people already using it.
 
 Do not add features that are not on this list without discussing them first.
 Feature creep is the known failure mode of this project.
