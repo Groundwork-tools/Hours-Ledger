@@ -1868,6 +1868,16 @@ if(!window.showSaveFilePicker) document.getElementById("linkFile").hidden=true;
 
 render();
 setStatus("Saved "+clockNow());
+/* BUG 2 fix: a debounced sync scheduled by persist() dies with the page if
+   the tab closes or reloads before it fires - nothing before this line
+   ever re-scheduled one on the next load, so whatever was saved in the
+   last few seconds of a session could sit locally, correctly saved, and
+   never reach Drive until some unrelated future edit happened to trigger
+   another sync. A device that's already connected always gets a catch-up
+   sync scheduled here, on every load - if nothing was actually missed
+   this is a harmless no-op merge (case 2: identical content, nothing to
+   decide); if something was missed, this is what actually sends it. */
+if(state.driveConnected) scheduleDriveSync();
 
 /* only present when opened as index.html?hltest=1 — see selftest.html.
    Exposes real functions so tests exercise actual app logic instead of a
@@ -1926,6 +1936,10 @@ if(TEST_MODE){
     scheduleDriveSync:scheduleDriveSync,
     reassignCategoryEntries:reassignCategoryEntries,
     isDriveSyncInFlight:function(){ return driveSyncInFlight; },
+    clearLocalStateForTest:function(){
+      try{ localStorage.removeItem(KEY); }catch(e){}
+      try{ localStorage.removeItem(DEVICE_KEY); }catch(e){}
+    },
     persist:persist,
     doDeleteCategory:doDeleteCategory,
     countCategoryEntries:countCategoryEntries,

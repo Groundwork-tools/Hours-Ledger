@@ -926,6 +926,54 @@ function waitFor(predicate,timeoutMs){
   });
 }
 
+/* reloads the sandbox iframe and resolves with fresh __HL_TEST__/document
+   references once it's loaded again - this is how real browser reloads or
+   tab closes are reproduced here: real navigation, real teardown of
+   whatever JS state (including pending timers) the old page had, same-
+   origin localStorage (TEST_MODE's own keys) surviving across it exactly
+   like a real user's real storage would. d.defaultView is the iframe's own
+   window; frameElement from inside it is the <iframe> node sitting in the
+   OUTER page, which is what actually needs the "load" listener. */
+/* Simulates "close this tab/reload the page, pending debounce and all" by
+   loading a genuinely SEPARATE iframe at the same TEST_MODE storage,
+   rather than calling .reload() on the one long-lived sandbox iframe every
+   other test in this suite has already run 148 tests' worth of DOM/event
+   activity through. Reloading that specific iframe deep in the suite
+   turned out to be unreliable in a way isolated repros of the same
+   sequence never reproduced (confirmed via a debug log spanning the
+   reload that showed the write completing correctly, storage nowhere near
+   quota, and nothing else touching it afterward - yet the reloaded page
+   still didn't see it, consistently, only in that one spot). A fresh
+   iframe is arguably the more faithful simulation anyway - TEST_MODE's
+   storage keys are fixed names, not per-iframe, so a brand new page
+   genuinely reading what a previous session left behind is exactly what a
+   real tab close/reopen or reload does. */
+function freshSandbox(){
+  return new Promise(function(resolve){
+    var iframeEl=document.createElement("iframe");
+    iframeEl.style.display="none";
+    iframeEl.addEventListener("load",function onLoad(){
+      iframeEl.removeEventListener("load",onLoad);
+      setTimeout(function(){
+        resolve({H:iframeEl.contentWindow.__HL_TEST__,d:iframeEl.contentDocument,el:iframeEl});
+      },100);
+    });
+    iframeEl.src="index.html?hltest=1";
+    document.body.appendChild(iframeEl);
+  });
+}
+/* removing an iframe from the DOM destroys its browsing context outright -
+   any pending timer (the debounced sync this is specifically trying to
+   interrupt) dies with it, same as closing a real tab does. Without this,
+   the old page would keep running in the background and its own debounce
+   would eventually fire anyway, masking exactly the bug this is testing
+   for - a page that's genuinely gone never gets that chance. */
+function killSandboxAndOpenFresh(d){
+  var oldIframeEl=d.defaultView.frameElement;
+  oldIframeEl.parentNode.removeChild(oldIframeEl);
+  return freshSandbox();
+}
+
 function runAsyncTests(H,d){
   var results=[];
   function assert(name,cond){ results.push({name:name,pass:!!cond}); }
@@ -994,6 +1042,35 @@ function runAsyncTests(H,d){
       assert("a normal save while connected automatically syncs to Drive after the debounce, no manual step needed",ok);
     })
     .then(function(){
+      /* ---- BUG 2 repro: an entry saved right before the page reloads (or
+         the tab closes) never gets a chance to actually push - the
+         debounce timer dies with the old page before it fires, and
+         nothing on the next load checks whether anything was left behind.
+         Reproduces exactly what was reported: log an entry, persist it
+         (schedules the debounce, does not wait for it), then kill this
+         page outright and open a genuinely fresh one against the same
+         storage - same as a real reload or tab close, and see whether the
+         entry ever reaches the fake remote from there. */
+      var cat=H.getState().categories[0];
+      H.putEntry("2026-05-01",cat.name,cat.id,540,600,null);
+      H.persist();
+      return killSandboxAndOpenFresh(d);
+    })
+    .then(function(fresh){
+      H=fresh.H; d=fresh.d; // the old page is gone - rebind for every step after this
+      assert("the entry survived locally (sanity check, already known-good - matches what was actually reported)",
+        H.entriesFor("2026-05-01").length===1);
+      assert("the fresh page still sees the device as connected (state.driveConnected persisted)",
+        H.getState().driveConnected===true);
+      return waitFor(function(){
+        var r=H.fakeDriveRead();
+        return r&&r.entries.some(function(e){ return e.date==="2026-05-01"&&!e.deleted; });
+      },3000);
+    })
+    .then(function(ok){
+      assert("BUG 2: an entry saved just before the page is closed/reloaded, interrupting its debounced push, still reaches Drive (needs a sync-on-load)",ok);
+    })
+    .then(function(){
       /* ---- importing a file never carries connection status forward, even
          from a file that says driveConnected:true - calls the real
          importBackupJson() (the exact function the file-input handler
@@ -1012,6 +1089,71 @@ function runAsyncTests(H,d){
         H.getState().categories.some(function(c){ return c.id==="imported-marker"; }));
       assert("...but driveConnected:true in the imported file was not honored",
         H.getState().driveConnected===false);
+    })
+    .then(function(){
+      /* ---- BUG 1 repro: two devices that have never synced before share
+         the same 8 real default categories in name only - DEFAULTS calls
+         uid() fresh on every load, so each device invents its own random
+         ids for "the same" starter categories. Device 1 also deleted one
+         pre-sync (Drift) - no tombstone possible, the concept didn't exist
+         yet. Device 2 is a genuinely separate profile here: local state
+         AND device id cleared before it loads, sharing only the fake
+         remote - exactly what a second incognito window signed into the
+         same Google account actually is. */
+      H.fakeDriveReset();
+      H.clearLocalStateForTest();
+      return killSandboxAndOpenFresh(d);
+    })
+    .then(function(fresh){
+      H=fresh.H; d=fresh.d; // "device 1"
+      var driftCat=H.getState().categories.filter(function(c){ return c.name==="Drift"; })[0];
+      H.doDeleteCategory(driftCat,null); // pre-sync deletion
+      /* matching the real report's scale (14 categories, not 7) in case
+         reconciliation only breaks down against a larger/more realistic
+         set - 6 custom categories plus a handful of entries spread across
+         them, same as real usage would build up */
+      ["Muay Thai","Language app","Reading","Cooking","Errands","Side hustle"].forEach(function(n){
+        H.getState().categories.push({id:"custom-"+n.replace(/\s+/g,"-"),name:n,color:"#758E29"});
+      });
+      var c0=H.getState().categories[0];
+      for(var i=0;i<10;i++) H.putEntry("2026-06-0"+(1+(i%7)),c0.name,c0.id,540+i*10,600+i*10,null);
+      d.getElementById("connectDrive").click();
+      return waitFor(function(){ return H.getState().driveConnected===true; },4000);
+    })
+    .then(function(ok1){
+      assert("BUG 1 setup: device 1 connects successfully",ok1);
+      return waitFor(function(){ return d.getElementById("connectDrive").textContent==="Drive: synced"; },4000);
+    })
+    .then(function(ok2){
+      assert("BUG 1 setup: device 1's first push completes",ok2);
+      var remote=H.fakeDriveRead();
+      assert("BUG 1 setup: device 1 pushed 13 live categories (7 defaults + 6 custom - matches the real report's scale)",
+        remote.categories.filter(function(c){ return !c.deleted; }).length===13);
+      H.clearLocalStateForTest(); // "device 2": no local history, no shared device id, same remote
+      return killSandboxAndOpenFresh(d);
+    })
+    .then(function(fresh){
+      H=fresh.H; d=fresh.d; // "device 2"
+      var namesBeforeConnect=H.getState().categories.map(function(c){ return c.name; });
+      assert("BUG 1 setup: device 2 seeds its own fresh 8 defaults, all 8 including the one device 1 deleted",
+        namesBeforeConnect.length===8&&namesBeforeConnect.indexOf("Drift")>-1);
+      d.getElementById("connectDrive").click();
+      return waitFor(function(){ return H.getState().driveConnected===true; },4000);
+    })
+    .then(function(ok3){
+      assert("BUG 1 setup: device 2 connects successfully",ok3);
+      return waitFor(function(){ return d.getElementById("connectDrive").textContent==="Drive: synced"; },4000);
+    })
+    .then(function(ok4){
+      assert("BUG 1 setup: device 2's connect completes",ok4);
+      var names=H.getState().categories.map(function(c){ return c.name; });
+      var counts={};
+      names.forEach(function(n){ counts[n]=(counts[n]||0)+1; });
+      var duplicated=Object.keys(counts).filter(function(n){ return counts[n]>1; });
+      assert("BUG 1: device 2's fresh seed categories don't duplicate device 1's already-synced ones ("+names.length+" total, duplicated: "+JSON.stringify(duplicated)+")",
+        duplicated.length===0);
+      assert("BUG 1: the pre-sync-deleted category (Drift) resurfaces exactly once, not duplicated - the known, disclosed limitation, not a new bug",
+        counts.Drift===1);
     })
     .then(function(){ return results; });
 }
