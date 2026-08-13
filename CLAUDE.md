@@ -36,10 +36,22 @@ Teaching matters here as much as shipping.
    `snapshot()` before mutating. New destructive features do too.
 6. **Ask before restructuring.** Propose the change and wait. Do not refactor
    broadly in a session that was asked for a small fix.
+7. **No sync operation may remove or overwrite an unacknowledged record.** Every
+   syncable record (entries, categories) carries per-record `updatedAt`/`updatedBy`;
+   sync decisions are made per-record, never by comparing one timestamp for a
+   whole file. A record absent from one side is never treated as a deletion —
+   only an explicit tombstone is. This rule is written *before* any sync code
+   exists, as a spec to build against, not extracted afterward from an incident —
+   see `SYNC-LESSONS.md`, the record of the incident that happened when a sibling
+   project (Money Ledger) got this wrong the first time. Nobody who never presses
+   "Connect Google Drive" is exposed to any of this — see hard rule 4.
 
 ## Testing before you claim it works
 
-There is no test suite. Verify manually, and say which you actually did:
+`selftest.html` runs the app's real logic in isolation (see "How the code is
+organised" below) — run it before deploying anything that touches `app.js`, and
+say what it reported, not just that you ran it. For anything a script can't
+reach, verify manually and say which you actually did:
 
 - Log an entry, reload the page, confirm it is still there.
 - Log something that crosses midnight (23:30–07:00) and confirm it splits across
@@ -47,6 +59,12 @@ There is no test suite. Verify manually, and say which you actually did:
 - Check the week totals still add up after your change.
 - Resize below 820px and confirm the day view and the "Log now" button behave.
 - Undo something destructive with Ctrl/Cmd+Z.
+
+For sync/merge code specifically: a test lands in the *same commit* as the code
+it covers, written and watched to fail against the old code first, not added
+afterward as cleanup — this is the specific discipline that was missing for the
+first ~24 hours of Money Ledger's sync existing, and it's why both of that
+incident's data-loss bugs shipped before any test could have caught them.
 
 ## Deploy
 
