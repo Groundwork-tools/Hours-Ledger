@@ -1155,6 +1155,37 @@ function runAsyncTests(H,d){
       assert("BUG 1: the pre-sync-deleted category (Drift) resurfaces exactly once, not duplicated - the known, disclosed limitation, not a new bug",
         counts.Drift===1);
     })
+    .then(function(){
+      /* ---- BUG 1, the actual cause - confirmed against the real Drive
+         file's diff: names matched exactly, colors differed on every
+         single default category. Root cause: DEFAULTS' colors (and ids)
+         aren't fixed, so two installs seeded at different points in this
+         app's history - or a user who ever dragged the hue slider on a
+         default category - invent different colors for "the same"
+         starter category, and exact name+color matching correctly
+         refuses to guess. This is exactly why the test above never
+         caught it: it seeds both "devices" identically in the same test
+         run, so the one thing that actually diverges in reality (color)
+         never got a chance to. These are the real values from the diff. */
+      var t0="2026-01-01T00:00:00.000Z",devA="device-A",devB="device-B";
+      var localFlat=[
+        {id:"local-work",name:"Work / income",color:"#2F6B4F",updatedAt:t0,updatedBy:devB,deleted:false,deletedAt:null},
+        {id:"local-side",name:"Side projects",color:"#A8762A",updatedAt:t0,updatedBy:devB,deleted:false,deletedAt:null},
+        {id:"local-training",name:"Training",color:"#3E7F87",updatedAt:t0,updatedBy:devB,deleted:false,deletedAt:null},
+        {id:"local-people",name:"People",color:"#6E4B7A",updatedAt:t0,updatedBy:devB,deleted:false,deletedAt:null},
+        {id:"local-sleep",name:"Sleep",color:"#4C1FAD",updatedAt:t0,updatedBy:devB,deleted:false,deletedAt:null}
+      ];
+      var remoteFlat=[
+        {id:"remote-work",name:"Work / income",color:"#27864F",updatedAt:t0,updatedBy:devA,deleted:false,deletedAt:null},
+        {id:"remote-side",name:"Side projects",color:"#B18725",updatedAt:t0,updatedBy:devA,deleted:false,deletedAt:null},
+        {id:"remote-training",name:"Training",color:"#0E9DAA",updatedAt:t0,updatedBy:devA,deleted:false,deletedAt:null},
+        {id:"remote-people",name:"People",color:"#A63A9D",updatedAt:t0,updatedBy:devA,deleted:false,deletedAt:null},
+        {id:"remote-sleep",name:"Sleep",color:"#6C3BB0",updatedAt:t0,updatedBy:devA,deleted:false,deletedAt:null}
+      ];
+      var r=H.reconcileCategories(localFlat,remoteFlat,devB);
+      assert("BUG 1 (real cause, real data): same names, colors diverged from an older palette generation - these are the same category and should be recognized as such",
+        Object.keys(r.idRemap).length===5);
+    })
     .then(function(){ return results; });
 }
 })();
