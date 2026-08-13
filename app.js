@@ -290,7 +290,14 @@ function applyReconciliation(localFlat,reconciled){
    against, every local record trivially survives via case 1 above); its
    shape otherwise is {categories:[...flat...], entries:[...flat...]}, tombstones
    inline via deleted:true, no separate remote-side deleted-map. */
-function syncEngine(localState,remoteFile,deviceId){
+function syncEngine(localStateIn,remoteFile,deviceId){
+  /* migrateSyncFields mutates in place - clone first so a failure anywhere
+     below (a bad remote file, a bug, anything) can never leave the CALLER's
+     original object touched. The connect flow (checkpoint 2) still has to
+     honor "don't write the real state until this whole call has returned
+     successfully," but this function no longer works against that by
+     mutating its input as a side effect no matter what happens after. */
+  var localState=JSON.parse(JSON.stringify(localStateIn));
   migrateSyncFields(localState);
   var remote=remoteFile||{categories:[],entries:[]};
 
