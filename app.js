@@ -25,6 +25,12 @@ function writeStore(k,v){ try{ storageOK?localStorage.setItem(k,v):(mem[k]=v); }
 /* hltest=1 is only ever set by selftest.html, so it can exercise real save/undo
    logic without ever touching the real saved weeks under KEY/UKEY below */
 var TEST_MODE=location.search.indexOf("hltest=1")>-1;
+/* a real confirm() blocks on a dialog nothing in a headless run can click -
+   auto-accept under TEST_MODE only, so Clear-this-week and the Drive
+   connect flow's export nudge are actually reachable by a test instead of
+   either hanging or silently auto-cancelling and making it look like the
+   flow ran when it never got past the dialog */
+if(TEST_MODE) window.confirm=function(){ return true; };
 var KEY=TEST_MODE?"hours-ledger-selftest-v2":"hours-ledger-v2";
 /* v1's category.verdict (one verdict, shared by every week) was replaced by
    weeklyVerdicts (one verdict per category per week) below - this is the
@@ -348,6 +354,118 @@ function fakeDriveReset(){
   writeStore(FAKE_DRIVE_KEY,JSON.stringify(null));
 }
 
+/* ---------------- Google Drive OAuth (Google Identity Services token client) ----------------
+   Browser-side token flow only - no backend, no client secret ever exists to
+   leak, since a server holding one is exactly the runtime dependency and the
+   data-custody problem hard rules 2 and 4 forbid. GOOGLE_CLIENT_ID is a public
+   identifier, safe to commit (see SYNC-LESSONS.md's OAuth setup notes - it's
+   the Client ID, not a secret). Nothing in this block ever runs under
+   TEST_MODE - not the script load, not the token request - so a test run
+   can't prompt a real Google sign-in by construction, the same standard as
+   the fake Drive functions above. */
+var GOOGLE_CLIENT_ID="433503856869-1o7ut58622smr9rb7j8mqmsv6n2tfd4p.apps.googleusercontent.com";
+var DRIVE_SCOPE="https://www.googleapis.com/auth/drive.file";
+var DRIVE_FILE_NAME="hours-ledger-sync.json";
+var ACCESS_TOKEN_KEY=TEST_MODE?"hours-ledger-access-token-TESTMODE":"hours-ledger-access-token";
+
+function getCachedToken(){
+  try{
+    var t=JSON.parse(readStore(ACCESS_TOKEN_KEY));
+    if(t&&t.expiresAt>Date.now()+30000) return t.token; /* 30s safety margin */
+  }catch(e){}
+  return null;
+}
+function cacheToken(token,expiresInSec){
+  writeStore(ACCESS_TOKEN_KEY,JSON.stringify({token:token,expiresAt:Date.now()+expiresInSec*1000}));
+}
+function loadGisScript(cb){
+  if(window.google&&window.google.accounts&&window.google.accounts.oauth2){ cb(null); return; }
+  var s=document.createElement("script");
+  s.src="https://accounts.google.com/gsi/client";
+  s.onload=function(){ cb(null); };
+  s.onerror=function(){ cb(new Error("Couldn't load Google's sign-in script - check your connection")); };
+  document.head.appendChild(s);
+}
+/* cb(err, token). Caches the token in its own key, outside synced state,
+   same pattern as DEVICE_ID - a page reload within the token's ~1hr life
+   reuses it with no Google round-trip (GIS's silent-reauth path is
+   increasingly unreliable behind third-party-cookie blocking; this
+   sidesteps needing it at all for the common case, per SYNC-LESSONS.md). */
+function getAccessToken(cb){
+  if(TEST_MODE){ cb(null,"fake-token-"+getDeviceId()); return; }
+  var cached=getCachedToken();
+  if(cached){ cb(null,cached); return; }
+  loadGisScript(function(err){
+    if(err){ cb(err); return; }
+    try{
+      var client=google.accounts.oauth2.initTokenClient({
+        client_id:GOOGLE_CLIENT_ID,
+        scope:DRIVE_SCOPE,
+        callback:function(resp){
+          if(resp.error){ cb(new Error(resp.error)); return; }
+          cacheToken(resp.access_token,resp.expires_in);
+          cb(null,resp.access_token);
+        }
+      });
+      client.requestAccessToken();
+    }catch(e){ cb(e); }
+  });
+}
+
+/* ---------------- Google Drive network calls ----------------
+   Same TEST_MODE branch pattern as the fake Drive functions themselves -
+   checked first, inside the function, before any fetch() is constructed.
+   The file is found by searching on name every single time, never by
+   trusting a cached id (SYNC-LESSONS.md) - if more than one match turns up,
+   that's logged as a warning, not silently resolved, since it means two
+   histories may need reconciling by hand. */
+function driveFindFileId(token){
+  if(TEST_MODE) return Promise.resolve(fakeDriveRead()!==null?"fake-file-id":null);
+  var q="name='"+DRIVE_FILE_NAME+"' and trashed=false";
+  return fetch("https://www.googleapis.com/drive/v3/files?q="+encodeURIComponent(q)+"&fields=files(id,name)",{
+    headers:{Authorization:"Bearer "+token}
+  }).then(function(r){
+    if(!r.ok) throw new Error("Drive search failed ("+r.status+")");
+    return r.json();
+  }).then(function(data){
+    var files=data.files||[];
+    if(files.length>1) console.warn('Hours Ledger: found '+files.length+' Drive files named "'+DRIVE_FILE_NAME+'" - using the first; the rest may need reconciling by hand');
+    return files.length?files[0].id:null;
+  });
+}
+function driveReadFile(token,fileId){
+  if(TEST_MODE) return Promise.resolve(fakeDriveRead());
+  return fetch("https://www.googleapis.com/drive/v3/files/"+fileId+"?alt=media",{
+    headers:{Authorization:"Bearer "+token}
+  }).then(function(r){
+    if(!r.ok) throw new Error("Drive read failed ("+r.status+")");
+    return r.json();
+  });
+}
+function driveWriteFile(token,fileId,data){
+  if(TEST_MODE){ fakeDriveWrite(data); return Promise.resolve(fileId||"fake-file-id"); }
+  var body=JSON.stringify(data);
+  function uploadContent(id){
+    return fetch("https://www.googleapis.com/upload/drive/v3/files/"+id+"?uploadType=media",{
+      method:"PATCH",
+      headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},
+      body:body
+    }).then(function(r){
+      if(!r.ok) throw new Error("Drive upload failed ("+r.status+")");
+      return id;
+    });
+  }
+  if(fileId) return uploadContent(fileId);
+  return fetch("https://www.googleapis.com/drive/v3/files",{
+    method:"POST",
+    headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},
+    body:JSON.stringify({name:DRIVE_FILE_NAME})
+  }).then(function(r){
+    if(!r.ok) throw new Error("Drive file creation failed ("+r.status+")");
+    return r.json();
+  }).then(function(created){ return uploadContent(created.id); });
+}
+
 var state;
 try{ state=JSON.parse(readStore(KEY))||null; }catch(e){ state=null; }
 if(!state||!state.categories) state=migrateFromOldKey();
@@ -402,6 +520,12 @@ function persist(){
     clearTimeout(writeTimer);
     writeTimer=setTimeout(writeLinkedFile,1200);
   }
+  /* driveSyncApplyingRemote is true while runDriveSync() is writing a just-
+     pulled/merged result back through this same function (so it gets the
+     same status-line/linked-file behavior as any other save) - skipped here
+     so applying a remote change never schedules syncing right back out
+     again, which would otherwise loop forever between two devices */
+  if(state.driveConnected&&!driveSyncApplyingRemote) scheduleDriveSync();
 }
 function clockNow(){
   var d=new Date();
@@ -421,6 +545,107 @@ function refreshHint(){
   }else{
     el.innerHTML="This browser won't let the page save on its own. Use <b>Export a copy</b> before you close the tab.";
   }
+}
+
+/* ---------------- Drive connect flow & ongoing sync ---------------- */
+/* driveConnected lives INSIDE state (not a separate key like DEVICE_ID) on
+   purpose: undoing "before Drive connect" - the snapshot connectDrive()
+   takes as its very first action - should revert the whole operation,
+   connection status included, not leave a device half-connected with data
+   rolled back underneath it. It never gets pushed to Drive itself (the
+   payload syncEngine builds only ever contains categories/entries); it just
+   rides along through persist()/snapshot()/undo() like any other field. */
+var driveSyncTimer=null,driveSyncInFlight=false,driveSyncApplyingRemote=false;
+
+function connectDrive(){
+  if(state.driveConnected){ runDriveSync(true); return; } /* already connected - button doubles as "sync now" */
+  hideToast();
+  var proceed=confirm("Before connecting, it's worth exporting a copy as a backup first - Your data → Export a copy.\n\nContinue connecting Google Drive now?");
+  if(!proceed) return;
+  snapshot("before Drive connect");
+  setStatus("Connecting to Drive…");
+  document.getElementById("connectDrive").disabled=true;
+  getAccessToken(function(err,token){
+    if(err){ driveConnectFailed(err); return; }
+    driveFindFileId(token).then(function(fileId){
+      return (fileId?driveReadFile(token,fileId):Promise.resolve(null)).then(function(remoteData){
+        return {fileId:fileId,remoteData:remoteData};
+      });
+    }).then(function(res){
+      var syncResult;
+      try{ syncResult=syncEngine(state,res.remoteData,getDeviceId()); }
+      catch(e){ driveConnectFailed(new Error("couldn't prepare to sync - nothing was changed")); return; }
+      state=syncResult.newLocalState;
+      state.driveConnected=true;
+      driveSyncApplyingRemote=true; persist(); driveSyncApplyingRemote=false;
+      render(); refreshHint(); updateColophon();
+      document.getElementById("connectDrive").disabled=false;
+      document.getElementById("connectDrive").textContent="Drive: syncing…";
+      driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries}).then(function(){
+        setStatus("Synced with Drive");
+        document.getElementById("connectDrive").textContent="Drive: synced";
+        showToast("Connected — your weeks are syncing.",false);
+      }).catch(function(){
+        setStatus("Connected, first push failed",true);
+        document.getElementById("connectDrive").textContent="Drive: sync failed";
+        showToast("Connected, but the first push to Drive failed — it'll retry on the next change.",false);
+      });
+    }).catch(function(e){ driveConnectFailed(e); });
+  });
+}
+function driveConnectFailed(e){
+  document.getElementById("connectDrive").disabled=false;
+  setStatus("Couldn't connect to Drive",true);
+  showToast("Couldn't connect to Google Drive: "+e.message,false);
+}
+
+var DRIVE_SYNC_DEBOUNCE_MS=TEST_MODE?50:2000; /* real debounce would make every test wait 2s for no reason */
+function scheduleDriveSync(){
+  clearTimeout(driveSyncTimer);
+  driveSyncTimer=setTimeout(function(){ runDriveSync(false); },DRIVE_SYNC_DEBOUNCE_MS);
+}
+/* the same operation whether it's the debounced background sync after a
+   normal edit or the button doubling as "sync now" once already connected -
+   manual just skips the debounce and shows an immediate status change */
+function runDriveSync(manual){
+  if(!state.driveConnected||driveSyncInFlight) return;
+  driveSyncInFlight=true;
+  if(manual) setStatus("Syncing with Drive…");
+  getAccessToken(function(err,token){
+    if(err){ driveSyncInFlight=false; setStatus("Drive sync needs reconnecting",true); return; }
+    driveFindFileId(token).then(function(fileId){
+      return (fileId?driveReadFile(token,fileId):Promise.resolve(null)).then(function(remoteData){
+        return {fileId:fileId,remoteData:remoteData};
+      });
+    }).then(function(res){
+      var syncResult;
+      try{ syncResult=syncEngine(state,res.remoteData,getDeviceId()); }
+      catch(e){ driveSyncInFlight=false; setStatus("Drive sync failed, will retry",true); return; }
+      state=syncResult.newLocalState;
+      state.driveConnected=true;
+      driveSyncApplyingRemote=true; persist(); driveSyncApplyingRemote=false;
+      render();
+      return driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries}).then(function(){
+        driveSyncInFlight=false;
+        setStatus("Synced with Drive");
+      });
+    }).catch(function(){
+      driveSyncInFlight=false;
+      setStatus("Drive sync failed, will retry",true);
+    });
+  });
+}
+
+/* keeps hard rule 4's colophon promise honest once sync is opted into -
+   "nothing leaves the browser" stops being true the moment someone connects
+   Drive, so the footer has to say something different for exactly that
+   person rather than keep asserting something now false */
+function updateColophon(){
+  var el=document.getElementById("colophonPrivacy");
+  if(!el) return;
+  el.textContent=state.driveConnected?
+    "Your week syncs to your own Google Drive, connected by you. Nothing else leaves this browser.":
+    "Your week never leaves this browser. No account, no tracking, no server.";
 }
 
 /* ---------------- undo / redo ---------------- */
@@ -797,11 +1022,67 @@ function renderCats(){
         '<div class="presets">'+SWATCHES.map(function(s){ return '<button data-hex="'+s+'" style="background:'+s+'" aria-label="Use '+s+'"></button>'; }).join("")+"</div>"+
         '<input class="hue" type="range" min="0" max="360" value="'+hueOf(c.color)+'" aria-label="Drag to change colour">'+
         '<span class="pickhint">Drag the strip, or tap a swatch</span>'+
+      "</div>"+
+      '<div class="catdelete" hidden>'+
+        '<p class="catdelete-msg"></p>'+
+        '<select class="catdelete-target"></select>'+
+        '<div class="catdelete-actions">'+
+          '<button class="catdelete-confirm">Delete</button>'+
+          '<button class="catdelete-cancel">Cancel</button>'+
+        "</div>"+
       "</div></div>";
   }).join("");
 }
+function countCategoryEntries(catId){
+  var n=0;
+  Object.keys(state.entries).forEach(function(d){ state.entries[d].forEach(function(e){ if(e.cat===catId) n++; }); });
+  return n;
+}
+/* reuses putEntry's own replaceId path (delete-then-recreate) for every
+   affected entry, rather than mutating e.cat in place - keeps this on the
+   exact same well-tested machinery every other entry edit already goes
+   through, tombstone-writing included, instead of a second bespoke path
+   that would need its own updatedAt-bumping logic to stay correct */
+function reassignCategoryEntries(fromCatId,toCatId){
+  var affected=[];
+  Object.keys(state.entries).forEach(function(d){
+    state.entries[d].forEach(function(e){ if(e.cat===fromCatId) affected.push({date:d,entry:e}); });
+  });
+  affected.forEach(function(a){
+    putEntry(a.date,a.entry.label,toCatId,a.entry.start,a.entry.end,a.entry.id);
+  });
+}
+/* reassignToId falsy = leave entries exactly as deleting always has (a
+   dangling reference, invisible as "No category" until/unless the category
+   ever resurfaces via sync - see the design discussion); a real id = move
+   every affected entry there first, via reassignCategoryEntries above */
+function doDeleteCategory(c,reassignToId){
+  var n=countCategoryEntries(c.id);
+  snapshot('delete category "'+c.name+'"');
+  if(reassignToId) reassignCategoryEntries(c.id,reassignToId);
+  if(state.deletedCategories) state.deletedCategories[c.id]={id:c.id,updatedAt:nowIso(),updatedBy:getDeviceId(),deletedAt:nowIso()};
+  state.categories=state.categories.filter(function(x){ return x.id!==c.id; });
+  persist(); render();
+  var targetCat=reassignToId?catById(reassignToId):null;
+  var msg='Deleted "'+(c.name||"category")+'"'+
+    (reassignToId?(" — "+n+" "+(n===1?"entry":"entries")+' moved to "'+(targetCat?targetCat.name:"category")+'".'):
+      (n?" — its entries moved to No category.":"."));
+  showToast(msg,true);
+}
+function openCategoryDeleteChooser(row,c,n){
+  [].forEach.call(cats.querySelectorAll(".picker"),function(p){ p.hidden=true; });
+  [].forEach.call(cats.querySelectorAll(".catdelete"),function(p){ p.hidden=true; });
+  var panel=row.querySelector(".catdelete");
+  panel.querySelector(".catdelete-msg").textContent=
+    n+" "+(n===1?"entry uses":"entries use")+' "'+(c.name||"this category")+'". Move '+(n===1?"it":"them")+
+    " somewhere else, or leave "+(n===1?"it":"them")+" uncategorised:";
+  panel.querySelector(".catdelete-target").innerHTML='<option value="">No category</option>'+
+    state.categories.filter(function(x){ return x.id!==c.id; })
+      .map(function(x){ return '<option value="'+x.id+'">'+escapeHtml(x.name||"Untitled")+"</option>"; }).join("");
+  panel.hidden=false;
+}
 
-function render(){ renderGrid(); renderTotals(); renderCats(); refreshHint(); updateCloseoutAvailability(); }
+function render(){ renderGrid(); renderTotals(); renderCats(); refreshHint(); updateCloseoutAvailability(); updateColophon(); }
 
 /* ---------------- colour ---------------- */
 function hslHex(h){
@@ -1196,16 +1477,24 @@ cats.addEventListener("click",function(ev){
     return;
   }
   if(ev.target.classList.contains("del")){
-    snapshot('delete category "'+c.name+'"');
-    if(state.deletedCategories) state.deletedCategories[c.id]={id:c.id,updatedAt:nowIso(),updatedBy:getDeviceId(),deletedAt:nowIso()};
-    state.categories=state.categories.filter(function(x){ return x.id!==c.id; });
-    persist(); render();
-    showToast('Deleted "'+(c.name||"category")+'". Its entries moved to No category.',true);
+    var n=countCategoryEntries(c.id);
+    if(!n){ doDeleteCategory(c,null); return; }
+    openCategoryDeleteChooser(row,c,n);
+    return;
+  }
+  if(ev.target.classList.contains("catdelete-confirm")){
+    doDeleteCategory(c,row.querySelector(".catdelete-target").value||null);
+    return;
+  }
+  if(ev.target.classList.contains("catdelete-cancel")){
+    row.querySelector(".catdelete").hidden=true;
+    return;
   }
 });
 document.addEventListener("click",function(ev){
   if(ev.target.closest(".cat")) return;
   [].forEach.call(cats.querySelectorAll(".picker"),function(p){ p.hidden=true; });
+  [].forEach.call(cats.querySelectorAll(".catdelete"),function(p){ p.hidden=true; });
 });
 
 document.getElementById("addCat").addEventListener("click",function(){
@@ -1471,6 +1760,9 @@ document.getElementById("linkFile").addEventListener("click",function(){
   })();
 });
 
+document.getElementById("connectDrive").addEventListener("click",connectDrive);
+if(state.driveConnected) document.getElementById("connectDrive").textContent="Drive: synced";
+
 document.getElementById("save").addEventListener("click",function(){
   var blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});
   var a=document.createElement("a");
@@ -1480,20 +1772,33 @@ document.getElementById("save").addEventListener("click",function(){
   setTimeout(function(){ URL.revokeObjectURL(a.href); },1000);
 });
 document.getElementById("load").addEventListener("click",function(){ document.getElementById("fileInput").click(); });
+/* pulled out of the FileReader callback so it's directly callable (and
+   directly testable, synchronously, with no FileReader involved at all) -
+   the reading-a-real-file part is genuinely async and belongs to the
+   event handler below; parsing and loading a backup once its text is in
+   hand isn't, and gains nothing from being async too */
+function importBackupJson(jsonText){
+  var d=JSON.parse(jsonText);
+  if(!d.categories||!d.entries) throw new Error("bad");
+  snapshot("open a copy");
+  state=d;
+  if(!state.settings) state.settings={startHour:6,endHour:24};
+  if(!state.weekCloseouts) state.weekCloseouts={};
+  migrateVerdicts(state);
+  /* an imported file never carries sync connection forward, even if it
+     says driveConnected:true - reconnecting is one click, but silently
+     resuming a background network sync right after opening an arbitrary
+     file, with no chance to reconsider first, is not a call this app
+     gets to make for the user */
+  state.driveConnected=false;
+  persist(); render(); refreshHint(); updateColophon();
+}
 document.getElementById("fileInput").addEventListener("change",function(){
   var f=this.files[0]; if(!f) return;
   var r=new FileReader();
   r.onload=function(){
-    try{
-      var d=JSON.parse(r.result);
-      if(!d.categories||!d.entries) throw new Error("bad");
-      snapshot("open a copy");
-      state=d;
-      if(!state.settings) state.settings={startHour:6,endHour:24};
-      if(!state.weekCloseouts) state.weekCloseouts={};
-      migrateVerdicts(state);
-      persist(); render();
-    }catch(e){ alert("That file isn't an Hours Ledger backup."); }
+    try{ importBackupJson(r.result); }
+    catch(e){ alert("That file isn't an Hours Ledger backup."); }
   };
   r.readAsText(f); this.value="";
 });
@@ -1611,7 +1916,21 @@ if(TEST_MODE){
     syncEngine:syncEngine,
     fakeDriveRead:fakeDriveRead,
     fakeDriveWrite:fakeDriveWrite,
-    fakeDriveReset:fakeDriveReset
+    fakeDriveReset:fakeDriveReset,
+    getAccessToken:getAccessToken,
+    driveFindFileId:driveFindFileId,
+    driveReadFile:driveReadFile,
+    driveWriteFile:driveWriteFile,
+    connectDrive:connectDrive,
+    runDriveSync:runDriveSync,
+    scheduleDriveSync:scheduleDriveSync,
+    reassignCategoryEntries:reassignCategoryEntries,
+    isDriveSyncInFlight:function(){ return driveSyncInFlight; },
+    persist:persist,
+    doDeleteCategory:doDeleteCategory,
+    countCategoryEntries:countCategoryEntries,
+    render:render,
+    importBackupJson:importBackupJson
   };
 }
 })();

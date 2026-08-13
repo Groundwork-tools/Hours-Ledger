@@ -29,8 +29,11 @@ Teaching matters here as much as shipping.
    anything. The colophon promises this in writing; keep it true. (A plain
    outbound `<a>` link the user chooses to click — like the Money Ledger link
    in the footer — isn't the app sending data; nothing is transmitted
-   automatically. Google Drive sync, if it's ever built, is a different
-   matter — see the backlog.)
+   automatically. Google Drive sync — built on the `drive-sync` branch, see
+   the backlog — is the one deliberate exception, and only for someone who
+   explicitly presses "Connect Google Drive": the colophon's privacy line
+   itself changes for that person specifically, via `updateColophon()`, so
+   the promise stays true rather than silently wrong for whoever opts in.)
 5. **Every destructive action must be undoable.** Deleting an entry, deleting a
    category, clearing a week, importing over existing data — all go through
    `snapshot()` before mutating. New destructive features do too.
@@ -120,13 +123,24 @@ two, and caches for up to ten. There is nothing else to run.
   `migrateSyncFields()`/`syncEngine()` in `app.js` and `SYNC-LESSONS.md` for
   the reasoning; hard rule 7 is the constraint this data shape exists to
   satisfy.
+- **`driveConnected` (boolean) lives inside `state` itself, not a separate
+  key like `DEVICE_ID`** — so undoing "before Drive connect" (the snapshot
+  `connectDrive()` takes as its first action) reverts the whole operation,
+  connection status included, rather than leaving a device half-connected
+  with its data rolled back underneath it. It never travels to Drive; the
+  payload `syncEngine()` builds only ever contains categories and entries.
+  An imported file's `driveConnected` is deliberately never honored on
+  import, even if the file says `true` — see the import handler in
+  `app.js` — so opening an arbitrary backup can never silently resume a
+  background network sync.
 
 ## How the code is organised
 
 Three files: `index.html` (markup only), `styles.css`, and `app.js` — a single
-IIFE containing storage → dates → time helpers → sync engine → entry CRUD →
-render → colour → modal → grid interaction → rail → nav/tools → weekly review →
-weekly close-out.
+IIFE containing storage → dates → time helpers → sync engine → Drive OAuth →
+Drive network calls → entry CRUD → render → colour → modal → grid interaction
+→ rail (category delete-with-reassignment lives here) → nav/tools → weekly
+review → weekly close-out → Drive connect flow & ongoing sync.
 
 It was one file because it originally had to survive being downloaded. It is
 hosted now, so that constraint is gone, and it has already been split. `selftest.html`
@@ -198,16 +212,21 @@ dashboard styling.
     explicit "is this actually needed or will it cloud the purpose" check —
     kept deliberately narrow (no notes-browsing view, no required action) so
     it stays a look-back ritual and not a second product.
-12. **Google Drive sync.** Lowest priority — explicitly last in line. A
-    lighter-weight alternative to full account system (item 8): no backend
-    of our own, just the Drive API. Still directly conflicts with hard
-    rules 2 (Google's OAuth/API client is a runtime dependency) and 4 (this
-    is real data leaving the browser, not just an outbound link) — revisit
-    both explicitly if this moves forward, same as item 8. Also worth
-    setting up some way to test changes against real users before they
-    reach the live site (a staging branch/deploy, most likely) once this —
-    or anything else risky — is actually being built, so bugs don't hit the
-    handful of people already using it.
+12. **Google Drive sync.** Built on the `drive-sync` branch, not yet merged
+    to `main` and not yet verified against a real Google account or a real
+    second device — that verification is the explicit next step before this
+    ships, not a formality already passed. What exists: the per-record merge
+    engine (see hard rule 7, `SYNC-LESSONS.md`), an opt-in connect flow (a
+    "Connect Google Drive" button — nothing before that click touches
+    Google, an OAuth script, or the network), category reconciliation for
+    devices that have never synced before, and a delete-with-reassignment
+    picker so a duplicate category never has to be resolved by hand-editing
+    entries. Genuinely conflicts with hard rules 2 and 4 for anyone who
+    opts in — both rules now carry the exact carve-out (see hard rule 4's
+    note and the data model section's sync-fields entry) rather than being
+    quietly broken. Still worth a staging deploy before this reaches the
+    handful of people already using the live site, once real-device
+    verification is done and it's ready to merge.
 
 Do not add features that are not on this list without discussing them first.
 Feature creep is the known failure mode of this project.

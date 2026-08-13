@@ -27,7 +27,14 @@ This file is never linked from the real app; open it by hand before deploying.</
 (function(){
 "use strict";
 var out=document.getElementById("out");
+var allResults=[];
 
+function renderResults(){
+  var failing=allResults.filter(function(r){ return !r.pass; }).length;
+  out.innerHTML=allResults.map(function(r){
+    return '<div class="row"><span class="'+(r.pass?"pass":"fail")+'">'+(r.pass?"PASS":"FAIL")+'</span>  '+r.name+'</div>';
+  }).join("")+'<div id="summary">'+failing+' failing / '+allResults.length+' total</div>';
+}
 function report(results,error){
   if(error){
     out.innerHTML='<p class="fail">Could not run tests: '+error+'</p>'+
@@ -36,30 +43,53 @@ function report(results,error){
       '<code>python3 -m http.server</code> — then open <code>http://localhost:8000/selftest.html</code>.</p>';
     return;
   }
-  var failing=results.filter(function(r){ return !r.pass; }).length;
-  out.innerHTML=results.map(function(r){
-    return '<div class="row"><span class="'+(r.pass?"pass":"fail")+'">'+(r.pass?"PASS":"FAIL")+'</span>  '+r.name+'</div>';
-  }).join("")+'<div id="summary">'+failing+' failing / '+results.length+' total</div>';
+  allResults=results;
+  renderResults();
+}
+function appendResults(more){
+  allResults=allResults.concat(more);
+  renderResults();
 }
 
 document.getElementById("sandbox").addEventListener("load",function(){
+  var hook,doc;
   try{
-    var hook=this.contentWindow.__HL_TEST__;
+    hook=this.contentWindow.__HL_TEST__;
     if(!hook) throw "index.html?hltest=1 didn't expose __HL_TEST__ — is TEST_MODE wired up?";
-    report(runTests(hook,this.contentDocument));
+    doc=this.contentDocument;
+    report(runTests(hook,doc));
   }catch(e){
     report(null,e);
+    return;
   }
+  /* the connect flow is genuinely async (token, then a network round trip,
+     then merge, then push) - kept as its own continuation appended after
+     the synchronous suite above finishes and renders, rather than forcing
+     every existing synchronous test into an async wrapper for the sake of
+     a handful of new ones */
+  runAsyncTests(hook,doc).then(function(moreResults){
+    appendResults(moreResults);
+  }).catch(function(e){
+    appendResults([{name:"the async test continuation itself threw: "+(e&&e.message||e),pass:false}]);
+  });
 });
 
 function runTests(H,d){
   var results=[];
   function assert(name,cond){ results.push({name:name,pass:!!cond}); }
 
-  /* start from a clean, deterministic slate each run */
+  /* start from a clean, deterministic slate each run - this file's own
+     TEST_MODE storage persists across page loads in a real (non-headless)
+     browser profile just like any other localStorage key, so a previous
+     run's leftover driveConnected/tombstones/fake-remote state must not be
+     able to leak into this one just because someone opened this page twice */
   var fresh=H.getState();
   fresh.entries={};
+  delete fresh.driveConnected;
+  delete fresh.deletedEntries;
+  delete fresh.deletedCategories;
   H.setState(fresh);
+  H.fakeDriveReset();
 
   /* 1. an entry crossing midnight splits into two, one per day */
   H.putEntry("2026-01-05","Sleep",null,23*60+30,7*60,null);
@@ -791,7 +821,199 @@ function runTests(H,d){
       /if\s*\(\s*!TEST_MODE\s*\)\s*throw/.test(src));
   });
 
+  /* ================= checkpoint 2: connect flow, OAuth, merge-categories ================= */
+
+  /* ---- structural guards: TEST_MODE is checked before anything that could
+     reach a real network or load a real script, not after - same standard
+     as the fake Drive functions themselves */
+  (function(){
+    var src=H.getAccessToken.toString();
+    var testModeIdx=src.indexOf("TEST_MODE");
+    var gisIdx=src.indexOf("loadGisScript");
+    assert("getAccessToken() checks TEST_MODE before ever referencing the real GIS loader",
+      testModeIdx>-1&&gisIdx>-1&&testModeIdx<gisIdx);
+  })();
+  ["driveFindFileId","driveReadFile","driveWriteFile"].forEach(function(fn){
+    var src=H[fn].toString();
+    var testModeIdx=src.indexOf("TEST_MODE");
+    var fetchIdx=src.indexOf("fetch(");
+    assert(fn+"() checks TEST_MODE before the first real fetch() call appears in its own source",
+      testModeIdx>-1&&fetchIdx>-1&&testModeIdx<fetchIdx);
+  });
+
+  /* ---- window.confirm is stubbed under TEST_MODE - otherwise a headless
+     run either hangs on a real dialog or silently reads it as Cancel and
+     makes the connect flow look tested when it never ran past the prompt */
+  assert("window.confirm auto-accepts under TEST_MODE",d.defaultView.confirm("anything")===true);
+
+  /* ---- delete-with-reassignment: the actual repair tool for the one
+     failure mode reconciliation knowingly leaves open (see the design
+     discussion) - a category with no entries still deletes immediately,
+     exactly as before, so the common case gets no new friction */
+  H.setState(freshState(
+    [{id:"c1",name:"Studies",color:"#2B52A1"},{id:"c2",name:"Work",color:"#27864F"}],
+    {}
+  ));
+  assert("reassignCategoryEntries: a category with zero entries deletes immediately with no picker involved",
+    H.countCategoryEntries("c1")===0);
+  H.doDeleteCategory(H.getState().categories[0],null);
+  assert("...and is actually gone",H.getState().categories.length===1&&H.getState().categories[0].id==="c2");
+
+  H.setState(freshState(
+    [{id:"c1",name:"Studies",color:"#2B52A1"},{id:"c2",name:"Work",color:"#27864F"}],
+    {"2026-04-05":[{id:"e1",label:"Class",cat:"c1",start:540,end:600},{id:"e2",label:"Lab",cat:"c1",start:600,end:660}]}
+  ));
+  assert("countCategoryEntries counts every entry referencing a category, across all dates",
+    H.countCategoryEntries("c1")===2);
+  H.reassignCategoryEntries("c1","c2");
+  var afterReassign=H.entriesFor("2026-04-05");
+  assert("reassignCategoryEntries moves every affected entry to the new category",
+    afterReassign.every(function(e){ return e.cat==="c2"; }));
+  assert("...via putEntry's normal replace path, so each gets a genuinely new id, not an in-place mutation",
+    afterReassign.every(function(e){ return e.id!=="e1"&&e.id!=="e2"; }));
+
+  H.setState(freshState(
+    [{id:"c1",name:"Studies",color:"#2B52A1"},{id:"c2",name:"Work",color:"#27864F"}],
+    {"2026-04-06":[{id:"e1",label:"Class",cat:"c1",start:540,end:600}]}
+  ));
+  H.migrateSyncFields(H.getState());
+  H.reassignCategoryEntries("c1","c2");
+  var tombstonedOldIds=Object.keys(H.getState().deletedEntries);
+  assert("reassigning entries while migrated tombstones each original id - it's still just an edit, via removeEntry",
+    tombstonedOldIds.length===1&&tombstonedOldIds[0]==="e1");
+
+  /* ---- the actual UI: delete opens a chooser only when there's something
+     to choose about, populated with every OTHER category */
+  H.setState(freshState(
+    [{id:"c1",name:"Studies",color:"#2B52A1"},{id:"c2",name:"Work",color:"#27864F"}],
+    {"2026-04-07":[{id:"e1",label:"Class",cat:"c1",start:540,end:600}]}
+  ));
+  H.render();
+  var delBtn=d.querySelector('.cat[data-cat="c1"] .del');
+  delBtn.click();
+  var chooser=d.querySelector('.cat[data-cat="c1"] .catdelete');
+  assert("clicking delete on a category with entries opens the reassignment chooser instead of deleting immediately",
+    chooser&&!chooser.hidden&&H.getState().categories.length===2);
+  var options=[].map.call(chooser.querySelectorAll(".catdelete-target option"),function(o){ return o.value; });
+  assert("the chooser offers No category plus every other category, not the one being deleted",
+    options.length===2&&options[0]===""&&options[1]==="c2");
+  d.querySelector('.cat[data-cat="c1"] .catdelete-cancel').click();
+  assert("cancel closes the chooser without deleting anything",
+    chooser.hidden&&H.getState().categories.length===2&&H.entriesFor("2026-04-07").length===1);
+
+  delBtn.click();
+  chooser.querySelector(".catdelete-target").value="c2";
+  d.querySelector('.cat[data-cat="c1"] .catdelete-confirm').click();
+  assert("confirming with a target selected deletes the category and moves its entry there",
+    H.getState().categories.length===1&&H.entriesFor("2026-04-07")[0].cat==="c2");
+
   return results;
+}
+
+/* the connect flow, OAuth, and ongoing sync all involve real Promises even
+   under TEST_MODE (getAccessToken/driveFindFileId/etc. still return them,
+   just resolved against the fake Drive instead of a real fetch) - waitFor
+   polls rather than rejects on timeout, so a stuck async step becomes one
+   failed assertion instead of aborting every test after it in the chain */
+function waitFor(predicate,timeoutMs){
+  return new Promise(function(resolve){
+    var start=Date.now();
+    (function check(){
+      if(predicate()) return resolve(true);
+      if(Date.now()-start>timeoutMs) return resolve(false);
+      setTimeout(check,20);
+    })();
+  });
+}
+
+function runAsyncTests(H,d){
+  var results=[];
+  function assert(name,cond){ results.push({name:name,pass:!!cond}); }
+
+  var s=H.getState();
+  s.entries={};
+  s.driveConnected=false;
+  H.setState(s);
+  H.fakeDriveReset();
+
+  return new Promise(function(resolve){ H.getAccessToken(function(err,token){ resolve({err:err,token:token}); }); })
+    .then(function(res){
+      assert("getAccessToken() under TEST_MODE resolves without error",!res.err);
+      assert("getAccessToken() under TEST_MODE returns a token with no real Google account or script involved",
+        typeof res.token==="string"&&res.token.length>0);
+    })
+    .then(function(){
+      return H.driveWriteFile("fake-token",null,{categories:[{id:"x",name:"X",color:"#000",deleted:false}],entries:[]});
+    })
+    .then(function(fileId){
+      assert("driveWriteFile() under TEST_MODE returns a file id without a real network call",!!fileId);
+      return H.driveFindFileId("fake-token");
+    })
+    .then(function(foundId){
+      assert("driveFindFileId() under TEST_MODE finds the file just written",!!foundId);
+      return H.driveReadFile("fake-token",foundId);
+    })
+    .then(function(readBack){
+      assert("driveReadFile() under TEST_MODE reads back exactly what was written",
+        readBack&&readBack.categories[0].id==="x");
+      H.fakeDriveReset();
+    })
+    .then(function(){
+      /* ---- connectDrive(), end to end, via the real button - not calling
+         the hook function directly, so this exercises the actual wiring a
+         user's click goes through, confirm() stub included */
+      var cat=H.getState().categories[0];
+      H.putEntry("2026-04-10",cat.name,cat.id,540,600,null);
+      d.getElementById("connectDrive").click();
+      return waitFor(function(){ return H.getState().driveConnected===true; },4000);
+    })
+    .then(function(ok){
+      assert("connectDrive() sets driveConnected after a successful first connect",ok);
+      assert("the local entry was migrated as part of connecting (gained updatedAt)",
+        !!H.entriesFor("2026-04-10")[0].updatedAt);
+      return waitFor(function(){ return d.getElementById("connectDrive").textContent==="Drive: synced"; },4000);
+    })
+    .then(function(ok){
+      assert("the Connect button reflects a completed first push to Drive",ok);
+      var remote=H.fakeDriveRead();
+      assert("the first connect actually pushed the local entry to the fake remote",
+        remote&&remote.entries.some(function(e){ return e.date==="2026-04-10"&&!e.deleted; }));
+    })
+    .then(function(){
+      /* ---- ongoing sync: a normal save while connected debounces into an
+         automatic push, with no separate "sync now" step required */
+      var cat=H.getState().categories[0];
+      H.putEntry("2026-04-11",cat.name,cat.id,600,660,null);
+      H.persist();
+      return waitFor(function(){
+        var r=H.fakeDriveRead();
+        return r&&r.entries.some(function(e){ return e.date==="2026-04-11"&&!e.deleted; });
+      },4000);
+    })
+    .then(function(ok){
+      assert("a normal save while connected automatically syncs to Drive after the debounce, no manual step needed",ok);
+    })
+    .then(function(){
+      /* ---- importing a file never carries connection status forward, even
+         from a file that says driveConnected:true - calls the real
+         importBackupJson() (the exact function the file-input handler
+         calls once FileReader hands it text), not a re-implementation of
+         its logic, so this actually proves what app.js does. No FileReader
+         involved: that part is genuinely async I/O and belongs to the
+         event handler, not to what this is actually verifying, and mixing
+         a real FileReader round-trip into a virtual-time headless run
+         turned out to be a real, reproducible flake - synchronous and
+         deterministic here instead, same as everything above it. */
+      var fakeBackup={version:2,settings:{startHour:6,endHour:24},driveConnected:true,
+        categories:[{id:"imported-marker",name:"Imported Marker Category",color:"#2B52A1"}],
+        entries:{},weeklyVerdicts:{},weekCloseouts:{}};
+      H.importBackupJson(JSON.stringify(fakeBackup));
+      assert("importBackupJson() actually loaded the test backup (marker category present)",
+        H.getState().categories.some(function(c){ return c.id==="imported-marker"; }));
+      assert("...but driveConnected:true in the imported file was not honored",
+        H.getState().driveConnected===false);
+    })
+    .then(function(){ return results; });
 }
 })();
 </script>
