@@ -86,6 +86,261 @@ function migrateFromOldKey(){
   return old;
 }
 
+/* ---------------- sync engine (see CLAUDE.md hard rule 7 / SYNC-LESSONS.md) ----------------
+   Everything in this section is pure - takes state in, returns a result, touches no
+   globals except DEVICE_ID's own storage key and (under TEST_MODE only) FAKE_DRIVE.
+   No network code lives here at all yet; that's the connect flow, a separate piece
+   of work reviewed on its own before it exists. This section only has to be correct
+   in isolation, which is exactly what makes it fully testable without a Drive
+   account, real or fake OAuth, or any UI. */
+
+/* DEVICE_ID lives outside synced state entirely, generated once per browser
+   profile and never written by anything that came from a merge - it exists solely
+   to tell "a stale echo of my own earlier push" apart from a genuine edit from
+   another device (see mergeRecords below). Created lazily, the first time
+   anything actually needs it (a migration or a merge), not at every page load -
+   so a browser that never touches sync never gets even this one extra key. */
+var DEVICE_KEY=TEST_MODE?"hours-ledger-device-id-TESTMODE":"hours-ledger-device-id";
+function getDeviceId(){
+  var id=readStore(DEVICE_KEY);
+  if(!id){ id=uid()+uid(); writeStore(DEVICE_KEY,id); }
+  return id;
+}
+
+function nowIso(){ return new Date().toISOString(); }
+
+/* categories are mutated in place (rename, recolor) rather than replaced like
+   an edited entry is, so - unlike entries - a stale updatedAt left over from
+   a previous sync would otherwise outlive a real edit and let a later merge
+   compare against the wrong moment. Entries don't need this: every edit
+   already produces a brand new id with no prior updatedAt to go stale, so
+   lazy migration at the next sync stamps it correctly regardless. Same
+   state.deletedCategories gate as everywhere else - a no-op until this
+   device has actually connected once. */
+function bumpCategory(c){
+  if(state.deletedCategories){ c.updatedAt=nowIso(); c.updatedBy=getDeviceId(); }
+}
+
+/* Stamps every entry/category that predates sync with updatedAt/updatedBy, and
+   makes sure the two tombstone containers exist. Idempotent (checks !e.updatedAt
+   per record, not a one-time flag) and safe to call on already-migrated data -
+   it's the SAME function whether this is a device's first-ever connect or one
+   that's synced for months, so there's no separate "already migrated" code path
+   to keep in sync with this one.
+   Deliberately NOT called from the three places migrateVerdicts() is (initial
+   load, applyState, import) - unlike that migration, this one writes new fields
+   into local storage, and a browser that never opts into sync should never see
+   so much as one new byte from this feature. It only ever runs lazily, the
+   moment something that actually needs sync fields calls it (the connect flow -
+   not built yet - or a test/dry-run standing in for one). */
+function migrateSyncFields(s){
+  var stamp=nowIso(),dev=getDeviceId();
+  Object.keys(s.entries).forEach(function(dateStr){
+    s.entries[dateStr].forEach(function(e){
+      if(!e.updatedAt){ e.updatedAt=stamp; e.updatedBy=dev; }
+    });
+  });
+  s.categories.forEach(function(c){
+    if(!c.updatedAt){ c.updatedAt=stamp; c.updatedBy=dev; }
+  });
+  if(!s.deletedEntries) s.deletedEntries={};
+  if(!s.deletedCategories) s.deletedCategories={};
+  return s;
+}
+
+/* entries live nested by date for every reader in the app (grid, totals, gaps -
+   none of them know or care about sync). The sync engine's own unit is the
+   individual entry, so these two functions are the ONLY place that shape
+   conversion happens - flatten right before merging, unflatten right after,
+   nowhere else. Tombstones never enter the nested shape at all; they live in
+   their own side-channel (state.deletedEntries) so no reader anywhere has to
+   learn to skip deleted:true records - see the design discussion this was
+   settled in for why that's not just a style choice. */
+var ENTRY_FIELDS=["date","label","cat","start","end","deleted","deletedAt"];
+function flattenEntries(s){
+  var out=[];
+  Object.keys(s.entries).forEach(function(dateStr){
+    s.entries[dateStr].forEach(function(e){
+      out.push({id:e.id,date:dateStr,label:e.label,cat:e.cat,start:e.start,end:e.end,
+        updatedAt:e.updatedAt,updatedBy:e.updatedBy,deleted:false,deletedAt:null});
+    });
+  });
+  Object.keys(s.deletedEntries||{}).forEach(function(id){
+    var t=s.deletedEntries[id];
+    out.push({id:t.id,date:t.date,label:null,cat:null,start:null,end:null,
+      updatedAt:t.updatedAt,updatedBy:t.updatedBy,deleted:true,deletedAt:t.deletedAt});
+  });
+  return out;
+}
+function unflattenEntries(flat){
+  var entries={},deletedEntries={};
+  flat.forEach(function(r){
+    if(r.deleted){
+      deletedEntries[r.id]={id:r.id,date:r.date,updatedAt:r.updatedAt,updatedBy:r.updatedBy,deletedAt:r.deletedAt};
+    }else{
+      if(!entries[r.date]) entries[r.date]=[];
+      entries[r.date].push({id:r.id,label:r.label,cat:r.cat,start:r.start,end:r.end,
+        updatedAt:r.updatedAt,updatedBy:r.updatedBy});
+    }
+  });
+  return {entries:entries,deletedEntries:deletedEntries};
+}
+
+/* categories are already a flat array with ids, so this is a much smaller step -
+   just folding the tombstone side-channel in and back out, same shape rule. */
+var CATEGORY_FIELDS=["name","color","deleted","deletedAt"];
+function flattenCategories(s){
+  var out=(s.categories||[]).map(function(c){
+    return {id:c.id,name:c.name,color:c.color,updatedAt:c.updatedAt,updatedBy:c.updatedBy,deleted:false,deletedAt:null};
+  });
+  Object.keys(s.deletedCategories||{}).forEach(function(id){
+    var t=s.deletedCategories[id];
+    out.push({id:t.id,name:null,color:null,updatedAt:t.updatedAt,updatedBy:t.updatedBy,deleted:true,deletedAt:t.deletedAt});
+  });
+  return out;
+}
+function unflattenCategories(flat){
+  var categories=[],deletedCategories={};
+  flat.forEach(function(r){
+    if(r.deleted) deletedCategories[r.id]={id:r.id,updatedAt:r.updatedAt,updatedBy:r.updatedBy,deletedAt:r.deletedAt};
+    else categories.push({id:r.id,name:r.name,color:r.color,updatedAt:r.updatedAt,updatedBy:r.updatedBy});
+  });
+  return {categories:categories,deletedCategories:deletedCategories};
+}
+
+/* the merge itself - compares records, never files. Ported from Money Ledger's
+   mergeRecords (see SYNC-LESSONS.md) with the same six-case shape; only the
+   caller-supplied contentFields whitelist changes per record type. */
+var AMBIGUITY_WINDOW_MS=5000;
+function sameContent(a,b,contentFields){
+  return contentFields.every(function(f){ return a[f]===b[f]; });
+}
+function mergeRecords(localArr,remoteArr,contentFields,deviceId){
+  var byId={};
+  localArr.forEach(function(r){ (byId[r.id]=byId[r.id]||{}).local=r; });
+  remoteArr.forEach(function(r){ (byId[r.id]=byId[r.id]||{}).remote=r; });
+  var merged=[];
+  Object.keys(byId).forEach(function(id){
+    var L=byId[id].local,R=byId[id].remote;
+    if(L&&!R){ merged.push(L); return; }                  /* 1. present on one side only -> keep it */
+    if(R&&!L){ merged.push(R); return; }
+    if(sameContent(L,R,contentFields)){ merged.push(L); return; }  /* 2. same content -> nothing to decide */
+    if(R.updatedBy===deviceId){ merged.push(L); return; }  /* 3. remote is my own stale echo -> trust local */
+    var Lt=Date.parse(L.updatedAt),Rt=Date.parse(R.updatedAt),deltaMs=Math.abs(Lt-Rt);
+    if(L.deleted!==R.deleted){                             /* 4. one deleted, one live */
+      if(deltaMs<=AMBIGUITY_WINDOW_MS){ merged.push(L.deleted?R:L); return; } /* ambiguous -> live wins, never delete on a guess */
+      merged.push(Lt>=Rt?L:R); return;                      /* otherwise newer wins */
+    }
+    if(L.deleted&&R.deleted){ merged.push(Lt>=Rt?L:R); return; } /* 5. redundant tombstones -> keep newer */
+    merged.push(Lt>=Rt?L:R);                                /* 6. both live, genuinely differ -> last-write-wins */
+  });
+  return merged;
+}
+
+/* categories can't rely on ids to recognise "the same" category across two
+   devices that have never synced before - every fresh install invents its own
+   random ids for its 8 starter categories, and anything the user names
+   themselves (a "Muay Thai" created on two phones) has no anchor at all. This
+   runs BEFORE the id-based merge above and finds those pairs by content
+   instead: an exact match on name AND color, deliberately conservative (see
+   the design discussion - a missed match just leaves two visible categories
+   to sort out by hand; a wrong match would silently reassign real entries,
+   which is the direction to err away from). A pair only needs reconciling if
+   local and remote don't already share an id - if they do, the ordinary
+   id-based merge already has it covered, including a genuine rename (case 6,
+   last-write-wins). When a match is found, remote's id always wins (if
+   there's a remote category to match against at all, it necessarily already
+   has history - the only case with nothing to reconcile is a first-ever push
+   to an empty file, where there's no remote side to match against in the
+   first place) and local's copy becomes a real tombstone, not just an
+   omission - so a third device, or this same device syncing again later,
+   never sees the loser's absence and mistakes it for "new" and resurrects it. */
+function reconcileCategories(localFlat,remoteFlat,deviceId){
+  var localLive=localFlat.filter(function(r){ return !r.deleted; });
+  var remoteLive=remoteFlat.filter(function(r){ return !r.deleted; });
+  var idRemap={},extraTombstones=[];
+  localLive.forEach(function(L){
+    var alreadyShared=remoteFlat.some(function(r){ return r.id===L.id; });
+    if(alreadyShared) return;
+    var match=null;
+    remoteLive.forEach(function(R){
+      if(match||R.id===L.id) return;
+      if(R.name===L.name&&R.color===L.color) match=R;
+    });
+    if(match){
+      idRemap[L.id]=match.id;
+      extraTombstones.push({id:L.id,name:null,color:null,updatedAt:nowIso(),updatedBy:deviceId,deleted:true,deletedAt:nowIso()});
+    }
+  });
+  return {idRemap:idRemap,extraTombstones:extraTombstones};
+}
+function applyReconciliation(localFlat,reconciled){
+  var loserIds=Object.keys(reconciled.idRemap);
+  return localFlat.filter(function(r){ return loserIds.indexOf(r.id)===-1; }).concat(reconciled.extraTombstones);
+}
+
+/* the whole engine in one call: migrate, reconcile categories, rewrite any
+   entry that pointed at a category reconciliation just folded away, merge
+   both collections, hand back the two things a caller needs - the new local
+   state ready to persist immediately, and the flat payload to push. Nothing
+   here writes to state or to any storage itself; the caller decides when
+   (write locally first, always, per SYNC-LESSONS.md's ordering - push only
+   after, and only the connect flow, not yet built, ever risks the network
+   call). remoteFile is null for a genuine first-ever sync (nothing to merge
+   against, every local record trivially survives via case 1 above); its
+   shape otherwise is {categories:[...flat...], entries:[...flat...]}, tombstones
+   inline via deleted:true, no separate remote-side deleted-map. */
+function syncEngine(localState,remoteFile,deviceId){
+  migrateSyncFields(localState);
+  var remote=remoteFile||{categories:[],entries:[]};
+
+  var localCatsFlat=flattenCategories(localState);
+  var reconciled=reconcileCategories(localCatsFlat,remote.categories,deviceId);
+  var localCatsAdjusted=applyReconciliation(localCatsFlat,reconciled);
+  var mergedCatsFlat=mergeRecords(localCatsAdjusted,remote.categories,CATEGORY_FIELDS,deviceId);
+
+  function remapCat(r){
+    if(r.cat&&reconciled.idRemap[r.cat]) return Object.assign({},r,{cat:reconciled.idRemap[r.cat]});
+    return r;
+  }
+  var localEntriesFlat=flattenEntries(localState).map(remapCat);
+  var remoteEntriesFlat=(remote.entries||[]).map(remapCat);
+  var mergedEntriesFlat=mergeRecords(localEntriesFlat,remoteEntriesFlat,ENTRY_FIELDS,deviceId);
+
+  var catsResult=unflattenCategories(mergedCatsFlat);
+  var entriesResult=unflattenEntries(mergedEntriesFlat);
+
+  return {
+    newLocalState:Object.assign({},localState,{
+      categories:catsResult.categories,deletedCategories:catsResult.deletedCategories,
+      entries:entriesResult.entries,deletedEntries:entriesResult.deletedEntries
+    }),
+    toPush:{categories:mergedCatsFlat,entries:mergedEntriesFlat}
+  };
+}
+
+/* ---------------- fake Drive (TEST_MODE only) ----------------
+   No real network function exists yet - the connect flow, OAuth, and the real
+   fetch calls are separate work, reviewed before they're built. This exists
+   now so the engine above and the dry-run tool have something to push to and
+   pull from without a Google account, real or fake, ever being needed. Guarded
+   at the top of every function, not just by convention at the call site - none
+   of these can run for a real user by construction, because TEST_MODE itself
+   only ever comes from selftest.html's own URL flag. */
+var FAKE_DRIVE_KEY="hours-ledger-fakedrive-TESTMODE";
+function fakeDriveRead(){
+  if(!TEST_MODE) throw new Error("fakeDriveRead is TEST_MODE only");
+  try{ return JSON.parse(readStore(FAKE_DRIVE_KEY)); }catch(e){ return null; }
+}
+function fakeDriveWrite(data){
+  if(!TEST_MODE) throw new Error("fakeDriveWrite is TEST_MODE only");
+  writeStore(FAKE_DRIVE_KEY,JSON.stringify(data));
+}
+function fakeDriveReset(){
+  if(!TEST_MODE) throw new Error("fakeDriveReset is TEST_MODE only");
+  writeStore(FAKE_DRIVE_KEY,JSON.stringify(null));
+}
+
 var state;
 try{ state=JSON.parse(readStore(KEY))||null; }catch(e){ state=null; }
 if(!state||!state.categories) state=migrateFromOldKey();
@@ -295,11 +550,23 @@ function putEntryWithBreaks(dateStr,label,catId,start,end,breaks,replaceId){
   });
   if(cursor<end) push(dateStr,label,catId,cursor,end);
 }
+/* the one place any entry is ever removed from state.entries - explicit
+   deletes AND every edit both go through here (putEntry's replaceId path
+   below calls this before pushing the edited version back in as a new
+   record with a new id, so from sync's perspective an edit already looks
+   exactly like a delete-then-create). That makes this the single load-
+   bearing choke point for tombstone-writing: skip it here and every edit,
+   not just every explicit delete, would resurrect its own pre-edit content
+   the next time an unsynced device merges in. Gated on state.deletedEntries
+   existing - a device that's never touched sync has no such key, so this
+   stays a no-op and the function does exactly what it always did. */
 function removeEntry(id){
+  var f=state.deletedEntries&&findEntry(id);
   for(var k in state.entries){
     state.entries[k]=state.entries[k].filter(function(e){ return e.id!==id; });
     if(!state.entries[k].length) delete state.entries[k];
   }
+  if(f) state.deletedEntries[id]={id:id,date:f.date,updatedAt:nowIso(),updatedBy:getDeviceId(),deletedAt:nowIso()};
 }
 function findEntry(id){
   for(var k in state.entries) for(var i=0;i<state.entries[k].length;i++)
@@ -887,11 +1154,13 @@ cats.addEventListener("input",function(ev){
   var c=catById(row.dataset.cat); if(!c) return;
   if(ev.target.classList.contains("nm")){
     c.name=ev.target.value;
+    bumpCategory(c);
     clearTimeout(nameTimer);
     nameTimer=setTimeout(function(){ persist(); renderTotals(); },400);
   }
   if(ev.target.classList.contains("hue")){
     c.color=hslHex(+ev.target.value);
+    bumpCategory(c);
     row.querySelector(".sw").style.background=c.color;
     recolorEntries();
     clearTimeout(nameTimer);
@@ -913,6 +1182,7 @@ cats.addEventListener("click",function(ev){
   var pre=ev.target.closest(".presets button");
   if(pre){
     c.color=pre.dataset.hex;
+    bumpCategory(c);
     row.querySelector(".sw").style.background=c.color;
     row.querySelector(".hue").value=hueOf(c.color);
     recolorEntries(); persist(); renderTotals();
@@ -920,6 +1190,7 @@ cats.addEventListener("click",function(ev){
   }
   if(ev.target.classList.contains("del")){
     snapshot('delete category "'+c.name+'"');
+    if(state.deletedCategories) state.deletedCategories[c.id]={id:c.id,updatedAt:nowIso(),updatedBy:getDeviceId(),deletedAt:nowIso()};
     state.categories=state.categories.filter(function(x){ return x.id!==c.id; });
     persist(); render();
     showToast('Deleted "'+(c.name||"category")+'". Its entries moved to No category.',true);
@@ -931,7 +1202,9 @@ document.addEventListener("click",function(ev){
 });
 
 document.getElementById("addCat").addEventListener("click",function(){
-  state.categories.push({id:uid(),name:"",color:SWATCHES[state.categories.length%SWATCHES.length]});
+  var c={id:uid(),name:"",color:SWATCHES[state.categories.length%SWATCHES.length]};
+  bumpCategory(c);
+  state.categories.push(c);
   persist(); renderCats(); renderTotals();
   var last=cats.querySelector(".cat:last-child .nm");
   if(last){ last.placeholder="Name it…"; last.focus(); }
@@ -1162,7 +1435,13 @@ document.getElementById("clear").addEventListener("click",function(){
                  "Other weeks and your categories are untouched.\nYou can undo this with Ctrl/\u2318 + Z.");
   if(!ok) return;
   snapshot("clear week of "+span);
-  days.forEach(function(d){ delete state.entries[iso(d)]; });
+  /* goes through removeEntry (not a direct delete of the day's key) so this
+     produces the same tombstones an explicit per-entry delete would - a
+     device that synced any of these entries before the clear needs to see
+     them actually removed, not just re-add them all right back */
+  days.forEach(function(d){
+    entriesFor(iso(d)).slice().forEach(function(e){ removeEntry(e.id); });
+  });
   persist(); renderGrid(); renderTotals();
   showToast("Cleared "+n+" "+(n===1?"entry":"entries")+" from "+span,true);
 });
@@ -1310,7 +1589,22 @@ if(TEST_MODE){
     lastCompleteWeekStart:lastCompleteWeekStart,
     weekHasEntries:weekHasEntries,
     openCloseout:openCloseout,
-    updateCloseoutAvailability:updateCloseoutAvailability
+    updateCloseoutAvailability:updateCloseoutAvailability,
+    catById:catById,
+    nowIso:nowIso,
+    getDeviceId:getDeviceId,
+    setDeviceId:function(id){ writeStore(DEVICE_KEY,id); },
+    migrateSyncFields:migrateSyncFields,
+    flattenEntries:flattenEntries,
+    unflattenEntries:unflattenEntries,
+    flattenCategories:flattenCategories,
+    unflattenCategories:unflattenCategories,
+    mergeRecords:mergeRecords,
+    reconcileCategories:reconcileCategories,
+    syncEngine:syncEngine,
+    fakeDriveRead:fakeDriveRead,
+    fakeDriveWrite:fakeDriveWrite,
+    fakeDriveReset:fakeDriveReset
   };
 }
 })();

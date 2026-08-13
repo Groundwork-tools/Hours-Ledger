@@ -481,6 +481,316 @@ function runTests(H,d){
     d.getElementById("fStart").value===expStartStr);
   d.getElementById("fCancel").click();
 
+  /* ================= sync engine (see CLAUDE.md hard rule 7, SYNC-LESSONS.md) =================
+     Everything below tests pure functions or the CRUD choke points that feed
+     them - no network, no OAuth, nothing that could reach a real Drive file
+     even by accident (see fakeDrive* below, TEST_MODE-gated in app.js itself,
+     not just here). A small local helper for building minimal, self-contained
+     state objects, so these tests don't depend on whatever earlier tests left
+     behind in the shared H.getState(). */
+  function freshState(cats,entriesByDate){
+    return {version:2,settings:{startHour:6,endHour:24},categories:cats||[],
+      entries:entriesByDate||{},weeklyVerdicts:{},weekCloseouts:{}};
+  }
+
+  /* ---- mergeRecords: the six cases, as properties of the algorithm itself -
+     tested with a made-up "val" content field rather than real entries or
+     categories, since the cases don't depend on what kind of record it is
+     (see SYNC-LESSONS.md's own case list, which this is ported from). */
+  var DEV_A="device-A",DEV_B="device-B";
+  var T0="2026-01-01T00:00:00.000Z";
+  var T1="2026-01-01T00:00:10.000Z"; // 10s after T0 - outside the 5s ambiguity window
+  var T2="2026-01-01T00:00:02.000Z"; // 2s after T0 - inside the 5s ambiguity window
+  function rec(id,val,updatedAt,updatedBy,deleted){
+    return {id:id,val:val,updatedAt:updatedAt,updatedBy:updatedBy||DEV_A,deleted:!!deleted,deletedAt:deleted?updatedAt:null};
+  }
+
+  (function(){
+    var merged=H.mergeRecords([rec("a","x",T0)],[],["val"],DEV_A);
+    assert("mergeRecords case 1: local-only record is kept",merged.length===1&&merged[0].id==="a");
+  })();
+  (function(){
+    var merged=H.mergeRecords([],[rec("b","y",T0)],["val"],DEV_A);
+    assert("mergeRecords case 1: remote-only record is kept",merged.length===1&&merged[0].id==="b");
+  })();
+  (function(){
+    var merged=H.mergeRecords([rec("a","x",T0)],[rec("a","x",T1,DEV_B)],["val"],DEV_A);
+    assert("mergeRecords case 2: same content on both sides produces exactly one record, not two",
+      merged.length===1&&merged[0].val==="x");
+  })();
+  (function(){
+    var local=[rec("a","local-edit",T0,DEV_A)];
+    var remote=[rec("a","stale-echo-of-my-own-push",T1,DEV_A)]; // updatedBy is THIS device
+    var merged=H.mergeRecords(local,remote,["val"],DEV_A);
+    assert("mergeRecords case 3: remote written by this same device always loses to local, no ambiguity window",
+      merged.length===1&&merged[0].val==="local-edit");
+  })();
+  (function(){
+    var merged=H.mergeRecords([rec("a","alive",T1,DEV_A,false)],[rec("a","x",T0,DEV_B,true)],["val"],DEV_A);
+    assert("mergeRecords case 4: a newer live record beats an older tombstone",
+      merged.length===1&&!merged[0].deleted);
+  })();
+  (function(){
+    var merged=H.mergeRecords([rec("a","alive",T0,DEV_A,false)],[rec("a","x",T1,DEV_B,true)],["val"],DEV_A);
+    assert("mergeRecords case 4: a newer tombstone beats an older live record",
+      merged.length===1&&merged[0].deleted);
+  })();
+  (function(){
+    var merged=H.mergeRecords([rec("a","alive",T0,DEV_A,false)],[rec("a","x",T2,DEV_B,true)],["val"],DEV_A);
+    assert("mergeRecords case 4: within the 5s ambiguity window, live wins even if the tombstone is nominally newer - never delete on a guess",
+      merged.length===1&&!merged[0].deleted);
+  })();
+  (function(){
+    /* real tombstones always differ in deletedAt even when every other
+       content field is empty, so deletedAt has to be in the whitelist here
+       too - matching ENTRY_FIELDS/CATEGORY_FIELDS, which both include it -
+       otherwise two distinct tombstones look content-identical and this
+       hits case 2 before ever reaching case 5, exactly as case 2 says it
+       should when content (including deletedAt) truly doesn't differ */
+    var L=rec("a",null,T0,DEV_A,true),R=rec("a",null,T1,DEV_B,true);
+    var merged=H.mergeRecords([L],[R],["val","deletedAt"],DEV_A);
+    assert("mergeRecords case 5: both deleted keeps the newer tombstone, not a real conflict",
+      merged.length===1&&merged[0].deleted&&merged[0].updatedAt===T1);
+  })();
+  (function(){
+    var merged=H.mergeRecords([rec("a","older-edit",T0,DEV_A,false)],[rec("a","newer-edit",T1,DEV_B,false)],["val"],DEV_A);
+    assert("mergeRecords case 6: both live and genuinely different, the newer edit wins",
+      merged.length===1&&merged[0].val==="newer-edit");
+  })();
+
+  /* ---- migration: stamps records that predate sync, leaves already-stamped
+     ones untouched, is safe to call more than once */
+  H.setState(freshState(
+    [{id:"c1",name:"Studies",color:"#2B52A1"}],
+    {"2026-02-02":[{id:"e1",label:"Work",cat:"c1",start:540,end:600}]}
+  ));
+  assert("a freshly constructed state has no sync fields yet",
+    !H.getState().entries["2026-02-02"][0].updatedAt&&!H.getState().categories[0].updatedAt);
+  H.migrateSyncFields(H.getState());
+  assert("migration stamps updatedAt on a pre-sync entry",
+    !!H.getState().entries["2026-02-02"][0].updatedAt);
+  assert("migration stamps updatedBy on a pre-sync entry with this device's id",
+    H.getState().entries["2026-02-02"][0].updatedBy===H.getDeviceId());
+  assert("migration stamps updatedAt/updatedBy on a pre-sync category",
+    !!H.getState().categories[0].updatedAt&&H.getState().categories[0].updatedBy===H.getDeviceId());
+  assert("migration initializes deletedEntries and deletedCategories as empty objects",
+    JSON.stringify(H.getState().deletedEntries)==="{}"&&JSON.stringify(H.getState().deletedCategories)==="{}");
+  var stampedAt=H.getState().entries["2026-02-02"][0].updatedAt;
+  H.migrateSyncFields(H.getState());
+  assert("migration is idempotent - an already-stamped entry keeps its exact original timestamp",
+    H.getState().entries["2026-02-02"][0].updatedAt===stampedAt);
+
+  /* ---- flatten/unflatten round-trip (entries and categories both) */
+  (function(){
+    var s=freshState(
+      [{id:"c1",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_A}],
+      {"2026-02-02":[{id:"e1",label:"Work",cat:"c1",start:540,end:600,updatedAt:T0,updatedBy:DEV_A}]}
+    );
+    s.deletedEntries={"e9":{id:"e9",date:"2026-02-01",updatedAt:T0,updatedBy:DEV_A,deletedAt:T0}};
+    s.deletedCategories={};
+    var flatE=H.flattenEntries(s);
+    assert("flattenEntries produces one record per live entry plus one per tombstone",
+      flatE.length===2&&flatE.some(function(r){return r.id==="e1"&&!r.deleted;})&&flatE.some(function(r){return r.id==="e9"&&r.deleted;}));
+    var back=H.unflattenEntries(flatE);
+    assert("unflattenEntries round-trips a live entry back to its original content",
+      back.entries["2026-02-02"][0].label==="Work"&&back.entries["2026-02-02"][0].cat==="c1");
+    assert("unflattenEntries round-trips a tombstone back into deletedEntries, not into entries",
+      !!back.deletedEntries["e9"]&&!back.entries["2026-02-01"]);
+    var flatC=H.flattenCategories(s);
+    var backC=H.unflattenCategories(flatC);
+    assert("flatten/unflattenCategories round-trips a category's name and color",
+      backC.categories[0].name==="Studies"&&backC.categories[0].color==="#2B52A1");
+  })();
+
+  /* ---- tombstone gating: no footprint until a device has actually
+     migrated once (state.deletedEntries/deletedCategories existing IS the
+     signal, not a separate connected flag) */
+  H.setState(freshState([{id:"c1",name:"Studies",color:"#2B52A1"}],{}));
+  assert("a never-migrated state has no deletedEntries container",
+    !H.getState().deletedEntries);
+  H.putEntry("2026-02-03","Gym","c1",600,660,null);
+  var preSyncId=H.entriesFor("2026-02-03")[0].id;
+  H.removeEntry(preSyncId);
+  assert("removeEntry writes no tombstone when this device has never migrated - identical to pre-sync behavior",
+    !H.getState().deletedEntries);
+
+  H.migrateSyncFields(H.getState());
+  H.putEntry("2026-02-03","Gym","c1",600,660,null);
+  var postSyncId=H.entriesFor("2026-02-03")[0].id;
+  H.removeEntry(postSyncId);
+  assert("removeEntry writes a real tombstone once this device has migrated",
+    !!H.getState().deletedEntries[postSyncId]&&H.getState().deletedEntries[postSyncId].date==="2026-02-03");
+
+  /* ---- editing an entry replaces its id (putEntry's replaceId path calls
+     removeEntry, then pushes a new record) - this is the sharpest case for
+     tombstones, since without one here, a device that never saw the edit
+     would resurrect the pre-edit content the next time it merges in */
+  H.setState(freshState([{id:"c1",name:"Studies",color:"#2B52A1"}],{}));
+  H.migrateSyncFields(H.getState());
+  H.putEntry("2026-02-04","Before edit","c1",540,600,null);
+  var beforeEditId=H.entriesFor("2026-02-04")[0].id;
+  H.putEntry("2026-02-04","After edit","c1",540,630,beforeEditId);
+  var afterEditId=H.entriesFor("2026-02-04")[0].id;
+  assert("editing an entry produces a genuinely new id, not an in-place update",
+    afterEditId!==beforeEditId);
+  assert("the pre-edit id is tombstoned once this device has migrated",
+    !!H.getState().deletedEntries[beforeEditId]);
+  assert("the post-edit id is live with the new content",
+    H.entriesFor("2026-02-04")[0].label==="After edit"&&!H.getState().deletedEntries[afterEditId]);
+
+  /* ---- category delete tombstones, and rename/recolor bump updatedAt only
+     once this device has migrated */
+  H.setState(freshState([{id:"c1",name:"Studies",color:"#2B52A1"}],{}));
+  assert("a fresh state has no deletedCategories container yet",
+    !H.getState().deletedCategories);
+  var c1before=H.getState().categories[0];
+  c1before.name="Renamed pre-migration";
+  assert("renaming a category before this device has ever migrated leaves it with no updatedAt (matches today's app exactly)",
+    !c1before.updatedAt);
+  H.migrateSyncFields(H.getState());
+  var stampAfterFirstMigration=H.getState().categories[0].updatedAt;
+  H.getState().categories[0].name="Renamed post-migration";
+  H.migrateSyncFields(H.getState()); // migration alone must NOT bump an already-stamped record just because it ran again
+  assert("migration alone never re-stamps an in-place rename - only the app's own bumpCategory() does that",
+    H.getState().categories[0].updatedAt===stampAfterFirstMigration);
+
+  /* ---- category deletion tombstones once migrated */
+  H.setState(freshState([{id:"c1",name:"Studies",color:"#2B52A1"}],{}));
+  H.migrateSyncFields(H.getState());
+  H.getState().deletedCategories["c1"]={id:"c1",updatedAt:H.nowIso(),updatedBy:H.getDeviceId(),deletedAt:H.nowIso()};
+  H.getState().categories=H.getState().categories.filter(function(c){ return c.id!=="c1"; });
+  assert("a deleted category (simulated the way the real delete handler does it) leaves a real tombstone behind",
+    !!H.getState().deletedCategories["c1"]&&H.getState().categories.length===0);
+
+  /* ---- "Clear this week" tombstones every entry it removes, the same as
+     an explicit per-entry delete would (regression test: it used to delete
+     state.entries[date] directly, bypassing removeEntry and its tombstone
+     entirely) */
+  H.setState(freshState([{id:"c1",name:"Studies",color:"#2B52A1"}],{}));
+  H.migrateSyncFields(H.getState());
+  H.putEntry("2026-02-05","A","c1",540,600,null);
+  H.putEntry("2026-02-05","B","c1",600,660,null);
+  var clearedIds=H.entriesFor("2026-02-05").map(function(e){ return e.id; });
+  clearedIds.forEach(function(id){ H.removeEntry(id); }); // exactly what the Clear-this-week handler now does per entry
+  assert("clearing a week's entries tombstones every one of them, not just deletes them silently",
+    clearedIds.every(function(id){ return !!H.getState().deletedEntries[id]; }));
+
+  /* ---- category reconciliation: the seed/user-created-category landmine */
+  (function(){
+    var localFlat=[
+      {id:"local-studies",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null},
+      {id:"local-muaythai",name:"Muay Thai",color:"#B18725",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}
+    ];
+    var remoteFlat=[
+      {id:"remote-studies",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_A,deleted:false,deletedAt:null},
+      {id:"remote-muaythai",name:"Muay Thai",color:"#B18725",updatedAt:T0,updatedBy:DEV_A,deleted:false,deletedAt:null}
+    ];
+    var r=H.reconcileCategories(localFlat,remoteFlat,DEV_B);
+    assert("reconcileCategories matches both same-name-same-color pairs, seeded or user-created alike",
+      r.idRemap["local-studies"]==="remote-studies"&&r.idRemap["local-muaythai"]==="remote-muaythai");
+    assert("the losing local id gets a real tombstone, not just an omission",
+      r.extraTombstones.length===2&&r.extraTombstones.every(function(t){ return t.deleted; }));
+  })();
+  (function(){ // conservative matching: name matches, color doesn't -> NOT merged
+    var localFlat=[{id:"local-x",name:"Studies",color:"#111111",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
+    var remoteFlat=[{id:"remote-x",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_A,deleted:false,deletedAt:null}];
+    var r=H.reconcileCategories(localFlat,remoteFlat,DEV_B);
+    assert("a name match with a different color is left alone - conservative matching, no wrong merge",
+      Object.keys(r.idRemap).length===0);
+  })();
+  (function(){ // conservative matching: color matches, name doesn't -> NOT merged
+    var localFlat=[{id:"local-x",name:"Side projects",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
+    var remoteFlat=[{id:"remote-x",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_A,deleted:false,deletedAt:null}];
+    var r=H.reconcileCategories(localFlat,remoteFlat,DEV_B);
+    assert("a color match with a different name is left alone - a shared palette color isn't a meaningful signal on its own",
+      Object.keys(r.idRemap).length===0);
+  })();
+  (function(){ // ids already shared -> ordinary merge handles it, reconciliation stays out of the way
+    var localFlat=[{id:"c1",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
+    var remoteFlat=[{id:"c1",name:"Studies (renamed remotely)",color:"#2B52A1",updatedAt:T1,updatedBy:DEV_A,deleted:false,deletedAt:null}];
+    var r=H.reconcileCategories(localFlat,remoteFlat,DEV_B);
+    assert("a pair that already shares an id is never touched by reconciliation - that's the ordinary merge's job",
+      Object.keys(r.idRemap).length===0);
+  })();
+
+  /* ---- syncEngine, end to end: two independently-installed devices with
+     the SAME default categories (different random ids, exactly like two
+     real fresh installs) sync through a shared fake remote, never doubling
+     a category, with entries correctly following the surviving id */
+  (function(){
+    var deviceA="sim-device-A",deviceB="sim-device-B";
+    var stateA=freshState(
+      [{id:"a-studies",name:"Studies",color:"#2B52A1"},{id:"a-work",name:"Work / income",color:"#27864F"}],
+      {"2026-03-02":[{id:"a-e1",label:"Lecture",cat:"a-studies",start:540,end:600}]}
+    );
+    var pushA=H.syncEngine(stateA,null,deviceA); // device A: first-ever sync, empty remote
+    assert("first-ever sync (empty remote) keeps every local category and entry - the trivial case, case 1 throughout",
+      pushA.toPush.categories.filter(function(c){return !c.deleted;}).length===2&&
+      pushA.toPush.entries.filter(function(e){return !e.deleted;}).length===1);
+
+    var stateB=freshState(
+      [{id:"b-studies",name:"Studies",color:"#2B52A1"},{id:"b-work",name:"Work / income",color:"#27864F"}],
+      {"2026-03-03":[{id:"b-e1",label:"Standup",cat:"b-studies",start:600,end:630}]}
+    );
+    var remoteAfterA={categories:pushA.toPush.categories,entries:pushA.toPush.entries};
+    var pushB=H.syncEngine(stateB,remoteAfterA,deviceB);
+    var liveCats=pushB.toPush.categories.filter(function(c){ return !c.deleted; });
+    assert("device B's independently-seeded 'Studies'/'Work' don't double the category list - still 2, not 4",
+      liveCats.length===2);
+    var studiesIdAfterMerge=liveCats.filter(function(c){ return c.name==="Studies"; })[0].id;
+    var bEntryAfterMerge=pushB.toPush.entries.filter(function(e){ return e.id==="b-e1"&&!e.deleted; })[0];
+    assert("device B's own entry follows its category's surviving id after reconciliation, not the id B originally had",
+      bEntryAfterMerge.cat===studiesIdAfterMerge&&studiesIdAfterMerge==="a-studies");
+    assert("device B's newLocalState only has the 2 reconciled categories, not B's original duplicates",
+      pushB.newLocalState.categories.length===2);
+  })();
+
+  /* ---- the pre-sync category-deletion scenario from the design discussion:
+     device A deleted a category before sync existed (no tombstone possible -
+     the concept didn't exist yet), so its entries kept the now-dangling cat
+     id untouched (deleting a category has never rewritten entries - see
+     app.js's delete handler). Device B still has the category. After they
+     sync, A's "orphaned" entries must automatically show it again, because
+     the reference was never actually broken, only the category record was
+     briefly missing. */
+  (function(){
+    var deviceA="sim-device-A2",deviceB="sim-device-B2";
+    // Device A: entry still has cat:"studies-id" but the category itself was deleted pre-sync
+    var stateA=freshState([],{"2026-03-04":[{id:"a-e1",label:"Class",cat:"studies-id",start:540,end:600}]});
+    var pushA=H.syncEngine(stateA,null,deviceA);
+    var remoteAfterA={categories:pushA.toPush.categories,entries:pushA.toPush.entries};
+    assert("device A's push has zero live categories (it deleted the only one, pre-sync)",
+      remoteAfterA.categories.filter(function(c){return !c.deleted;}).length===0);
+
+    var stateB=freshState([{id:"studies-id",name:"Studies",color:"#2B52A1"}],{"2026-03-05":[{id:"b-e1",label:"Lecture",cat:"studies-id",start:600,end:660}]});
+    var pushB=H.syncEngine(stateB,remoteAfterA,deviceB);
+    var remoteAfterB={categories:pushB.toPush.categories,entries:pushB.toPush.entries};
+    assert("device B's still-live category survives the merge (case 1: present on one side only)",
+      remoteAfterB.categories.filter(function(c){return !c.deleted && c.id==="studies-id";}).length===1);
+
+    // Device A syncs again, pulling the now-restored category down
+    var pullA=H.syncEngine(pushA.newLocalState,remoteAfterB,deviceA);
+    var aStudiesCat=pullA.newLocalState.categories.filter(function(c){ return c.id==="studies-id"; });
+    assert("device A's category resurfaces after the second sync",aStudiesCat.length===1);
+    assert("device A's originally-orphaned entry automatically shows the resurfaced category - the reference was never actually broken",
+      pullA.newLocalState.entries["2026-03-04"][0].cat==="studies-id");
+  })();
+
+  /* ---- FAKE_DRIVE: round-trips, and is structurally incapable of a real
+     network call under TEST_MODE (checked statically, not just by convention -
+     see SYNC-LESSONS.md's "structural, not tests behave politely") */
+  H.fakeDriveReset();
+  assert("fakeDriveRead returns null when nothing has been written yet",H.fakeDriveRead()===null);
+  H.fakeDriveWrite({categories:[],entries:[{id:"x"}]});
+  assert("fakeDriveWrite then fakeDriveRead round-trips the exact data written",
+    H.fakeDriveRead().entries[0].id==="x");
+  H.fakeDriveReset();
+  ["fakeDriveRead","fakeDriveWrite","fakeDriveReset"].forEach(function(fn){
+    var src=H[fn].toString();
+    assert(fn+"() guards on TEST_MODE as its first statement, before anything else can run",
+      /if\s*\(\s*!TEST_MODE\s*\)\s*throw/.test(src));
+  });
+
   return results;
 }
 })();

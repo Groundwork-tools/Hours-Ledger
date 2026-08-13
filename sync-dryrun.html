@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hours Ledger — sync dry run</title>
+<style>
+  body{font-family:ui-monospace,"SF Mono",Menlo,monospace;background:#FAFAF7;color:#16211B;padding:24px;line-height:1.6;max-width:760px}
+  h1{font-size:15px;text-transform:uppercase;letter-spacing:.08em}
+  .warn{border:1px solid #B23A2F;color:#B23A2F;padding:10px 12px;margin:14px 0;font-size:13px;line-height:1.6}
+  ol{padding-left:20px}
+  li{margin-bottom:6px}
+  button{font-family:inherit;font-size:13px;padding:8px 14px;border:1px solid #16211B;background:#16211B;color:#FAFAF7;cursor:pointer}
+  button:disabled{opacity:.4;cursor:default}
+  input[type=file]{font-family:inherit;font-size:13px}
+  #report{margin-top:16px;padding-top:12px;border-top:1px solid #C2CDC1;white-space:pre-wrap;font-size:13px}
+  .pass{color:#2F6B4F;font-weight:700}
+  .fail{color:#B23A2F;font-weight:700}
+  iframe{display:none}
+</style>
+</head>
+<body>
+<h1>Hours Ledger — sync dry run</h1>
+<p>Runs migration and a first push-then-pull against a copy of your real data,
+entirely inside <code>index.html?hltest=1</code>'s isolated test storage
+(<code>hours-ledger-selftest-v2</code>, a completely different key from your
+real <code>hours-ledger-v2</code>). This file is never linked from the real
+app.</p>
+<div class="warn">Your real saved weeks are never opened for writing at any
+point on this page — not the file input below, not the sandboxed iframe, not
+the fake Drive store it pushes to. Everything here operates on the copy you
+choose in step 2.</div>
+<ol>
+  <li>In the real app, click <b>Your data → Export a copy</b>. Save the file
+      somewhere you can find it.</li>
+  <li>Choose that file below.</li>
+  <li>Click <b>Run dry run</b> and read the report.</li>
+</ol>
+<p>
+  <input type="file" id="fileInput" accept="application/json">
+  <button id="run" disabled>Run dry run</button>
+</p>
+<div id="report"></div>
+
+<iframe id="sandbox" src="index.html?hltest=1"></iframe>
+
+<script>
+(function(){
+"use strict";
+var loaded=null, H=null;
+var reportEl=document.getElementById("report");
+var runBtn=document.getElementById("run");
+
+function report(html){ reportEl.innerHTML=html; }
+
+document.getElementById("fileInput").addEventListener("change",function(){
+  var f=this.files[0]; if(!f) return;
+  var r=new FileReader();
+  r.onload=function(){
+    try{
+      var d=JSON.parse(r.result);
+      if(!d.categories||!d.entries) throw new Error("missing categories/entries");
+      loaded=d;
+      runBtn.disabled=!H;
+      report("Loaded "+d.categories.length+" categories, "+countEntries(d.entries)+
+        " entries across "+Object.keys(d.entries).length+" days. Ready to run.");
+    }catch(e){ report('<span class="fail">That does not look like an Hours Ledger export: '+e.message+'</span>'); }
+  };
+  r.readAsText(f);
+});
+
+document.getElementById("sandbox").addEventListener("load",function(){
+  H=this.contentWindow.__HL_TEST__;
+  if(!H){ report('<span class="fail">index.html?hltest=1 did not expose __HL_TEST__.</span>'); return; }
+  runBtn.disabled=!loaded;
+});
+
+runBtn.addEventListener("click",function(){ runDryRun(H,loaded); });
+
+function countEntries(entriesObj){
+  var n=0; Object.keys(entriesObj).forEach(function(d){ n+=entriesObj[d].length; });
+  return n;
+}
+function freshLocal(){
+  return {version:2,settings:{startHour:6,endHour:24},categories:[],entries:{},weeklyVerdicts:{},weekCloseouts:{}};
+}
+
+function runDryRun(H,original){
+  var lines=[];
+  var phoneState=JSON.parse(JSON.stringify(original)); // never mutate the loaded file itself
+  if(!phoneState.settings) phoneState.settings={startHour:6,endHour:24};
+  if(!phoneState.weeklyVerdicts) phoneState.weeklyVerdicts={};
+  if(!phoneState.weekCloseouts) phoneState.weekCloseouts={};
+
+  var origEntryCount=countEntries(original.entries), origCatCount=original.categories.length;
+  lines.push("Loaded: "+origCatCount+" categories, "+origEntryCount+" entries.");
+
+  H.fakeDriveReset();
+  H.setDeviceId("dryrun-phone");
+  var push=H.syncEngine(phoneState,null,"dryrun-phone");
+  H.fakeDriveWrite({categories:push.toPush.categories,entries:push.toPush.entries});
+  lines.push("Phone migrated + pushed: "+
+    push.toPush.categories.filter(function(c){return !c.deleted;}).length+" live categories, "+
+    push.toPush.entries.filter(function(e){return !e.deleted;}).length+" live entries.");
+
+  H.setDeviceId("dryrun-laptop");
+  var remote=H.fakeDriveRead();
+  var pull=H.syncEngine(freshLocal(),remote,"dryrun-laptop");
+  var laptopFinal=pull.newLocalState;
+  var laptopEntryCount=countEntries(laptopFinal.entries), laptopCatCount=laptopFinal.categories.length;
+  lines.push("Laptop pulled: "+laptopCatCount+" categories, "+laptopEntryCount+" entries.");
+  lines.push("");
+
+  var diffs=[];
+  if(laptopCatCount!==origCatCount) diffs.push("Category count differs: "+origCatCount+" → "+laptopCatCount);
+  if(laptopEntryCount!==origEntryCount) diffs.push("Entry count differs: "+origEntryCount+" → "+laptopEntryCount);
+
+  var origById={};
+  Object.keys(original.entries).forEach(function(d){
+    original.entries[d].forEach(function(e){ origById[e.id]=Object.assign({date:d},e); });
+  });
+  var laptopById={};
+  Object.keys(laptopFinal.entries).forEach(function(d){
+    laptopFinal.entries[d].forEach(function(e){ laptopById[e.id]=Object.assign({date:d},e); });
+  });
+  Object.keys(origById).forEach(function(id){
+    var o=origById[id],l=laptopById[id];
+    if(!l){ diffs.push("Entry "+id+' ("'+o.label+'") missing after pull'); return; }
+    ["date","label","cat","start","end"].forEach(function(f){
+      if(o[f]!==l[f]) diffs.push("Entry "+id+" field "+f+" differs: "+JSON.stringify(o[f])+" → "+JSON.stringify(l[f]));
+    });
+  });
+
+  var origCatById={}; original.categories.forEach(function(c){ origCatById[c.id]=c; });
+  var laptopCatById={}; laptopFinal.categories.forEach(function(c){ laptopCatById[c.id]=c; });
+  Object.keys(origCatById).forEach(function(id){
+    var o=origCatById[id],l=laptopCatById[id];
+    if(!l){ diffs.push("Category "+id+' ("'+o.name+'") missing after pull'); return; }
+    ["name","color"].forEach(function(f){
+      if(o[f]!==l[f]) diffs.push("Category "+id+" field "+f+" differs: "+JSON.stringify(o[f])+" → "+JSON.stringify(l[f]));
+    });
+  });
+
+  if(diffs.length===0){
+    lines.push('<span class="pass">RESULT: PASS</span> — every entry and category survived migration, push, and pull with identical content.');
+  }else{
+    lines.push('<span class="fail">RESULT: FAIL</span> — '+diffs.length+" difference(s):");
+    diffs.forEach(function(d){ lines.push("  - "+d); });
+  }
+  report(lines.join("\n"));
+}
+})();
+</script>
+</body>
+</html>

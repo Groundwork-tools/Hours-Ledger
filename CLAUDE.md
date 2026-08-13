@@ -108,18 +108,36 @@ two, and caches for up to ten. There is nothing else to run.
   `app.js`) — the ritual looks back at a finished week, never judges one still
   in progress.
 - Undo history lives separately under `hours-ledger-undo-v1`, last 12 states.
+- **Sync fields exist only once a device has connected Google Drive sync at
+  least once — a device that never does sees none of this, ever.** Once
+  connected, every entry and category gains `updatedAt` (ISO string) and
+  `updatedBy` (a `DEVICE_ID`, itself in its own untracked localStorage key,
+  never part of synced state); two new top-level maps, `deletedEntries` and
+  `deletedCategories`, hold tombstones (`{id, date?, updatedAt, updatedBy,
+  deletedAt}`) for anything removed after that point — a deleted record is
+  never just omitted, because an omission and an intentional delete look
+  identical to a merge that has no other way to tell them apart. See
+  `migrateSyncFields()`/`syncEngine()` in `app.js` and `SYNC-LESSONS.md` for
+  the reasoning; hard rule 7 is the constraint this data shape exists to
+  satisfy.
 
 ## How the code is organised
 
 Three files: `index.html` (markup only), `styles.css`, and `app.js` — a single
-IIFE containing storage → dates → time helpers → entry CRUD → render → colour →
-modal → grid interaction → rail → nav/tools → weekly review → weekly close-out.
+IIFE containing storage → dates → time helpers → sync engine → entry CRUD →
+render → colour → modal → grid interaction → rail → nav/tools → weekly review →
+weekly close-out.
 
 It was one file because it originally had to survive being downloaded. It is
 hosted now, so that constraint is gone, and it has already been split. `selftest.html`
 (never linked from the real app) exercises the app's real logic in isolation via
 a `TEST_MODE` switch — open it by hand before deploying anything that touches
-`app.js`.
+`app.js`. `sync-dryrun.html` (same isolation, also never linked) runs migration
+and a first push/pull against a copy of a real export, entirely inside
+`TEST_MODE` storage — see the Google Drive sync backlog item and
+`SYNC-LESSONS.md` for why this exists as its own tool rather than folded into
+`selftest.html`'s automated suite (it's a manual, one-real-file-at-a-time check,
+not a repeatable assertion).
 
 ## Design constraints
 
