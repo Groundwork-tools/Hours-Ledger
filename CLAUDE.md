@@ -29,8 +29,8 @@ Teaching matters here as much as shipping.
    anything. The colophon promises this in writing; keep it true. (A plain
    outbound `<a>` link the user chooses to click — like the Money Ledger link
    in the footer — isn't the app sending data; nothing is transmitted
-   automatically. Google Drive sync — built on the `drive-sync` branch, see
-   the backlog — is the one deliberate exception, and only for someone who
+   automatically. Google Drive sync — merged to `main` and live since
+   2026-08-14, see the backlog — is the one deliberate exception, and only for someone who
    explicitly presses "Connect Google Drive": the colophon's privacy line
    itself changes for that person specifically, via `updateColophon()`, so
    the promise stays true rather than silently wrong for whoever opts in.)
@@ -81,6 +81,35 @@ incident's data-loss bugs shipped before any test could have caught them.
 
 Push to `main`. GitHub Pages redeploys automatically, usually within a minute or
 two, and caches for up to ten. There is nothing else to run.
+
+## What's live and verified
+
+A running note of what's actually been confirmed working, and how — useful
+for picking this back up cold. Suite passing is not the same claim as
+"seen working on a real device with real data"; both are listed separately
+on purpose.
+
+- **Core grid/entries/undo/close-out/review**: covered by `selftest.html`'s
+  automated suite (169 tests as of the Drive sync merge below), run before
+  every change that touches `app.js`. Manually verified on real usage over
+  the life of the app (midnight-crossing entries, mobile resize, etc. — see
+  "Testing before you claim it works" above).
+- **Google Drive sync** (2026-08-14): merged to `main` and live. Verified on
+  two real devices (a laptop and a phone) with real account data, both
+  directions:
+  - Non-sync path on the laptop: clean, no console errors, entries persist —
+    confirming the merge changed nothing for someone who never connects.
+  - Phone connect: all 14 categories and all four logged weeks intact, one
+    Drive file created, three newly-logged entries all reached it.
+  - Laptop connect: pulled everything down, including an entry logged a
+    minute earlier on the phone.
+  - Both directions confirmed live: laptop→phone and phone→laptop edits
+    both propagate.
+  - The known pre-tombstone resurfacing case (see the data model's
+    sync-fields entry on `dedupeCategoriesByName()`) was hit exactly as
+    predicted — two already-diverged categories reappeared once on a fresh
+    device's first connect — and resolved by deleting them once real
+    tombstones exist; confirmed gone for good after a reload.
 
 ---
 
@@ -281,8 +310,8 @@ dashboard styling.
     explicit "is this actually needed or will it cloud the purpose" check —
     kept deliberately narrow (no notes-browsing view, no required action) so
     it stays a look-back ritual and not a second product.
-12. **Google Drive sync.** Built on the `drive-sync` branch, not yet merged
-    to `main`. What exists: the per-record merge engine (see hard rule 7,
+12. ~~Google Drive sync.~~ **Done — merged to `main` and live since
+    2026-08-14.** What shipped: the per-record merge engine (see hard rule 7,
     `SYNC-LESSONS.md`), an opt-in connect flow (a "Connect Google Drive"
     button — nothing before that click touches Google, an OAuth script, or
     the network), name-based category dedup for devices that have never
@@ -290,15 +319,16 @@ dashboard styling.
     already diverged (see hard rules 7–8 and the data model's sync-fields
     entries), and a delete-with-reassignment picker so a duplicate category
     never has to be resolved by hand-editing entries. Verified against a
-    real Google account across two real devices — that testing surfaced two
-    real bugs (a silent-loss bug from no sync-on-page-load, and the category
-    duplication bug that drove the hard rule 8 / name-based-dedup design),
-    both fixed and covered by failing-test-first regression tests. Genuinely
-    conflicts with hard rules 2 and 4 for anyone who opts in — both rules
-    now carry the exact carve-out (see hard rule 4's note and the data
-    model section's sync-fields entries) rather than being quietly broken.
-    Still worth a staging deploy before this reaches the handful of people
-    already using the live site, once it's ready to merge.
+    real Google account across two real devices, both before and after the
+    merge — see "What's live and verified" above for the full post-merge
+    check. Genuinely conflicts with hard rules 2 and 4 for anyone who opts
+    in — both rules now carry the exact carve-out (see hard rule 4's note
+    and the data model section's sync-fields entries) rather than being
+    quietly broken.
+13. **Friend's laptop feedback.** A friend is using Hours Ledger day-to-day
+    on a laptop and has feedback on things that need attention. Specifics
+    not yet gathered — placeholder so it isn't lost; fill in and re-slot
+    into the ordered list once the actual items are known.
 
 Do not add features that are not on this list without discussing them first.
 Feature creep is the known failure mode of this project.
