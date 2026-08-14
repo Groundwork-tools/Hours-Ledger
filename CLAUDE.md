@@ -188,6 +188,20 @@ two, and caches for up to ten. There is nothing else to run.
   would have hinted that Drive had stopped hearing about them. Only fires
   when there was a real connection to lose; importing into a device that
   was never connected leaves the button on its correct default.
+- **Known, accepted gap: undo/redo while connected doesn't itself trigger a
+  Drive push.** `undo()`/`redo()` go through `applyState()`, which writes
+  straight to `localStorage` and never calls `persist()` — so the specific
+  change an undo/redo just reverted isn't, by itself, what schedules the
+  next sync. Deliberately left as-is rather than fixed alongside the import
+  and `driveSyncApplyingRemote` fixes above: unlike those two, this one
+  self-heals on its own within one step — either the next edit's ordinary
+  `persist()` call (which syncs whatever `state` currently is, not a diff,
+  so the reverted content goes up regardless) or the next page load (the
+  sync-on-load catch-up already covers this). The only genuinely silent
+  window is undo/redo followed by neither — leaving the tab open indefinitely
+  with no further edit and no reload — judged too narrow to be worth the
+  same treatment. If this ever needs revisiting, it's not a new bug; it's
+  this exact tradeoff being reconsidered.
 
 ## How the code is organised
 

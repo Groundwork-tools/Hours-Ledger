@@ -611,6 +611,14 @@ function refreshHint(){
    payload syncEngine builds only ever contains categories/entries); it just
    rides along through persist()/snapshot()/undo() like any other field. */
 var driveSyncTimer=null,driveSyncInFlight=false,driveSyncApplyingRemote=false;
+/* driveSyncApplyingRemote is only ever set true right before persist(), set
+   false right after - both call sites below wrap that in try/finally so a
+   persist() failure (a full localStorage, say) can't leave it stuck true.
+   Stuck true would silently block every future scheduleDriveSync() call for
+   the rest of the page's life (see persist()'s own guard), with the single
+   triggering error being the only thing that ever showed on screen - the
+   same silent-forever shape as the sync-on-load bug this file already
+   fixed once, just from a different trigger. */
 
 function connectDrive(){
   if(state.driveConnected){ runDriveSync(true); return; } /* already connected - button doubles as "sync now" */
@@ -632,7 +640,8 @@ function connectDrive(){
       catch(e){ driveConnectFailed(new Error("couldn't prepare to sync - nothing was changed")); return; }
       state=syncResult.newLocalState;
       state.driveConnected=true;
-      driveSyncApplyingRemote=true; persist(); driveSyncApplyingRemote=false;
+      driveSyncApplyingRemote=true;
+      try{ persist(); } finally{ driveSyncApplyingRemote=false; }
       render(); refreshHint(); updateColophon();
       document.getElementById("connectDrive").disabled=false;
       document.getElementById("connectDrive").textContent="Drive: syncing…";
@@ -678,7 +687,8 @@ function runDriveSync(manual){
       catch(e){ driveSyncInFlight=false; setStatus("Drive sync failed, will retry",true); return; }
       state=syncResult.newLocalState;
       state.driveConnected=true;
-      driveSyncApplyingRemote=true; persist(); driveSyncApplyingRemote=false;
+      driveSyncApplyingRemote=true;
+      try{ persist(); } finally{ driveSyncApplyingRemote=false; }
       render();
       return driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries}).then(function(){
         driveSyncInFlight=false;

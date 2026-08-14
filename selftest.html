@@ -1177,6 +1177,56 @@ function runAsyncTests(H,d){
         d.getElementById("connectDrive").textContent.toLowerCase().indexOf("disconnect")>-1);
     })
     .then(function(){
+      /* ---- driveSyncApplyingRemote must reset even if persist() itself
+         throws mid-write, or every future scheduleDriveSync() call is
+         silently skipped forever by persist()'s own guard, with nothing
+         further ever shown after the one triggering error - "sync just
+         stops" for the rest of the page's life. A dedicated fresh sandbox
+         so a broken JSON.stringify patch, if this goes wrong, can't leak
+         into any other test's shared fake-remote state. */
+      return freshSandbox();
+    })
+    .then(function(fresh){
+      var h=fresh.H,dd=fresh.d;
+      h.fakeDriveReset(); h.clearLocalStateForTest();
+      dd.getElementById("connectDrive").click();
+      return waitFor(function(){ return dd.getElementById("connectDrive").textContent==="Drive: synced"; },4000)
+        .then(function(ok){
+          assert("driveSyncApplyingRemote fix, setup: baseline device connects and does its first sync normally",ok);
+          /* sabotage the SANDBOX'S OWN JSON (not this outer document's -
+             app.js runs inside that iframe's realm, same reason the
+             console.log test above had to patch d.defaultView.console
+             rather than the outer window's) so the 2nd JSON.stringify call
+             a manual runDriveSync() makes - the one inside the guarded
+             persist(), right after syncEngine's own internal clone (the
+             1st call) - throws exactly once, then self-restores so nothing
+             downstream is affected. Patching state itself (e.g. a circular
+             reference) would get caught by syncEngine's OWN try/catch
+             first and never reach the code actually under test. */
+          var iframeJSON=dd.defaultView.JSON,origStringify=iframeJSON.stringify,call=0;
+          iframeJSON.stringify=function(){
+            call++;
+            if(call===2){ iframeJSON.stringify=origStringify; throw new Error("simulated persist() failure"); }
+            return origStringify.apply(iframeJSON,arguments);
+          };
+          h.runDriveSync(true);
+          return waitFor(function(){ return iframeJSON.stringify===origStringify; },2000);
+        })
+        .then(function(patchFired){
+          assert("the sabotaged manual sync actually reached persist() and threw (patch fired once, self-restored)",patchFired);
+          var cat=h.getState().categories[0];
+          h.putEntry("2026-06-02",cat.name,cat.id,600,660,null);
+          h.persist();
+          return waitFor(function(){
+            var r=h.fakeDriveRead();
+            return r&&r.entries.some(function(e){ return e.date==="2026-06-02"&&!e.deleted; });
+          },4000);
+        })
+        .then(function(ok){
+          assert("a persist() failure mid-sync doesn't silently disable every future sync - the very next ordinary edit still reaches Drive",ok);
+        });
+    })
+    .then(function(){
       /* ---- BUG 1 repro: two devices that have never synced before share
          the same 8 real default categories in name only - DEFAULTS calls
          uid() fresh on every load, so each device invents its own random
