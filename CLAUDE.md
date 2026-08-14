@@ -204,7 +204,8 @@ on purpose.
   `connectDrive()` takes as its first action) reverts the whole operation,
   connection status included, rather than leaving a device half-connected
   with its data rolled back underneath it. It never travels to Drive; the
-  payload `syncEngine()` builds only ever contains categories and entries.
+  payload `syncEngine()` builds only ever contains categories, entries,
+  verdicts, and close-outs.
   An imported file's `driveConnected` is deliberately never honored on
   import, even if the file says `true` — see the import handler in
   `app.js` — so opening an arbitrary backup can never silently resume a
@@ -231,8 +232,41 @@ on purpose.
   with no further edit and no reload — judged too narrow to be worth the
   same treatment. If this ever needs revisiting, it's not a new bug; it's
   this exact tradeoff being reconsidered.
-
-## How the code is organised
+- **Weekly verdicts and week close-outs sync too, as of the phase 2 work
+  (see the backlog)** — `weeklyVerdicts`/`weekCloseouts` are nested maps
+  keyed by week with no record ids of their own, a different shape from
+  entries/categories, so their sync unit is a composite key instead:
+  `weekIso+"|"+categoryId` for a verdict, `weekIso` alone for a close-out.
+  A verdict's live value is a bare string, so its sync metadata can't live
+  inline the way it does on an entry or category — it lives in a side
+  table, `verdictMeta`, keyed by that same composite key. `verdictMeta` is
+  never itself read as a signal that a record exists — `flattenVerdicts()`
+  only ever iterates `weeklyVerdicts` (live) and `deletedVerdicts`
+  (tombstones), and only *consults* `verdictMeta` to enrich a record it's
+  already decided to emit — so a stray or stale `verdictMeta` entry can't
+  cause a wrong merge decision. The invariant `migrateSyncFields()`
+  maintains is stricter than "don't misread garbage," though: a
+  `verdictMeta` entry is pruned whenever there's no live verdict behind it,
+  even if a tombstone exists — a tombstone carries its own
+  `updatedAt`/`updatedBy`, so a lingering `verdictMeta` copy for the same
+  key would just be a second, potentially disagreeing, source of truth for
+  the same fact. Verdicts get real tombstones (`deletedVerdicts`) because
+  clearing one — tapping the same verdict button twice — is a real,
+  reachable delete path today. Close-outs don't: their leaf
+  (`weekCloseouts[weekIso]`) is already an object, so `updatedAt`/
+  `updatedBy` go inline, same as entries/categories, and there's no
+  tombstone container because no delete/reopen-to-clear path exists for a
+  close-out yet — if one is ever added, tombstones get designed alongside
+  it then, same rule as always, not retrofitted and not built ahead of
+  need. `dedupeCategoriesByName()` also remaps any verdict pointing at a
+  category id that loses a name-collision merge, the same way it already
+  remaps `entries.cat` — required, not optional, once verdicts sync:
+  without it, a verdict silently orphans on a dead category id the next
+  time two devices' same-named categories collapse to one survivor. When
+  that remap causes two verdicts (one from each side of the collision) to
+  land on the same composite key, they're resolved by folding them
+  through `mergeRecords()` itself, pairwise — the same six-case logic,
+  including last-write-wins, rather than inventing a second conflict rule.
 
 Three files: `index.html` (markup only), `styles.css`, and `app.js` — a single
 IIFE containing storage → dates → time helpers → sync engine → Drive OAuth →

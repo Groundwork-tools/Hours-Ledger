@@ -164,6 +164,43 @@ function migrateSyncFields(s){
   });
   if(!s.deletedEntries) s.deletedEntries={};
   if(!s.deletedCategories) s.deletedCategories={};
+
+  /* verdicts: weeklyVerdicts[weekIso][catId] is a bare string ('keep'/
+     'compress'/'cut'), not an object, so its sync metadata can't live
+     inline the way it does on entries/categories - it lives in the
+     side table verdictMeta, keyed by the same weekIso+"|"+catId composite
+     id flattenVerdicts() uses. verdictMeta is invariant-only-for-live: a
+     key is stamped here iff a live verdict exists for it, and pruned
+     right after if it doesn't - covers both a truly orphaned entry (no
+     live verdict, no tombstone; can only be drift, e.g. a hand-edited or
+     pre-this-feature imported file) and a lingering entry left behind
+     after a verdict was cleared (the tombstone already carries its own
+     updatedAt/updatedBy, so a surviving verdictMeta copy would just be a
+     second, potentially disagreeing, source of truth for the same fact).
+     See CLAUDE.md's phase 2 divergence-handling note. */
+  if(!s.verdictMeta) s.verdictMeta={};
+  if(!s.deletedVerdicts) s.deletedVerdicts={};
+  Object.keys(s.weeklyVerdicts).forEach(function(weekIso){
+    Object.keys(s.weeklyVerdicts[weekIso]).forEach(function(catId){
+      var key=weekIso+"|"+catId;
+      if(!s.verdictMeta[key]) s.verdictMeta[key]={updatedAt:stamp,updatedBy:dev};
+    });
+  });
+  Object.keys(s.verdictMeta).forEach(function(key){
+    var sep=key.indexOf("|"),weekIso=key.slice(0,sep),catId=key.slice(sep+1);
+    var live=s.weeklyVerdicts[weekIso]&&(catId in s.weeklyVerdicts[weekIso]);
+    if(!live) delete s.verdictMeta[key];
+  });
+
+  /* close-outs: weekCloseouts[weekIso] is already an object, so its sync
+     metadata goes inline, same as entries/categories - no side table, no
+     tombstones (no delete/reopen-to-clear path exists for a close-out
+     today; that gets designed when that capability does, not before). */
+  Object.keys(s.weekCloseouts).forEach(function(weekIso){
+    var c=s.weekCloseouts[weekIso];
+    if(!c.updatedAt){ c.updatedAt=stamp; c.updatedBy=dev; }
+  });
+
   return s;
 }
 
@@ -225,6 +262,77 @@ function unflattenCategories(flat){
     else categories.push({id:r.id,name:r.name,color:r.color,updatedAt:r.updatedAt,updatedBy:r.updatedBy});
   });
   return {categories:categories,deletedCategories:deletedCategories};
+}
+
+/* ---------------- phase 2: weekly verdicts + week close-out sync ----------------
+   weeklyVerdicts/weekCloseouts are nested maps keyed by week, with no record
+   ids of their own - a genuinely different shape from entries/categories, and
+   deliberately excluded from phase 1 for exactly that reason (see CLAUDE.md's
+   phase 2 backlog note). The composite key below (weekIso+"|"+catId for
+   verdicts, weekIso alone for close-outs) becomes each flat record's id, which
+   is all mergeRecords() needs - the six-case merge logic itself is completely
+   unmodified. */
+
+/* a verdict's live value (weeklyVerdicts[weekIso][catId]) is a bare string,
+   not an object, so unlike entries/categories its sync metadata can't live
+   inline - it lives in the side table verdictMeta (see migrateSyncFields()).
+   verdictMeta is only ever consulted here to enrich a record flattenVerdicts
+   has already decided to emit from weeklyVerdicts/deletedVerdicts - it is
+   never itself read as a signal that a record exists, so a stray or stale
+   verdictMeta entry can't cause a wrong merge decision (migrateSyncFields()
+   prunes those anyway, but flattenVerdicts doesn't depend on that pruning
+   for correctness). */
+var VERDICT_FIELDS=["verdict","deleted","deletedAt"];
+function flattenVerdicts(s){
+  var out=[];
+  Object.keys(s.weeklyVerdicts).forEach(function(weekIso){
+    Object.keys(s.weeklyVerdicts[weekIso]).forEach(function(catId){
+      var key=weekIso+"|"+catId,meta=s.verdictMeta[key];
+      out.push({id:key,weekIso:weekIso,catId:catId,verdict:s.weeklyVerdicts[weekIso][catId],
+        updatedAt:meta.updatedAt,updatedBy:meta.updatedBy,deleted:false,deletedAt:null});
+    });
+  });
+  Object.keys(s.deletedVerdicts||{}).forEach(function(key){
+    var t=s.deletedVerdicts[key];
+    out.push({id:key,weekIso:t.weekIso,catId:t.catId,verdict:null,
+      updatedAt:t.updatedAt,updatedBy:t.updatedBy,deleted:true,deletedAt:t.deletedAt});
+  });
+  return out;
+}
+function unflattenVerdicts(flat){
+  var weeklyVerdicts={},verdictMeta={},deletedVerdicts={};
+  flat.forEach(function(r){
+    if(r.deleted){
+      deletedVerdicts[r.id]={weekIso:r.weekIso,catId:r.catId,updatedAt:r.updatedAt,updatedBy:r.updatedBy,deletedAt:r.deletedAt};
+    }else{
+      if(!weeklyVerdicts[r.weekIso]) weeklyVerdicts[r.weekIso]={};
+      weeklyVerdicts[r.weekIso][r.catId]=r.verdict;
+      verdictMeta[r.id]={updatedAt:r.updatedAt,updatedBy:r.updatedBy};
+    }
+  });
+  return {weeklyVerdicts:weeklyVerdicts,verdictMeta:verdictMeta,deletedVerdicts:deletedVerdicts};
+}
+
+/* a close-out's leaf (weekCloseouts[weekIso]) is already an object, so its
+   sync metadata goes inline, same as entries/categories - no side table.
+   No tombstones either: there is no delete/reopen-to-clear path for a
+   close-out today, so every flattened record is unconditionally deleted:false.
+   If that capability is ever added, tombstones get designed alongside it
+   then, same rule as always - not retrofitted, and not built ahead of need. */
+var CLOSEOUT_FIELDS=["note","closedAt"];
+function flattenCloseouts(s){
+  return Object.keys(s.weekCloseouts).map(function(weekIso){
+    var c=s.weekCloseouts[weekIso];
+    return {id:weekIso,weekIso:weekIso,note:c.note,closedAt:c.closedAt,
+      updatedAt:c.updatedAt,updatedBy:c.updatedBy,deleted:false,deletedAt:null};
+  });
+}
+function unflattenCloseouts(flat){
+  var weekCloseouts={};
+  flat.forEach(function(r){
+    weekCloseouts[r.weekIso]={note:r.note,closedAt:r.closedAt,updatedAt:r.updatedAt,updatedBy:r.updatedBy};
+  });
+  return {weekCloseouts:weekCloseouts};
 }
 
 /* the merge itself - compares records, never files. Ported from Money Ledger's
@@ -301,7 +409,24 @@ function mergeRecords(localArr,remoteArr,contentFields,deviceId){
    makes it a real fix for data that already diverged before this line
    existed, not just a guard against it happening again. */
 function normalizeName(n){ return (n||"").trim().toLowerCase(); }
-function dedupeCategoriesByName(catsFlat,entriesFlat,deviceId){
+/* a verdict remapped onto a survivor's id can land on the SAME weekIso+catId
+   as a verdict that survivor already had (both sides had independently set a
+   verdict for the same category+week before ever sharing an id) - two flat
+   records now claiming one composite id. Resolved by folding them together
+   pairwise through mergeRecords() itself (same six-case logic, including
+   last-write-wins) rather than inventing new conflict rules - see CLAUDE.md's
+   phase 2 note. Groups that never collided (the overwhelming common case)
+   cost one no-op pass through here. */
+function collapseVerdictCollisions(verdictsFlat,deviceId){
+  var groups={};
+  verdictsFlat.forEach(function(v){ (groups[v.id]=groups[v.id]||[]).push(v); });
+  return Object.keys(groups).map(function(id){
+    return groups[id].reduce(function(acc,next){
+      return mergeRecords([acc],[next],VERDICT_FIELDS,deviceId)[0];
+    });
+  });
+}
+function dedupeCategoriesByName(catsFlat,entriesFlat,verdictsFlat,deviceId){
   var groups={};
   catsFlat.filter(function(r){ return !r.deleted; }).forEach(function(r){
     var key=normalizeName(r.name);
@@ -324,7 +449,7 @@ function dedupeCategoriesByName(catsFlat,entriesFlat,deviceId){
     });
     mergeLog.push({name:winner.name,survivorId:winner.id,mergedIds:losers.map(function(l){ return l.id; }),entriesReassigned:reassignedCount});
   });
-  if(!mergeLog.length) return {categories:catsFlat,entries:entriesFlat};
+  if(!mergeLog.length) return {categories:catsFlat,entries:entriesFlat,verdicts:verdictsFlat};
 
   mergeLog.forEach(function(g){
     console.log('Hours Ledger sync: merged duplicate category "'+g.name+'" - kept '+g.survivorId+
@@ -339,20 +464,28 @@ function dedupeCategoriesByName(catsFlat,entriesFlat,deviceId){
     var upd=fieldUpdates[r.id];
     return upd?Object.assign({},r,upd):r;
   }).concat(extraTombstones);
-  return {categories:newCats,entries:newEntries};
+  var remappedVerdicts=verdictsFlat.map(function(v){
+    if(!v.catId||!idRemap[v.catId]) return v;
+    var newCatId=idRemap[v.catId];
+    return Object.assign({},v,{catId:newCatId,id:v.weekIso+"|"+newCatId});
+  });
+  var newVerdicts=collapseVerdictCollisions(remappedVerdicts,deviceId);
+  return {categories:newCats,entries:newEntries,verdicts:newVerdicts};
 }
 
-/* the whole engine in one call: migrate, merge both collections by id,
-   dedupe the merged categories by name (folding in any entry that pointed
-   at a category that just got collapsed away), hand back the two things a
-   caller needs - the new local state ready to persist immediately, and the
-   flat payload to push. Nothing here writes to state or to any storage
-   itself; the caller decides when (write locally first, always, per
-   SYNC-LESSONS.md's ordering - push only after, and only the connect flow
-   ever risks the network call). remoteFile is null for a genuine
-   first-ever sync (nothing to merge against, every local record trivially
-   survives via case 1); its shape otherwise is {categories:[...flat...],
-   entries:[...flat...]}, tombstones inline via deleted:true. */
+/* the whole engine in one call: migrate, merge all four collections by id
+   (categories, entries, verdicts, close-outs), dedupe the merged categories
+   by name (folding in any entry OR verdict that pointed at a category that
+   just got collapsed away), hand back the two things a caller needs - the
+   new local state ready to persist immediately, and the flat payload to
+   push. Nothing here writes to state or to any storage itself; the caller
+   decides when (write locally first, always, per SYNC-LESSONS.md's ordering -
+   push only after, and only the connect flow ever risks the network call).
+   remoteFile is null for a genuine first-ever sync (nothing to merge
+   against, every local record trivially survives via case 1); its shape
+   otherwise is {categories:[...flat...], entries:[...flat...],
+   verdicts:[...flat...], closeouts:[...flat...]}, tombstones inline via
+   deleted:true. */
 function syncEngine(localStateIn,remoteFile,deviceId){
   /* migrateSyncFields mutates in place - clone first so a failure anywhere
      below (a bad remote file, a bug, anything) can never leave the CALLER's
@@ -362,7 +495,7 @@ function syncEngine(localStateIn,remoteFile,deviceId){
      as a side effect no matter what happens after. */
   var localState=JSON.parse(JSON.stringify(localStateIn));
   migrateSyncFields(localState);
-  var remote=remoteFile||{categories:[],entries:[]};
+  var remote=remoteFile||{categories:[],entries:[],verdicts:[],closeouts:[]};
 
   var localCatsFlat=flattenCategories(localState);
   var mergedCatsFlat=mergeRecords(localCatsFlat,remote.categories,CATEGORY_FIELDS,deviceId);
@@ -371,19 +504,32 @@ function syncEngine(localStateIn,remoteFile,deviceId){
   var remoteEntriesFlat=remote.entries||[];
   var mergedEntriesFlat=mergeRecords(localEntriesFlat,remoteEntriesFlat,ENTRY_FIELDS,deviceId);
 
-  var deduped=dedupeCategoriesByName(mergedCatsFlat,mergedEntriesFlat,deviceId);
+  var localVerdictsFlat=flattenVerdicts(localState);
+  var remoteVerdictsFlat=remote.verdicts||[];
+  var mergedVerdictsFlat=mergeRecords(localVerdictsFlat,remoteVerdictsFlat,VERDICT_FIELDS,deviceId);
+
+  var localCloseoutsFlat=flattenCloseouts(localState);
+  var remoteCloseoutsFlat=remote.closeouts||[];
+  var mergedCloseoutsFlat=mergeRecords(localCloseoutsFlat,remoteCloseoutsFlat,CLOSEOUT_FIELDS,deviceId);
+
+  var deduped=dedupeCategoriesByName(mergedCatsFlat,mergedEntriesFlat,mergedVerdictsFlat,deviceId);
   mergedCatsFlat=deduped.categories;
   mergedEntriesFlat=deduped.entries;
+  mergedVerdictsFlat=deduped.verdicts;
 
   var catsResult=unflattenCategories(mergedCatsFlat);
   var entriesResult=unflattenEntries(mergedEntriesFlat);
+  var verdictsResult=unflattenVerdicts(mergedVerdictsFlat);
+  var closeoutsResult=unflattenCloseouts(mergedCloseoutsFlat);
 
   return {
     newLocalState:Object.assign({},localState,{
       categories:catsResult.categories,deletedCategories:catsResult.deletedCategories,
-      entries:entriesResult.entries,deletedEntries:entriesResult.deletedEntries
+      entries:entriesResult.entries,deletedEntries:entriesResult.deletedEntries,
+      weeklyVerdicts:verdictsResult.weeklyVerdicts,verdictMeta:verdictsResult.verdictMeta,deletedVerdicts:verdictsResult.deletedVerdicts,
+      weekCloseouts:closeoutsResult.weekCloseouts
     }),
-    toPush:{categories:mergedCatsFlat,entries:mergedEntriesFlat}
+    toPush:{categories:mergedCatsFlat,entries:mergedEntriesFlat,verdicts:mergedVerdictsFlat,closeouts:mergedCloseoutsFlat}
   };
 }
 
@@ -608,8 +754,9 @@ function refreshHint(){
    takes as its very first action - should revert the whole operation,
    connection status included, not leave a device half-connected with data
    rolled back underneath it. It never gets pushed to Drive itself (the
-   payload syncEngine builds only ever contains categories/entries); it just
-   rides along through persist()/snapshot()/undo() like any other field. */
+   payload syncEngine builds only ever contains categories/entries/verdicts/
+   closeouts); it just rides along through persist()/snapshot()/undo() like
+   any other field. */
 var driveSyncTimer=null,driveSyncInFlight=false,driveSyncApplyingRemote=false;
 /* driveSyncApplyingRemote is only ever set true right before persist(), set
    false right after - both call sites below wrap that in try/finally so a
@@ -645,7 +792,7 @@ function connectDrive(){
       render(); refreshHint(); updateColophon();
       document.getElementById("connectDrive").disabled=false;
       document.getElementById("connectDrive").textContent="Drive: syncing…";
-      driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries}).then(function(){
+      driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts}).then(function(){
         setStatus("Synced with Drive");
         document.getElementById("connectDrive").textContent="Drive: synced";
         showToast("Connected — your weeks are syncing.",false);
@@ -690,7 +837,7 @@ function runDriveSync(manual){
       driveSyncApplyingRemote=true;
       try{ persist(); } finally{ driveSyncApplyingRemote=false; }
       render();
-      return driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries}).then(function(){
+      return driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts}).then(function(){
         driveSyncInFlight=false;
         setStatus("Synced with Drive");
       });
@@ -819,10 +966,33 @@ function entriesFor(d){ return state.entries[d]||[]; }
 function catById(id){ if(!id) return null; for(var i=0;i<state.categories.length;i++) if(state.categories[i].id===id) return state.categories[i]; return null; }
 function catColor(id){ var c=catById(id); return c?c.color:"#9AA5A0"; }
 function getVerdict(catId,weekIso){ var wv=state.weeklyVerdicts[weekIso]; return (wv&&wv[catId])||null; }
+/* clearing a verdict (v falsy - tapping the same verdict button twice, see
+   the two callers) is a real delete, not just an internal state tidy-up:
+   without a tombstone once this device has migrated, another device that
+   never saw the clear would resurrect it on the next merge (case 1 -
+   "present on one side only" - reads an omission as new, not deleted).
+   Gated on state.deletedVerdicts existing, same signal removeEntry uses for
+   state.deletedEntries - a device that's never migrated writes no footprint
+   at all, identical to pre-sync behavior. verdictMeta is deleted in the SAME
+   step the tombstone is written, not left to linger - the tombstone already
+   carries its own updatedAt/updatedBy, so a surviving verdictMeta copy would
+   just be a second, potentially disagreeing, copy of the same fact. */
 function setVerdict(catId,weekIso,v){
   if(!state.weeklyVerdicts[weekIso]) state.weeklyVerdicts[weekIso]={};
-  if(v) state.weeklyVerdicts[weekIso][catId]=v;
-  else delete state.weeklyVerdicts[weekIso][catId];
+  var key=weekIso+"|"+catId;
+  if(v){
+    state.weeklyVerdicts[weekIso][catId]=v;
+    if(state.deletedVerdicts){
+      if(!state.verdictMeta) state.verdictMeta={};
+      state.verdictMeta[key]={updatedAt:nowIso(),updatedBy:getDeviceId()};
+    }
+  }else{
+    delete state.weeklyVerdicts[weekIso][catId];
+    if(state.deletedVerdicts){
+      if(state.verdictMeta) delete state.verdictMeta[key];
+      state.deletedVerdicts[key]={weekIso:weekIso,catId:catId,updatedAt:nowIso(),updatedBy:getDeviceId(),deletedAt:nowIso()};
+    }
+  }
 }
 
 function putEntry(dateStr,label,catId,start,end,replaceId){
@@ -1997,6 +2167,10 @@ if(TEST_MODE){
     unflattenEntries:unflattenEntries,
     flattenCategories:flattenCategories,
     unflattenCategories:unflattenCategories,
+    flattenVerdicts:flattenVerdicts,
+    unflattenVerdicts:unflattenVerdicts,
+    flattenCloseouts:flattenCloseouts,
+    unflattenCloseouts:unflattenCloseouts,
     mergeRecords:mergeRecords,
     normalizeName:normalizeName,
     dedupeCategoriesByName:dedupeCategoriesByName,

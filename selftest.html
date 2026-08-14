@@ -722,7 +722,7 @@ function runTests(H,d){
       {id:"remote-studies",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_A,deleted:false,deletedAt:null},
       {id:"remote-muaythai",name:"Muay Thai",color:"#B18725",updatedAt:T0,updatedBy:DEV_A,deleted:false,deletedAt:null}
     ];
-    var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],DEV_B);
+    var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],[],DEV_B);
     var live=r.categories.filter(function(c){ return !c.deleted; });
     var tombstoned=r.categories.filter(function(c){ return c.deleted; });
     assert("dedupeCategoriesByName collapses both same-name pairs down to one survivor each, seeded or user-created alike",
@@ -733,7 +733,7 @@ function runTests(H,d){
   (function(){ // name matches, color doesn't -> MERGED ANYWAY - the real-world case this whole mechanism exists for
     var localFlat=[{id:"local-x",name:"Studies",color:"#111111",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
     var remoteFlat=[{id:"remote-x",name:"Studies",color:"#2B52A1",updatedAt:T1,updatedBy:DEV_A,deleted:false,deletedAt:null}];
-    var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],DEV_B);
+    var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],[],DEV_B);
     var live=r.categories.filter(function(c){ return !c.deleted; });
     assert("a name match with a different color now merges - color is a display preference, not an identity signal (deliberate reversal from the earlier conservative design, see CLAUDE.md)",
       live.length===1);
@@ -743,21 +743,21 @@ function runTests(H,d){
   (function(){ // color matches, name doesn't -> still NOT merged, name is the only identity signal
     var localFlat=[{id:"local-x",name:"Side projects",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
     var remoteFlat=[{id:"remote-x",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_A,deleted:false,deletedAt:null}];
-    var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],DEV_B);
+    var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],[],DEV_B);
     var live=r.categories.filter(function(c){ return !c.deleted; });
     assert("a color match with a different name is left alone - a shared palette color isn't a meaningful signal on its own",
       live.length===2);
   })();
   (function(){ // a category with no name collision passes through completely untouched - idempotent, no-op case
     var flat=[{id:"c1",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
-    var r=H.dedupeCategoriesByName(flat,[],DEV_B);
+    var r=H.dedupeCategoriesByName(flat,[],[],DEV_B);
     assert("a category with no name collision passes through untouched",
       r.categories.length===1&&r.categories[0].id==="c1"&&!r.categories[0].deleted);
   })();
   (function(){ // real data: "Errands / Shower " (trailing space) must match "errands / shower" - case-insensitive, whitespace-trimmed
     var localFlat=[{id:"local-errands",name:"Errands / Shower ",color:"#1D669A",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
     var remoteFlat=[{id:"remote-errands",name:"errands / shower",color:"#1D669A",updatedAt:T1,updatedBy:DEV_A,deleted:false,deletedAt:null}];
-    var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],DEV_B);
+    var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],[],DEV_B);
     var live=r.categories.filter(function(c){ return !c.deleted; });
     assert("name matching is case-insensitive and trims whitespace - real data has a trailing-space variant of this exact name",
       live.length===1);
@@ -772,7 +772,7 @@ function runTests(H,d){
     var iframeConsole=d.defaultView.console;
     var calls=[],origLog=iframeConsole.log,r;
     iframeConsole.log=function(msg){ calls.push(msg); };
-    try{ r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),entriesFlat,DEV_B); }
+    try{ r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),entriesFlat,[],DEV_B); }
     finally{ iframeConsole.log=origLog; }
     assert("a merge event is logged to the console naming the category, the survivor, and how many entries were reassigned",
       calls.length===1&&calls[0].indexOf("Work / income")>-1&&calls[0].indexOf("local-work")>-1&&calls[0].indexOf("1 entry")>-1);
@@ -862,6 +862,256 @@ function runTests(H,d){
     assert("device A's category resurfaces after the second sync",aStudiesCat.length===1);
     assert("device A's originally-orphaned entry automatically shows the resurfaced category - the reference was never actually broken",
       pullA.newLocalState.entries["2026-03-04"][0].cat==="studies-id");
+  })();
+
+  /* ================= phase 2: weekly verdicts + week close-out sync =================
+     Deliberately excluded from phase 1 - weeklyVerdicts/weekCloseouts are nested
+     maps keyed by week with no record ids of their own, a different shape from
+     entries/categories (see CLAUDE.md's phase 2 backlog note). Composite key
+     (weekIso+"|"+catId for verdicts, weekIso alone for close-outs) reuses
+     mergeRecords() completely unmodified - no new merge logic anywhere below. */
+
+  /* ---- flatten/unflatten verdicts round-trip (a live verdict plus a tombstone) */
+  (function(){
+    var s=freshState([{id:"c1",name:"Studies",color:"#2B52A1"}],{});
+    s.weeklyVerdicts={"2026-05-04":{c1:"cut"}};
+    s.verdictMeta={"2026-05-04|c1":{updatedAt:T0,updatedBy:DEV_A}};
+    s.deletedVerdicts={"2026-05-04|c2":{weekIso:"2026-05-04",catId:"c2",updatedAt:T0,updatedBy:DEV_A,deletedAt:T0}};
+    var flat=H.flattenVerdicts(s);
+    assert("flattenVerdicts produces one record per live verdict plus one per tombstone",
+      flat.length===2&&flat.some(function(r){return r.id==="2026-05-04|c1"&&!r.deleted&&r.verdict==="cut";})&&
+      flat.some(function(r){return r.id==="2026-05-04|c2"&&r.deleted;}));
+    var back=H.unflattenVerdicts(flat);
+    assert("unflattenVerdicts round-trips a live verdict back into weeklyVerdicts, with its meta restored",
+      back.weeklyVerdicts["2026-05-04"].c1==="cut"&&back.verdictMeta["2026-05-04|c1"].updatedAt===T0);
+    assert("unflattenVerdicts round-trips a tombstone into deletedVerdicts, not into weeklyVerdicts",
+      !!back.deletedVerdicts["2026-05-04|c2"]&&!("c2" in (back.weeklyVerdicts["2026-05-04"]||{})));
+  })();
+
+  /* ---- flatten/unflatten close-outs round-trip - a close-out's leaf is
+     already an object, so unlike verdicts its sync metadata lives inline,
+     no side table needed */
+  (function(){
+    var s=freshState([],{});
+    s.weekCloseouts={"2026-04-27":{note:"good week",closedAt:T0,updatedAt:T0,updatedBy:DEV_A}};
+    var flat=H.flattenCloseouts(s);
+    assert("flattenCloseouts produces one record per close-out, keyed by week alone",
+      flat.length===1&&flat[0].id==="2026-04-27"&&flat[0].note==="good week");
+    var back=H.unflattenCloseouts(flat);
+    assert("unflattenCloseouts round-trips a close-out's note, closedAt and sync metadata",
+      back.weekCloseouts["2026-04-27"].note==="good week"&&back.weekCloseouts["2026-04-27"].updatedAt===T0);
+  })();
+
+  /* ---- migration stamps verdicts and close-outs that predate sync, the same
+     lazy idempotent-per-record pattern entries/categories already use */
+  (function(){
+    var s=freshState([{id:"c1",name:"Studies",color:"#2B52A1"}],{});
+    s.weeklyVerdicts={"2026-05-04":{c1:"keep"}};
+    s.weekCloseouts={"2026-04-27":{note:"pre-sync note",closedAt:T0}};
+    H.setState(s);
+    assert("a freshly constructed state has no verdictMeta or per-closeout sync fields yet",
+      !H.getState().verdictMeta&&!H.getState().weekCloseouts["2026-04-27"].updatedAt);
+    H.migrateSyncFields(H.getState());
+    assert("migration stamps verdictMeta for a pre-sync verdict",
+      !!H.getState().verdictMeta["2026-05-04|c1"]&&H.getState().verdictMeta["2026-05-04|c1"].updatedBy===H.getDeviceId());
+    assert("migration stamps updatedAt/updatedBy inline on a pre-sync close-out",
+      !!H.getState().weekCloseouts["2026-04-27"].updatedAt&&H.getState().weekCloseouts["2026-04-27"].updatedBy===H.getDeviceId());
+    assert("migration initializes deletedVerdicts as an empty object",
+      JSON.stringify(H.getState().deletedVerdicts)==="{}");
+    var stampedVerdict=H.getState().verdictMeta["2026-05-04|c1"].updatedAt;
+    var stampedCloseout=H.getState().weekCloseouts["2026-04-27"].updatedAt;
+    H.migrateSyncFields(H.getState());
+    assert("migration is idempotent for verdicts - an already-stamped one keeps its exact original timestamp",
+      H.getState().verdictMeta["2026-05-04|c1"].updatedAt===stampedVerdict);
+    assert("migration is idempotent for close-outs - an already-stamped one keeps its exact original timestamp",
+      H.getState().weekCloseouts["2026-04-27"].updatedAt===stampedCloseout);
+  })();
+
+  /* ---- divergence handling, asked for explicitly before this shipped:
+     verdictMeta is never itself read as a signal that a record exists -
+     flattenVerdicts only ever iterates weeklyVerdicts (live) and
+     deletedVerdicts (tombstones), so a stray verdictMeta entry backed by
+     neither can't cause a wrong merge decision. It's still garbage, so
+     migration prunes it - and prunes it even when a tombstone DOES exist,
+     since a tombstone carries its own updatedAt/updatedBy and a lingering
+     copy in verdictMeta would just be a second, potentially disagreeing,
+     source of truth for the same fact - exactly the drift this was asked
+     to rule out. */
+  (function(){
+    var s=freshState([],{});
+    s.weeklyVerdicts={};
+    s.verdictMeta={"2026-05-04|ghost":{updatedAt:T0,updatedBy:DEV_A}};
+    s.deletedVerdicts={};
+    H.setState(s);
+    H.migrateSyncFields(H.getState());
+    assert("migration prunes a verdictMeta entry backed by neither a live verdict nor a tombstone (truly orphaned)",
+      !H.getState().verdictMeta["2026-05-04|ghost"]);
+  })();
+  (function(){
+    var s=freshState([],{});
+    s.weeklyVerdicts={};
+    s.verdictMeta={"2026-05-04|c1":{updatedAt:T0,updatedBy:DEV_A}};
+    s.deletedVerdicts={"2026-05-04|c1":{weekIso:"2026-05-04",catId:"c1",updatedAt:T1,updatedBy:DEV_A,deletedAt:T1}};
+    H.setState(s);
+    H.migrateSyncFields(H.getState());
+    assert("migration also prunes verdictMeta for a key that's tombstoned - meta is for live records only, the tombstone is its own source of truth once a verdict is cleared",
+      !H.getState().verdictMeta["2026-05-04|c1"]);
+  })();
+  (function(){
+    var s=freshState([{id:"c1",name:"Studies",color:"#2B52A1"}],{});
+    s.weeklyVerdicts={"2026-05-04":{c1:"keep"}};
+    H.setState(s);
+    H.migrateSyncFields(H.getState());
+    assert("migration leaves verdictMeta alone for a key that genuinely has a live verdict",
+      !!H.getState().verdictMeta["2026-05-04|c1"]);
+  })();
+
+  /* ---- setVerdict: no footprint at all before this device has ever
+     migrated (identical to pre-sync behavior), a real tombstone plus a
+     verdictMeta entry once it has - and clearing a verdict removes the
+     verdictMeta entry in the SAME step the tombstone is written, so the
+     two data structures never disagree even for one intermediate instant */
+  (function(){
+    var s=freshState([{id:"c1",name:"Studies",color:"#2B52A1"}],{});
+    H.setState(s);
+    H.setVerdict("c1","2026-05-11","keep");
+    assert("setting a verdict before this device has ever migrated leaves no verdictMeta footprint",
+      !H.getState().verdictMeta);
+    H.setVerdict("c1","2026-05-11",null);
+    assert("clearing a verdict before migration leaves no tombstone - identical to pre-sync behavior",
+      !H.getState().deletedVerdicts);
+  })();
+  (function(){
+    var s=freshState([{id:"c1",name:"Studies",color:"#2B52A1"}],{});
+    H.setState(s);
+    H.migrateSyncFields(H.getState());
+    H.setVerdict("c1","2026-05-11","keep");
+    var key="2026-05-11|c1";
+    assert("setting a verdict once migrated stamps verdictMeta",
+      !!H.getState().verdictMeta[key]&&H.getState().verdictMeta[key].updatedBy===H.getDeviceId());
+    H.setVerdict("c1","2026-05-11",null);
+    assert("clearing a verdict once migrated writes a real tombstone",
+      !!H.getState().deletedVerdicts[key]&&H.getState().deletedVerdicts[key].weekIso==="2026-05-11"&&H.getState().deletedVerdicts[key].catId==="c1");
+    assert("clearing a verdict removes its verdictMeta entry in the same step - no stale duplicate metadata left behind once a tombstone exists",
+      !H.getState().verdictMeta[key]);
+  })();
+
+  /* ---- dedupeCategoriesByName now also remaps verdicts pointing at a
+     category id that loses a name-collision merge - required scope, not
+     optional (see CLAUDE.md): without this, a verdict silently orphans on
+     a dead category id exactly like the entries it already protects */
+  (function(){ // simple case: only the LOSING id has a verdict - it must follow the survivor, not vanish
+    var localFlat=[{id:"local-studies",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
+    var remoteFlat=[{id:"remote-studies",name:"Studies",color:"#2B52A1",updatedAt:T1,updatedBy:DEV_A,deleted:false,deletedAt:null}];
+    var verdictsFlat=[{id:"2026-05-04|local-studies",weekIso:"2026-05-04",catId:"local-studies",verdict:"cut",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
+    var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],verdictsFlat,DEV_B);
+    var survivorId=r.categories.filter(function(c){ return !c.deleted; })[0].id;
+    assert("dedupeCategoriesByName remaps a verdict pointing at a merged-away category id to the survivor",
+      r.verdicts.length===1&&r.verdicts[0].catId===survivorId&&!r.verdicts[0].deleted&&r.verdicts[0].verdict==="cut");
+  })();
+  (function(){ // collision case: BOTH sides set a verdict for the same category+week before ever sharing an id - must not silently drop one just because of array order
+    var localFlat=[{id:"local-studies",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
+    var remoteFlat=[{id:"remote-studies",name:"Studies",color:"#2B52A1",updatedAt:T1,updatedBy:DEV_A,deleted:false,deletedAt:null}];
+    var verdictsFlat=[
+      {id:"2026-05-04|local-studies",weekIso:"2026-05-04",catId:"local-studies",verdict:"cut",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null},
+      {id:"2026-05-04|remote-studies",weekIso:"2026-05-04",catId:"remote-studies",verdict:"keep",updatedAt:T1,updatedBy:DEV_A,deleted:false,deletedAt:null}
+    ];
+    var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],verdictsFlat,DEV_B);
+    var survivorId=r.categories.filter(function(c){ return !c.deleted; })[0].id;
+    var landed=r.verdicts.filter(function(v){ return v.catId===survivorId&&v.weekIso==="2026-05-04"; });
+    assert("dedupeCategoriesByName collapses two verdicts that land on the same survivor+week to exactly one record, not a silent drop or a duplicate",
+      landed.length===1);
+    assert("the collapsed verdict resolves last-write-wins, same as every other conflict in this app - T1 is newer than T0",
+      landed[0].verdict==="keep");
+  })();
+
+  /* ---- syncEngine, end to end: verdicts and close-outs actually travel
+     through the same payload as categories/entries, conflicts resolve
+     last-write-wins, and a genuine deletion propagates as a deletion -
+     never resurrected as "present on one side" (hard rule 7, same
+     guarantee entries/categories already have) */
+  (function(){
+    var deviceA="sim-device-vA",deviceB="sim-device-vB";
+    var stateA=freshState([{id:"studies",name:"Studies",color:"#2B52A1"}],{});
+    stateA.weeklyVerdicts={"2026-05-04":{studies:"cut"}};
+    stateA.weekCloseouts={"2026-04-27":{note:"rough week"}};
+    var pushA=H.syncEngine(stateA,null,deviceA);
+    assert("first-ever sync pushes the local verdict and close-out, not just categories/entries",
+      pushA.toPush.verdicts.length===1&&pushA.toPush.verdicts[0].verdict==="cut"&&
+      pushA.toPush.closeouts.length===1&&pushA.toPush.closeouts[0].note==="rough week");
+
+    var remoteAfterA={categories:pushA.toPush.categories,entries:pushA.toPush.entries,verdicts:pushA.toPush.verdicts,closeouts:pushA.toPush.closeouts};
+    var stateB=freshState([],{});
+    var pullB=H.syncEngine(stateB,remoteAfterA,deviceB);
+    assert("device B, syncing fresh, pulls down A's verdict",
+      pullB.newLocalState.weeklyVerdicts["2026-05-04"]&&pullB.newLocalState.weeklyVerdicts["2026-05-04"].studies==="cut");
+    assert("device B, syncing fresh, pulls down A's close-out note",
+      pullB.newLocalState.weekCloseouts["2026-04-27"]&&pullB.newLocalState.weekCloseouts["2026-04-27"].note==="rough week");
+
+    // device B changes its mind about the verdict and pushes back. Forced
+    // to a fixed future timestamp, not left to real nowIso() - a synchronous
+    // test runs fast enough that A's original stamp and B's edit can land in
+    // the same millisecond, and case 6's Lt>=Rt tie-break would then favor
+    // whichever side happens to be "local" in a given merge call rather than
+    // whichever edit is actually causally later, exactly the flakiness the
+    // rest of this suite avoids by using explicit T0/T1 fixtures.
+    H.setState(pullB.newLocalState);
+    H.setVerdict("studies","2026-05-04","keep");
+    H.getState().verdictMeta["2026-05-04|studies"].updatedAt="2030-01-01T00:00:00.000Z";
+    var pushB=H.syncEngine(H.getState(),remoteAfterA,deviceB);
+    assert("device B's changed verdict is what gets pushed back, not A's stale original",
+      pushB.toPush.verdicts.filter(function(v){return v.weekIso==="2026-05-04"&&!v.deleted;})[0].verdict==="keep");
+
+    // device A syncs again and picks up B's change
+    var remoteAfterB={categories:pushB.toPush.categories,entries:pushB.toPush.entries,verdicts:pushB.toPush.verdicts,closeouts:pushB.toPush.closeouts};
+    var pullA=H.syncEngine(pushA.newLocalState,remoteAfterB,deviceA);
+    assert("device A picks up device B's changed verdict on its next sync - both devices converge",
+      pullA.newLocalState.weeklyVerdicts["2026-05-04"].studies==="keep");
+  })();
+  (function(){ // a cleared verdict must actually disappear on the other device, not resurrect
+    var deviceA="sim-device-vC",deviceB="sim-device-vD";
+    var stateA=freshState([{id:"studies",name:"Studies",color:"#2B52A1"}],{});
+    H.setState(stateA);
+    H.migrateSyncFields(H.getState());
+    H.setVerdict("studies","2026-05-11","cut");
+    var pushA=H.syncEngine(H.getState(),null,deviceA);
+    var remoteAfterA={categories:pushA.toPush.categories,entries:pushA.toPush.entries,verdicts:pushA.toPush.verdicts,closeouts:pushA.toPush.closeouts};
+
+    var stateB=freshState([],{});
+    var pullB=H.syncEngine(stateB,remoteAfterA,deviceB);
+    assert("device B pulls down device A's verdict before it gets cleared",
+      pullB.newLocalState.weeklyVerdicts["2026-05-11"].studies==="cut");
+
+    // device A clears the verdict and syncs again. Forced to a fixed future
+    // timestamp for the same reason as the conflict test above - here it
+    // matters even more, since a same-millisecond delete-vs-live comparison
+    // falls INSIDE the 5s ambiguity window (case 4's safety net: "never
+    // delete on a guess", live wins) - correct behavior for two edits that
+    // genuinely happened close together, but it would mask the very thing
+    // this test exists to prove: that a deletion clearly separated in time
+    // actually propagates, rather than looking like it does merely because
+    // the assertion happened to pass for an unrelated reason.
+    H.setState(pushA.newLocalState);
+    H.setVerdict("studies","2026-05-11",null);
+    H.getState().deletedVerdicts["2026-05-11|studies"].updatedAt="2030-01-01T00:00:00.000Z";
+    H.getState().deletedVerdicts["2026-05-11|studies"].deletedAt="2030-01-01T00:00:00.000Z";
+    var pushA2=H.syncEngine(H.getState(),remoteAfterA,deviceA);
+    var remoteAfterA2={categories:pushA2.toPush.categories,entries:pushA2.toPush.entries,verdicts:pushA2.toPush.verdicts,closeouts:pushA2.toPush.closeouts};
+
+    // device B syncs again and must see the verdict actually gone, not resurrected
+    var pullB2=H.syncEngine(pullB.newLocalState,remoteAfterA2,deviceB);
+    assert("a verdict cleared on device A is actually gone on device B after its next sync, not resurrected as 'present on one side'",
+      !(pullB2.newLocalState.weeklyVerdicts["2026-05-11"]&&("studies" in pullB2.newLocalState.weeklyVerdicts["2026-05-11"])));
+  })();
+  (function(){ // close-outs resolve last-write-wins too, same as verdicts and everything else
+    var deviceA="sim-device-coA",deviceB="sim-device-coB";
+    var remote={categories:[],entries:[],verdicts:[],
+      closeouts:[{id:"2026-05-18",weekIso:"2026-05-18",note:"A's note",closedAt:T0,updatedAt:T0,updatedBy:deviceA,deleted:false,deletedAt:null}]};
+    var stateB=freshState([],{});
+    stateB.weekCloseouts={"2026-05-18":{note:"B's note",closedAt:T1,updatedAt:T1,updatedBy:deviceB}};
+    var pushB=H.syncEngine(stateB,remote,deviceB);
+    assert("two devices closing out the same week resolves last-write-wins, same as every other field in this app",
+      pushB.newLocalState.weekCloseouts["2026-05-18"].note==="B's note");
   })();
 
   /* ---- FAKE_DRIVE: round-trips, and is structurally incapable of a real
@@ -1321,7 +1571,7 @@ function runAsyncTests(H,d){
         {id:"remote-people",name:"People",color:"#A63A9D",updatedAt:t0,updatedBy:devA,deleted:false,deletedAt:null},
         {id:"remote-sleep",name:"Sleep",color:"#6C3BB0",updatedAt:t0,updatedBy:devA,deleted:false,deletedAt:null}
       ];
-      var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],devB);
+      var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],[],devB);
       var live=r.categories.filter(function(c){ return !c.deleted; });
       assert("BUG 1 (real cause, real data): same names, colors diverged from an older palette generation - these are the same category and should be recognized as such",
         live.length===5);
