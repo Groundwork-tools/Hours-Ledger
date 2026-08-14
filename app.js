@@ -45,18 +45,31 @@ var OLD_KEY="hours-ledger-v1";
 var SWATCHES=["#2B52A1","#B18725","#1D669A","#758E29","#0E9DAA","#A63A9D","#27864F","#6C3BB0"];
 function uid(){ return Math.random().toString(36).slice(2,9); }
 
+/* fixed ids (not uid()) so two fresh installs agree their starter
+   categories are literally the same record, no reconciliation needed at
+   all - see CLAUDE.md's "DEFAULTS is frozen" note for why the ids AND the
+   names/colors below must never change without a migration once shipped.
+   Names/colors were never random (uid() only ever touched id), but they
+   HAVE changed across this app's own history (the palette validation
+   work re-tuned every hex value here) - that's the actual root cause of
+   the real duplication incident this file's sync tests are named after:
+   two installs seeded under two different generations of this same
+   object, with no way to tell "the same category, recolored" apart from
+   "genuinely two different categories" by content alone. Fixed ids don't
+   retroactively fix installs that already diverged before this line
+   existed - that's what dedupeCategoriesByName() is for. */
 var DEFAULTS={
   version:2,
   settings:{startHour:6,endHour:24},
   categories:[
-    {id:uid(),name:"Studies",color:"#2B52A1"},
-    {id:uid(),name:"Work / income",color:"#27864F"},
-    {id:uid(),name:"Side projects",color:"#B18725"},
-    {id:uid(),name:"Training",color:"#0E9DAA"},
-    {id:uid(),name:"People",color:"#A63A9D"},
-    {id:uid(),name:"Admin & errands",color:"#1D669A"},
-    {id:uid(),name:"Sleep",color:"#6C3BB0"},
-    {id:uid(),name:"Drift",color:"#B23A2F"}
+    {id:"seed-studies",name:"Studies",color:"#2B52A1"},
+    {id:"seed-work",name:"Work / income",color:"#27864F"},
+    {id:"seed-side-projects",name:"Side projects",color:"#B18725"},
+    {id:"seed-training",name:"Training",color:"#0E9DAA"},
+    {id:"seed-people",name:"People",color:"#A63A9D"},
+    {id:"seed-admin",name:"Admin & errands",color:"#1D669A"},
+    {id:"seed-sleep",name:"Sleep",color:"#6C3BB0"},
+    {id:"seed-drift",name:"Drift",color:"#B23A2F"}
   ],
   entries:{},
   weeklyVerdicts:{},
@@ -244,81 +257,123 @@ function mergeRecords(localArr,remoteArr,contentFields,deviceId){
 }
 
 /* categories can't rely on ids to recognise "the same" category across two
-   devices that have never synced before - every fresh install invents its own
-   random ids for its 8 starter categories, and anything the user names
-   themselves (a "Muay Thai" created on two phones) has no anchor at all. This
-   runs BEFORE the id-based merge above and finds those pairs by content
-   instead: an exact match on name AND color, deliberately conservative (see
-   the design discussion - a missed match just leaves two visible categories
-   to sort out by hand; a wrong match would silently reassign real entries,
-   which is the direction to err away from). A pair only needs reconciling if
-   local and remote don't already share an id - if they do, the ordinary
-   id-based merge already has it covered, including a genuine rename (case 6,
-   last-write-wins). When a match is found, remote's id always wins (if
-   there's a remote category to match against at all, it necessarily already
-   has history - the only case with nothing to reconcile is a first-ever push
-   to an empty file, where there's no remote side to match against in the
-   first place) and local's copy becomes a real tombstone, not just an
-   omission - so a third device, or this same device syncing again later,
-   never sees the loser's absence and mistakes it for "new" and resurrects it. */
-function reconcileCategories(localFlat,remoteFlat,deviceId){
-  var localLive=localFlat.filter(function(r){ return !r.deleted; });
-  var remoteLive=remoteFlat.filter(function(r){ return !r.deleted; });
-  var idRemap={},extraTombstones=[];
-  localLive.forEach(function(L){
-    var alreadyShared=remoteFlat.some(function(r){ return r.id===L.id; });
-    if(alreadyShared) return;
-    var match=null;
-    remoteLive.forEach(function(R){
-      if(match||R.id===L.id) return;
-      if(R.name===L.name&&R.color===L.color) match=R;
-    });
-    if(match){
-      idRemap[L.id]=match.id;
-      extraTombstones.push({id:L.id,name:null,color:null,updatedAt:nowIso(),updatedBy:deviceId,deleted:true,deletedAt:nowIso()});
-    }
+   devices that have never synced before - every fresh install invents its
+   own ids for anything the user names themselves (a "Muay Thai" created on
+   two phones has no anchor at all), and even the 8 starter categories,
+   fixed-id since the DEFAULTS comment above, can genuinely diverge for an
+   install seeded before that line existed. This runs AFTER the ordinary
+   id-based merge above, on its result, and collapses any LIVE categories
+   that share a normalized name (case/whitespace-insensitive - a trailing
+   space must not be the difference between matching and not) down to one
+   survivor, reassigning any entry that pointed at a loser and tombstoning
+   the losers - never just omitting them, so a third device (or this same
+   device syncing again later) never mistakes the absence for "new" and
+   resurrects it.
+
+   Deliberately NOT id-matching, and deliberately NOT the exact-name-AND-
+   color match this used to be (see SYNC-LESSONS.md/CLAUDE.md for the real
+   incident this reverses a design decision over): color is a display
+   preference the user can drag a slider to change at any time, and this
+   app's own starter palette has already changed once across its history,
+   so two genuinely-identical categories seeded under two different
+   generations of DEFAULTS - or a single category a user simply recolored -
+   would never match on color and would duplicate forever. Name-only is a
+   real, deliberate loosening: two categories a user created on purpose
+   with the same name but different meanings would now merge. That risk is
+   accepted because the alternative just failed for real, and because a
+   silent duplicate you'd never notice was assessed as the worse failure
+   mode of the two once fixed ids narrowed how often this path fires at all
+   (every install from here on shares the 8 defaults' ids outright - this
+   only ever runs for a genuinely custom name-collision, or for healing
+   data that diverged before today).
+
+   The surviving id is whichever record is OLDER - arbitrary, but
+   deterministic, and it means an established device's category doesn't
+   churn its own id just because some other device connected to it (that
+   other device's just-migrated records are almost always stamped "now,"
+   so "newer wins the id" would flip the winner nearly every time a new
+   device showed up). The surviving NAME/COLOR, though, come from whichever
+   record was updated most recently - color and casing/whitespace are
+   content, and content follows the same last-write-wins rule every other
+   field in this app already does; only identity (which id survives) needs
+   the stability rule. Runs on every sync, for everyone, automatically -
+   idempotent (a no-op once nothing's left to collapse), which is what
+   makes it a real fix for data that already diverged before this line
+   existed, not just a guard against it happening again. */
+function normalizeName(n){ return (n||"").trim().toLowerCase(); }
+function dedupeCategoriesByName(catsFlat,entriesFlat,deviceId){
+  var groups={};
+  catsFlat.filter(function(r){ return !r.deleted; }).forEach(function(r){
+    var key=normalizeName(r.name);
+    (groups[key]=groups[key]||[]).push(r);
   });
-  return {idRemap:idRemap,extraTombstones:extraTombstones};
-}
-function applyReconciliation(localFlat,reconciled){
-  var loserIds=Object.keys(reconciled.idRemap);
-  return localFlat.filter(function(r){ return loserIds.indexOf(r.id)===-1; }).concat(reconciled.extraTombstones);
+  var idRemap={},extraTombstones=[],fieldUpdates={},mergeLog=[];
+  Object.keys(groups).forEach(function(key){
+    if(groups[key].length<2) return;
+    var byAge=groups[key].slice().sort(function(a,b){ return Date.parse(a.updatedAt)-Date.parse(b.updatedAt); });
+    var winner=byAge[0],newest=byAge[byAge.length-1],losers=byAge.slice(1);
+    if(newest.id!==winner.id&&(newest.name!==winner.name||newest.color!==winner.color)){
+      fieldUpdates[winner.id]={name:newest.name,color:newest.color,updatedAt:newest.updatedAt,updatedBy:newest.updatedBy};
+    }
+    var reassignedCount=entriesFlat.filter(function(e){
+      return !e.deleted&&e.cat&&losers.some(function(l){ return l.id===e.cat; });
+    }).length;
+    losers.forEach(function(loser){
+      idRemap[loser.id]=winner.id;
+      extraTombstones.push({id:loser.id,name:null,color:null,updatedAt:nowIso(),updatedBy:deviceId,deleted:true,deletedAt:nowIso()});
+    });
+    mergeLog.push({name:winner.name,survivorId:winner.id,mergedIds:losers.map(function(l){ return l.id; }),entriesReassigned:reassignedCount});
+  });
+  if(!mergeLog.length) return {categories:catsFlat,entries:entriesFlat};
+
+  mergeLog.forEach(function(g){
+    console.log('Hours Ledger sync: merged duplicate category "'+g.name+'" - kept '+g.survivorId+
+      ", removed "+g.mergedIds.length+" duplicate id(s) ("+g.mergedIds.join(", ")+"), reassigned "+
+      g.entriesReassigned+" "+(g.entriesReassigned===1?"entry":"entries")+".");
+  });
+  var newEntries=entriesFlat.map(function(e){
+    if(e.cat&&idRemap[e.cat]) return Object.assign({},e,{cat:idRemap[e.cat]});
+    return e;
+  });
+  var newCats=catsFlat.filter(function(r){ return !(r.id in idRemap); }).map(function(r){
+    var upd=fieldUpdates[r.id];
+    return upd?Object.assign({},r,upd):r;
+  }).concat(extraTombstones);
+  return {categories:newCats,entries:newEntries};
 }
 
-/* the whole engine in one call: migrate, reconcile categories, rewrite any
-   entry that pointed at a category reconciliation just folded away, merge
-   both collections, hand back the two things a caller needs - the new local
-   state ready to persist immediately, and the flat payload to push. Nothing
-   here writes to state or to any storage itself; the caller decides when
-   (write locally first, always, per SYNC-LESSONS.md's ordering - push only
-   after, and only the connect flow, not yet built, ever risks the network
-   call). remoteFile is null for a genuine first-ever sync (nothing to merge
-   against, every local record trivially survives via case 1 above); its
-   shape otherwise is {categories:[...flat...], entries:[...flat...]}, tombstones
-   inline via deleted:true, no separate remote-side deleted-map. */
+/* the whole engine in one call: migrate, merge both collections by id,
+   dedupe the merged categories by name (folding in any entry that pointed
+   at a category that just got collapsed away), hand back the two things a
+   caller needs - the new local state ready to persist immediately, and the
+   flat payload to push. Nothing here writes to state or to any storage
+   itself; the caller decides when (write locally first, always, per
+   SYNC-LESSONS.md's ordering - push only after, and only the connect flow
+   ever risks the network call). remoteFile is null for a genuine
+   first-ever sync (nothing to merge against, every local record trivially
+   survives via case 1); its shape otherwise is {categories:[...flat...],
+   entries:[...flat...]}, tombstones inline via deleted:true. */
 function syncEngine(localStateIn,remoteFile,deviceId){
   /* migrateSyncFields mutates in place - clone first so a failure anywhere
      below (a bad remote file, a bug, anything) can never leave the CALLER's
-     original object touched. The connect flow (checkpoint 2) still has to
-     honor "don't write the real state until this whole call has returned
-     successfully," but this function no longer works against that by
-     mutating its input as a side effect no matter what happens after. */
+     original object touched. The connect flow still has to honor "don't
+     write the real state until this whole call has returned successfully,"
+     but this function no longer works against that by mutating its input
+     as a side effect no matter what happens after. */
   var localState=JSON.parse(JSON.stringify(localStateIn));
   migrateSyncFields(localState);
   var remote=remoteFile||{categories:[],entries:[]};
 
   var localCatsFlat=flattenCategories(localState);
-  var reconciled=reconcileCategories(localCatsFlat,remote.categories,deviceId);
-  var localCatsAdjusted=applyReconciliation(localCatsFlat,reconciled);
-  var mergedCatsFlat=mergeRecords(localCatsAdjusted,remote.categories,CATEGORY_FIELDS,deviceId);
+  var mergedCatsFlat=mergeRecords(localCatsFlat,remote.categories,CATEGORY_FIELDS,deviceId);
 
-  function remapCat(r){
-    if(r.cat&&reconciled.idRemap[r.cat]) return Object.assign({},r,{cat:reconciled.idRemap[r.cat]});
-    return r;
-  }
-  var localEntriesFlat=flattenEntries(localState).map(remapCat);
-  var remoteEntriesFlat=(remote.entries||[]).map(remapCat);
+  var localEntriesFlat=flattenEntries(localState);
+  var remoteEntriesFlat=remote.entries||[];
   var mergedEntriesFlat=mergeRecords(localEntriesFlat,remoteEntriesFlat,ENTRY_FIELDS,deviceId);
+
+  var deduped=dedupeCategoriesByName(mergedCatsFlat,mergedEntriesFlat,deviceId);
+  mergedCatsFlat=deduped.categories;
+  mergedEntriesFlat=deduped.entries;
 
   var catsResult=unflattenCategories(mergedCatsFlat);
   var entriesResult=unflattenEntries(mergedEntriesFlat);
@@ -1922,7 +1977,8 @@ if(TEST_MODE){
     flattenCategories:flattenCategories,
     unflattenCategories:unflattenCategories,
     mergeRecords:mergeRecords,
-    reconcileCategories:reconcileCategories,
+    normalizeName:normalizeName,
+    dedupeCategoriesByName:dedupeCategoriesByName,
     syncEngine:syncEngine,
     fakeDriveRead:fakeDriveRead,
     fakeDriveWrite:fakeDriveWrite,

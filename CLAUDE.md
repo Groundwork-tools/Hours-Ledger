@@ -48,6 +48,14 @@ Teaching matters here as much as shipping.
    see `SYNC-LESSONS.md`, the record of the incident that happened when a sibling
    project (Money Ledger) got this wrong the first time. Nobody who never presses
    "Connect Google Drive" is exposed to any of this — see hard rule 4.
+8. **`DEFAULTS`' category ids, names, and colors are frozen once shipped — changing
+   any of them requires a migration, the same as hard rule 1.** This isn't
+   theoretical: it's the direct cause of a real duplication bug (see the data
+   model's sync-fields entry below for the full story). `DEFAULTS`' hex colors
+   were re-tuned once already, during earlier palette-validation work, before
+   sync existed to make that dangerous. Do it again without a migration and
+   every existing install duplicates its own starter categories the next time
+   it syncs against a fresh one.
 
 ## Testing before you claim it works
 
@@ -123,6 +131,45 @@ two, and caches for up to ten. There is nothing else to run.
   `migrateSyncFields()`/`syncEngine()` in `app.js` and `SYNC-LESSONS.md` for
   the reasoning; hard rule 7 is the constraint this data shape exists to
   satisfy.
+- **Categories from two devices that have never shared an id are reconciled by
+  name alone** — `normalizeName()` (trimmed, lowercased) then
+  `dedupeCategoriesByName()`, run in `syncEngine()` immediately after the
+  ordinary id-based merge, on the merged result. This is a deliberate
+  *reversal* of the checkpoint-1 design, which matched on exact name **and**
+  color and refused anything less, on purpose — "err toward under-merging":
+  a missed match just leaves two visible categories to sort out by hand,
+  while a wrong match silently reassigns real entries, so the checkpoint-1
+  design took the safer failure mode. That held up under extensive testing —
+  until real second-device testing (not synthetic tests) surfaced a genuine
+  duplication bug: 8 identically-named default categories duplicated on a
+  second device's first connect. The cause wasn't seeding or id randomness —
+  it was that `DEFAULTS`' colors had actually changed across this app's own
+  history (the earlier palette-validation pass), so a months-old install and
+  a freshly-seeded one disagreed on hex color for every untouched default,
+  and exact name+color matching correctly refused to merge them. The
+  circumstances that justified "err toward under-merging" no longer held:
+  color is a display preference the user can change with a hue slider at
+  any time, never a stable identity signal, and — once hard rule 8 fixes
+  `DEFAULTS`' ids and colors going forward — the only records left for this
+  path to ever see are genuine user-created name collisions, which is a
+  narrower, more acceptable risk than the duplication that was actually
+  shipping. Matching is case/whitespace-insensitive because real data
+  contains exactly this kind of variance (a category literally named
+  `"Errands / Shower "`, trailing space and all, that must still match
+  `"errands / shower"`). Two decoupled tie-break rules, not one: the
+  surviving **id** is whichever record is *older* (minimizes churn — a
+  freshly-migrated device's records get stamped "now" during migration, so
+  "newest wins the id" would flip the survivor practically every time a new
+  device connects, the opposite of the goal), while the surviving
+  **name/color** come from whichever record was updated most *recently*
+  (display fields should reflect the latest real edit, same as everywhere
+  else in this app). Because this is one always-on mechanism rather than a
+  one-time reconciliation step, it doubles as an automatic, idempotent
+  self-heal for categories that had already diverged before this fix
+  existed — no manual repair action needed, it collapses on the very next
+  ordinary sync. Every merge it performs is logged via `console.log`
+  (category name, surviving id, merged-away ids, entries reassigned) so a
+  total that looks wrong can be traced without a UI.
 - **`driveConnected` (boolean) lives inside `state` itself, not a separate
   key like `DEVICE_ID`** — so undoing "before Drive connect" (the snapshot
   `connectDrive()` takes as its first action) reverts the whole operation,
@@ -213,20 +260,23 @@ dashboard styling.
     kept deliberately narrow (no notes-browsing view, no required action) so
     it stays a look-back ritual and not a second product.
 12. **Google Drive sync.** Built on the `drive-sync` branch, not yet merged
-    to `main` and not yet verified against a real Google account or a real
-    second device — that verification is the explicit next step before this
-    ships, not a formality already passed. What exists: the per-record merge
-    engine (see hard rule 7, `SYNC-LESSONS.md`), an opt-in connect flow (a
-    "Connect Google Drive" button — nothing before that click touches
-    Google, an OAuth script, or the network), category reconciliation for
-    devices that have never synced before, and a delete-with-reassignment
-    picker so a duplicate category never has to be resolved by hand-editing
-    entries. Genuinely conflicts with hard rules 2 and 4 for anyone who
-    opts in — both rules now carry the exact carve-out (see hard rule 4's
-    note and the data model section's sync-fields entry) rather than being
-    quietly broken. Still worth a staging deploy before this reaches the
-    handful of people already using the live site, once real-device
-    verification is done and it's ready to merge.
+    to `main`. What exists: the per-record merge engine (see hard rule 7,
+    `SYNC-LESSONS.md`), an opt-in connect flow (a "Connect Google Drive"
+    button — nothing before that click touches Google, an OAuth script, or
+    the network), name-based category dedup for devices that have never
+    synced before, including an automatic self-heal for categories that
+    already diverged (see hard rules 7–8 and the data model's sync-fields
+    entries), and a delete-with-reassignment picker so a duplicate category
+    never has to be resolved by hand-editing entries. Verified against a
+    real Google account across two real devices — that testing surfaced two
+    real bugs (a silent-loss bug from no sync-on-page-load, and the category
+    duplication bug that drove the hard rule 8 / name-based-dedup design),
+    both fixed and covered by failing-test-first regression tests. Genuinely
+    conflicts with hard rules 2 and 4 for anyone who opts in — both rules
+    now carry the exact carve-out (see hard rule 4's note and the data
+    model section's sync-fields entries) rather than being quietly broken.
+    Still worth a staging deploy before this reaches the handful of people
+    already using the live site, once it's ready to merge.
 
 Do not add features that are not on this list without discussing them first.
 Feature creep is the known failure mode of this project.

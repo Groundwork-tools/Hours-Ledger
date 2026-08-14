@@ -705,7 +705,14 @@ function runTests(H,d){
   assert("clearing a week's entries tombstones every one of them, not just deletes them silently",
     clearedIds.every(function(id){ return !!H.getState().deletedEntries[id]; }));
 
-  /* ---- category reconciliation: the seed/user-created-category landmine */
+  /* ---- category dedup by name: the seed/user-created-category landmine,
+     and its real cause (see CLAUDE.md - DEFAULTS' colors changed across the
+     app's own history, so exact name+color matching, this mechanism's
+     predecessor, correctly refused to merge categories that actually were
+     the same). dedupeCategoriesByName runs AFTER the normal id-based merge,
+     against a single already-merged flat list - these tests build that
+     "already merged" list by hand (local records concat remote records,
+     exactly what mergeRecords would hand it when nothing shares an id yet). */
   (function(){
     var localFlat=[
       {id:"local-studies",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null},
@@ -715,32 +722,78 @@ function runTests(H,d){
       {id:"remote-studies",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_A,deleted:false,deletedAt:null},
       {id:"remote-muaythai",name:"Muay Thai",color:"#B18725",updatedAt:T0,updatedBy:DEV_A,deleted:false,deletedAt:null}
     ];
-    var r=H.reconcileCategories(localFlat,remoteFlat,DEV_B);
-    assert("reconcileCategories matches both same-name-same-color pairs, seeded or user-created alike",
-      r.idRemap["local-studies"]==="remote-studies"&&r.idRemap["local-muaythai"]==="remote-muaythai");
-    assert("the losing local id gets a real tombstone, not just an omission",
-      r.extraTombstones.length===2&&r.extraTombstones.every(function(t){ return t.deleted; }));
+    var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],DEV_B);
+    var live=r.categories.filter(function(c){ return !c.deleted; });
+    var tombstoned=r.categories.filter(function(c){ return c.deleted; });
+    assert("dedupeCategoriesByName collapses both same-name pairs down to one survivor each, seeded or user-created alike",
+      live.length===2);
+    assert("the losing ids get a real tombstone, not just an omission",
+      tombstoned.length===2&&tombstoned.every(function(t){ return t.deleted; }));
   })();
-  (function(){ // conservative matching: name matches, color doesn't -> NOT merged
+  (function(){ // name matches, color doesn't -> MERGED ANYWAY - the real-world case this whole mechanism exists for
     var localFlat=[{id:"local-x",name:"Studies",color:"#111111",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
-    var remoteFlat=[{id:"remote-x",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_A,deleted:false,deletedAt:null}];
-    var r=H.reconcileCategories(localFlat,remoteFlat,DEV_B);
-    assert("a name match with a different color is left alone - conservative matching, no wrong merge",
-      Object.keys(r.idRemap).length===0);
+    var remoteFlat=[{id:"remote-x",name:"Studies",color:"#2B52A1",updatedAt:T1,updatedBy:DEV_A,deleted:false,deletedAt:null}];
+    var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],DEV_B);
+    var live=r.categories.filter(function(c){ return !c.deleted; });
+    assert("a name match with a different color now merges - color is a display preference, not an identity signal (deliberate reversal from the earlier conservative design, see CLAUDE.md)",
+      live.length===1);
+    assert("the survivor's display fields (name/color) come from whichever record was updated most recently",
+      live[0].color==="#2B52A1");
   })();
-  (function(){ // conservative matching: color matches, name doesn't -> NOT merged
+  (function(){ // color matches, name doesn't -> still NOT merged, name is the only identity signal
     var localFlat=[{id:"local-x",name:"Side projects",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
     var remoteFlat=[{id:"remote-x",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_A,deleted:false,deletedAt:null}];
-    var r=H.reconcileCategories(localFlat,remoteFlat,DEV_B);
+    var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],DEV_B);
+    var live=r.categories.filter(function(c){ return !c.deleted; });
     assert("a color match with a different name is left alone - a shared palette color isn't a meaningful signal on its own",
-      Object.keys(r.idRemap).length===0);
+      live.length===2);
   })();
-  (function(){ // ids already shared -> ordinary merge handles it, reconciliation stays out of the way
-    var localFlat=[{id:"c1",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
-    var remoteFlat=[{id:"c1",name:"Studies (renamed remotely)",color:"#2B52A1",updatedAt:T1,updatedBy:DEV_A,deleted:false,deletedAt:null}];
-    var r=H.reconcileCategories(localFlat,remoteFlat,DEV_B);
-    assert("a pair that already shares an id is never touched by reconciliation - that's the ordinary merge's job",
-      Object.keys(r.idRemap).length===0);
+  (function(){ // a category with no name collision passes through completely untouched - idempotent, no-op case
+    var flat=[{id:"c1",name:"Studies",color:"#2B52A1",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
+    var r=H.dedupeCategoriesByName(flat,[],DEV_B);
+    assert("a category with no name collision passes through untouched",
+      r.categories.length===1&&r.categories[0].id==="c1"&&!r.categories[0].deleted);
+  })();
+  (function(){ // real data: "Errands / Shower " (trailing space) must match "errands / shower" - case-insensitive, whitespace-trimmed
+    var localFlat=[{id:"local-errands",name:"Errands / Shower ",color:"#1D669A",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
+    var remoteFlat=[{id:"remote-errands",name:"errands / shower",color:"#1D669A",updatedAt:T1,updatedBy:DEV_A,deleted:false,deletedAt:null}];
+    var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],DEV_B);
+    var live=r.categories.filter(function(c){ return !c.deleted; });
+    assert("name matching is case-insensitive and trims whitespace - real data has a trailing-space variant of this exact name",
+      live.length===1);
+  })();
+  (function(){ // the merge logs what it did - "console log at minimum" per the explicit ask, readable without a UI
+    var localFlat=[{id:"local-work",name:"Work / income",color:"#2F6B4F",updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
+    var remoteFlat=[{id:"remote-work",name:"Work / income",color:"#27864F",updatedAt:T1,updatedBy:DEV_A,deleted:false,deletedAt:null}];
+    var entriesFlat=[{id:"e1",date:"2026-03-02",label:"x",cat:"remote-work",start:540,end:600,updatedAt:T0,updatedBy:DEV_B,deleted:false,deletedAt:null}];
+    /* dedupeCategoriesByName runs inside the sandboxed iframe (that's where
+       app.js's own "console" lives), not this outer document - overriding
+       the outer window's console.log here would silently capture nothing. */
+    var iframeConsole=d.defaultView.console;
+    var calls=[],origLog=iframeConsole.log,r;
+    iframeConsole.log=function(msg){ calls.push(msg); };
+    try{ r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),entriesFlat,DEV_B); }
+    finally{ iframeConsole.log=origLog; }
+    assert("a merge event is logged to the console naming the category, the survivor, and how many entries were reassigned",
+      calls.length===1&&calls[0].indexOf("Work / income")>-1&&calls[0].indexOf("local-work")>-1&&calls[0].indexOf("1 entry")>-1);
+  })();
+  (function(){ // self-heal: data that ALREADY diverged before this feature existed collapses on the very next ordinary sync, automatically, no manual repair step
+    var localState=freshState(
+      [{id:"local-work",name:"Work / income",color:"#2F6B4F"}],
+      {"2026-04-01":[{id:"local-e1",label:"Standup",cat:"local-work",start:540,end:570}]}
+    );
+    var remoteFile={
+      categories:[{id:"remote-work",name:"Work / income",color:"#27864F",updatedAt:T0,updatedBy:"sim-device-A",deleted:false,deletedAt:null}],
+      entries:[{id:"remote-e1",date:"2026-04-01",label:"Retro",cat:"remote-work",start:600,end:630,updatedAt:T0,updatedBy:"sim-device-A",deleted:false,deletedAt:null}]
+    };
+    var result=H.syncEngine(localState,remoteFile,DEV_B);
+    var liveCats=result.newLocalState.categories;
+    assert("self-heal: two categories that diverged before this feature existed collapse to ONE on the very next ordinary sync",
+      liveCats.length===1&&liveCats[0].name==="Work / income");
+    var liveEntries=result.newLocalState.entries["2026-04-01"]||[];
+    var survivorId=liveCats[0].id;
+    assert("self-heal: both devices' entries survive, correctly reassigned to the single surviving category",
+      liveEntries.length===2&&liveEntries.every(function(e){ return e.cat===survivorId; }));
   })();
 
   /* ---- syncEngine, end to end: two independently-installed devices with
@@ -769,8 +822,13 @@ function runTests(H,d){
       liveCats.length===2);
     var studiesIdAfterMerge=liveCats.filter(function(c){ return c.name==="Studies"; })[0].id;
     var bEntryAfterMerge=pushB.toPush.entries.filter(function(e){ return e.id==="b-e1"&&!e.deleted; })[0];
-    assert("device B's own entry follows its category's surviving id after reconciliation, not the id B originally had",
-      bEntryAfterMerge.cat===studiesIdAfterMerge&&studiesIdAfterMerge==="a-studies");
+    /* both devices' records are stamped in the same instant in this synthetic
+       test, so there's a genuine tie on updatedAt - which side's id wins the
+       tie is an implementation detail (stable-sort array order), not a
+       contract, so this only checks self-consistency: exactly one survivor,
+       and B's own entry follows WHICHEVER id survived, never a dangling one. */
+    assert("device B's own entry follows its category's surviving id, whichever one that turned out to be",
+      bEntryAfterMerge.cat===studiesIdAfterMerge&&(studiesIdAfterMerge==="a-studies"||studiesIdAfterMerge==="b-studies"));
     assert("device B's newLocalState only has the 2 reconciled categories, not B's original duplicates",
       pushB.newLocalState.categories.length===2);
   })();
@@ -1159,14 +1217,17 @@ function runAsyncTests(H,d){
       /* ---- BUG 1, the actual cause - confirmed against the real Drive
          file's diff: names matched exactly, colors differed on every
          single default category. Root cause: DEFAULTS' colors (and ids)
-         aren't fixed, so two installs seeded at different points in this
-         app's history - or a user who ever dragged the hue slider on a
-         default category - invent different colors for "the same"
-         starter category, and exact name+color matching correctly
-         refuses to guess. This is exactly why the test above never
-         caught it: it seeds both "devices" identically in the same test
-         run, so the one thing that actually diverges in reality (color)
-         never got a chance to. These are the real values from the diff. */
+         weren't fixed at the time, so two installs seeded at different
+         points in this app's history invent different colors for "the
+         same" starter category, and the old exact-name+color matching
+         correctly refused to guess - which is exactly why the test above
+         never caught it: it seeds both "devices" identically in the same
+         test run, so the one thing that actually diverges in reality
+         (color) never got a chance to. These are the real values from the
+         diff. Now matched by name alone (see CLAUDE.md for why that
+         reversal is safe): dedupeCategoriesByName runs on the already-
+         merged flat list, so this test feeds it local+remote concatenated,
+         same as mergeRecords would hand it with nothing yet sharing an id. */
       var t0="2026-01-01T00:00:00.000Z",devA="device-A",devB="device-B";
       var localFlat=[
         {id:"local-work",name:"Work / income",color:"#2F6B4F",updatedAt:t0,updatedBy:devB,deleted:false,deletedAt:null},
@@ -1182,9 +1243,10 @@ function runAsyncTests(H,d){
         {id:"remote-people",name:"People",color:"#A63A9D",updatedAt:t0,updatedBy:devA,deleted:false,deletedAt:null},
         {id:"remote-sleep",name:"Sleep",color:"#6C3BB0",updatedAt:t0,updatedBy:devA,deleted:false,deletedAt:null}
       ];
-      var r=H.reconcileCategories(localFlat,remoteFlat,devB);
+      var r=H.dedupeCategoriesByName(localFlat.concat(remoteFlat),[],devB);
+      var live=r.categories.filter(function(c){ return !c.deleted; });
       assert("BUG 1 (real cause, real data): same names, colors diverged from an older palette generation - these are the same category and should be recognized as such",
-        Object.keys(r.idRemap).length===5);
+        live.length===5);
     })
     .then(function(){ return results; });
 }
