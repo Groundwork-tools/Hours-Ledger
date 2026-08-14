@@ -965,6 +965,32 @@ function runTests(H,d){
   assert("confirming with a target selected deletes the category and moves its entry there",
     H.getState().categories.length===1&&H.entriesFor("2026-04-07")[0].cat==="c2");
 
+  /* ---- import must visibly say when it just silently disconnected Drive -
+     the exact "local state looks fine, Drive quietly stopped hearing about
+     it" shape as BUG 2, reported from real usage: the button used to just
+     sit on stale "Drive: synced" text after an import that had already
+     forced driveConnected back to false. */
+  (function(){
+    H.setState(freshState([{id:"c1",name:"Studies",color:"#2B52A1"}],{}));
+    H.getState().driveConnected=true;
+    var backup={version:2,settings:{startHour:6,endHour:24},
+      categories:[{id:"c2",name:"Imported",color:"#27864F"}],entries:{},weeklyVerdicts:{},weekCloseouts:{}};
+    H.importBackupJson(JSON.stringify(backup));
+    assert("importing on a previously-connected device visibly says sync stopped, not stale 'Drive: synced' text",
+      d.getElementById("connectDrive").textContent.toLowerCase().indexOf("disconnect")>-1);
+    assert("driveConnected is still correctly forced false by the import - unchanged behavior, just now visible",
+      H.getState().driveConnected===false);
+  })();
+  (function(){
+    H.setState(freshState([{id:"c1",name:"Studies",color:"#2B52A1"}],{}));
+    var before=d.getElementById("connectDrive").textContent;
+    var backup={version:2,settings:{startHour:6,endHour:24},
+      categories:[{id:"c2",name:"Imported",color:"#27864F"}],entries:{},weeklyVerdicts:{},weekCloseouts:{}};
+    H.importBackupJson(JSON.stringify(backup));
+    assert("importing on a device that was never connected leaves the Drive button untouched - nothing to disconnect from",
+      d.getElementById("connectDrive").textContent===before);
+  })();
+
   return results;
 }
 
@@ -1147,6 +1173,8 @@ function runAsyncTests(H,d){
         H.getState().categories.some(function(c){ return c.id==="imported-marker"; }));
       assert("...but driveConnected:true in the imported file was not honored",
         H.getState().driveConnected===false);
+      assert("...and on a device that just came from a REAL connected session, the Drive button visibly says so, not stale 'Drive: synced' text",
+        d.getElementById("connectDrive").textContent.toLowerCase().indexOf("disconnect")>-1);
     })
     .then(function(){
       /* ---- BUG 1 repro: two devices that have never synced before share

@@ -179,7 +179,15 @@ two, and caches for up to ten. There is nothing else to run.
   An imported file's `driveConnected` is deliberately never honored on
   import, even if the file says `true` — see the import handler in
   `app.js` — so opening an arbitrary backup can never silently resume a
-  background network sync.
+  background network sync. When that import turns an actually-connected
+  device's `driveConnected` from `true` back to `false`, `importBackupJson()`
+  says so on the Drive button itself (`"Drive: disconnected after import —
+  reconnect to resume"`) rather than leaving it on whatever it said before —
+  found from real usage, the same silent-desync shape as the sync-on-load
+  fix above: local saves keep working normally, so nothing else on screen
+  would have hinted that Drive had stopped hearing about them. Only fires
+  when there was a real connection to lose; importing into a device that
+  was never connected leaves the button on its correct default.
 
 ## How the code is organised
 

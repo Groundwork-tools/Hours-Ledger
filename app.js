@@ -1835,6 +1835,7 @@ document.getElementById("load").addEventListener("click",function(){ document.ge
 function importBackupJson(jsonText){
   var d=JSON.parse(jsonText);
   if(!d.categories||!d.entries) throw new Error("bad");
+  var wasDriveConnected=state.driveConnected===true;
   snapshot("open a copy");
   state=d;
   if(!state.settings) state.settings={startHour:6,endHour:24};
@@ -1847,6 +1848,16 @@ function importBackupJson(jsonText){
      gets to make for the user */
   state.driveConnected=false;
   persist(); render(); refreshHint(); updateColophon();
+  /* the flip above is otherwise invisible: entries keep saving locally,
+     nothing on screen changes, and the Drive button - the one persistent,
+     always-visible piece of UI that speaks to sync state - just sits on
+     whatever it said before the import (often "Drive: synced", now a lie).
+     That's the same shape as the silent-loss bug this whole feature
+     already shipped a fix for (see BUG 2 above): local state looking
+     completely normal while Drive quietly stops hearing about it. Only
+     worth saying anything if there was a real connection to lose - a
+     device that was never connected already shows the correct default. */
+  if(wasDriveConnected) document.getElementById("connectDrive").textContent="Drive: disconnected after import — reconnect to resume";
 }
 document.getElementById("fileInput").addEventListener("change",function(){
   var f=this.files[0]; if(!f) return;
