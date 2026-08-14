@@ -310,21 +310,43 @@ dashboard styling.
     explicit "is this actually needed or will it cloud the purpose" check —
     kept deliberately narrow (no notes-browsing view, no required action) so
     it stays a look-back ritual and not a second product.
-12. ~~Google Drive sync.~~ **Done — merged to `main` and live since
-    2026-08-14.** What shipped: the per-record merge engine (see hard rule 7,
-    `SYNC-LESSONS.md`), an opt-in connect flow (a "Connect Google Drive"
-    button — nothing before that click touches Google, an OAuth script, or
-    the network), name-based category dedup for devices that have never
-    synced before, including an automatic self-heal for categories that
-    already diverged (see hard rules 7–8 and the data model's sync-fields
-    entries), and a delete-with-reassignment picker so a duplicate category
-    never has to be resolved by hand-editing entries. Verified against a
-    real Google account across two real devices, both before and after the
-    merge — see "What's live and verified" above for the full post-merge
-    check. Genuinely conflicts with hard rules 2 and 4 for anyone who opts
-    in — both rules now carry the exact carve-out (see hard rule 4's note
-    and the data model section's sync-fields entries) rather than being
-    quietly broken.
+12. **Google Drive sync.** Shipping in two phases — tracked here explicitly
+    because "sync is done" reading as "everything syncs" is exactly what let
+    the phase 2 gap go unwritten-down the first time.
+    - **Phase 1 (entries + categories): ~~done~~ — merged to `main` and live
+      since 2026-08-14.** What shipped: the per-record merge engine (see hard
+      rule 7, `SYNC-LESSONS.md`), an opt-in connect flow (a "Connect Google
+      Drive" button — nothing before that click touches Google, an OAuth
+      script, or the network), name-based category dedup for devices that
+      have never synced before, including an automatic self-heal for
+      categories that already diverged (see hard rules 7–8 and the data
+      model's sync-fields entries), and a delete-with-reassignment picker so
+      a duplicate category never has to be resolved by hand-editing entries.
+      Verified against a real Google account across two real devices, both
+      before and after the merge — see "What's live and verified" above for
+      the full post-merge check. Genuinely conflicts with hard rules 2 and 4
+      for anyone who opts in — both rules now carry the exact carve-out (see
+      hard rule 4's note and the data model section's sync-fields entries)
+      rather than being quietly broken.
+    - **Phase 2 (weekly verdicts + week close-outs): in progress, on a
+      branch, not yet on `main`.** Deliberately excluded from phase 1 —
+      `weeklyVerdicts`/`weekCloseouts` are nested maps keyed by week with no
+      record ids, a different shape from entries/categories, and that
+      exclusion was a real scope decision made at phase 1's design time, not
+      an oversight discovered later. Composite key (`weekIso|categoryId` for
+      verdicts, `weekIso` alone for close-outs) reuses `mergeRecords()`
+      unmodified. Verdicts get a `verdictMeta` side table (metadata can't
+      live inline because a verdict's live value is a bare string, not an
+      object) plus real tombstones (`deletedVerdicts` — clearing a verdict by
+      tapping it twice is a real, reachable delete path today). Close-outs
+      get `updatedAt`/`updatedBy` inline (their leaf is already an object)
+      and no tombstones (no delete/reopen-to-clear path exists yet — same
+      rule as always, tombstones get designed *when* that capability is
+      added, not before). Also required: `dedupeCategoriesByName()` extended
+      to remap verdicts pointing at a category id that loses a name-collision
+      merge, the same way it already remaps `entries.cat` — otherwise a
+      verdict silently orphans on a dead category id, the same invisible-loss
+      shape phase 1 kept finding.
 13. **Friend's laptop feedback.** A friend is using Hours Ledger day-to-day
     on a laptop and has feedback on things that need attention. Specifics
     not yet gathered — placeholder so it isn't lost; fill in and re-slot
