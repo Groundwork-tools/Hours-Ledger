@@ -535,6 +535,26 @@ function runTests(H,d){
     d.getElementById("fStart").value===expStartStr);
   d.getElementById("fCancel").click();
 
+  /* 37-38. Add entry (laptop) must not flatten to a flat start+60 on today
+     either - real 2026-08-15 report: last entry ended 10:00, current time
+     11:55, Add entry correctly started at 10:00 but ended at 11:00 instead
+     of 11:55. addBtn and fab now share defaultEntryTimes(), so this is the
+     same anchoring the Log now tests above already cover, through the
+     other entry point. */
+  H.getState().entries={};
+  H.setWeekStart(H.mondayOf(new Date()));
+  H.putEntry(todayIso,"Old",null,0,oldEnd,null);
+  d.getElementById("addBtn").click();
+  assert("Add entry starts from the last entry's end",
+    d.getElementById("fStart").value===oldEndStr);
+  var nowRounded3=Math.min(Math.round(nowMins/5)*5,1439);
+  if(nowRounded3>oldEnd){
+    var nowRounded3Str=String(Math.floor(nowRounded3/60)).padStart(2,"0")+":"+String(nowRounded3%60).padStart(2,"0");
+    assert("Add entry on today anchors its end to the real current time, not a flat +60",
+      d.getElementById("fEnd").value===nowRounded3Str);
+  }
+  d.getElementById("fCancel").click();
+
   /* ================= sync engine (see CLAUDE.md hard rule 7, SYNC-LESSONS.md) =================
      Everything below tests pure functions or the CRUD choke points that feed
      them - no network, no OAuth, nothing that could reach a real Drive file

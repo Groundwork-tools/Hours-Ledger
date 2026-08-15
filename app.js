@@ -1941,13 +1941,33 @@ function defaultAddDay(){
   if(iso(mondayOf(today))===iso(weekStart)) return (today.getDay()+6)%7;
   return 0;
 }
+/* shared by "Add entry" and "Log now": continues from the day's last entry
+   if there is one; on today specifically, also anchors the end (and, with
+   no entries yet, the start) to the real current time instead of a flat
+   60-minute block - otherwise a gap since your last entry silently isn't
+   accounted for until you notice and fix the end time by hand. last is
+   clamped to 23:30 so a day whose last entry runs to exactly midnight can't
+   produce a zero-length next block. */
+function defaultEntryTimes(dateStr){
+  var entries=entriesFor(dateStr);
+  var lastRaw=entries.length?Math.max.apply(null,entries.map(function(e){ return e.end; })):null;
+  var last=(lastRaw!==null)?Math.min(lastRaw,23*60+30):null;
+  var start,end;
+  if(dateStr===iso(new Date())){
+    var now=new Date();
+    var mins=Math.min(Math.round((now.getHours()*60+now.getMinutes())/5)*5,1439);
+    start=(last!==null)?last:Math.max(mins-30,0);
+    end=(mins>start)?mins:start+30;
+  }else{
+    start=(last!==null)?last:9*60;
+    end=Math.min(start+60,1440);
+  }
+  return {start:start,end:end};
+}
 document.getElementById("addBtn").addEventListener("click",function(){
   var dayIdx=defaultAddDay();
-  var entries=entriesFor(iso(weekDates()[dayIdx]));
-  var last=entries.length?Math.max.apply(null,entries.map(function(e){ return e.end; })):null;
-  var start=(last!==null)?Math.min(last,23*60+30):9*60;
-  var end=Math.min(start+60,1440);
-  openSheet(dayIdx,start,end,null);
+  var t=defaultEntryTimes(iso(weekDates()[dayIdx]));
+  openSheet(dayIdx,t.start,t.end,null);
 });
 document.getElementById("range").addEventListener("click",function(){
   var s=state.settings;
@@ -2082,19 +2102,8 @@ document.getElementById("dayNext").addEventListener("click",function(){
    last entry, same as "Add entry" would. */
 document.getElementById("fab").addEventListener("click",function(){
   var dateStr=iso(weekDates()[focusDay]);
-  var entries=entriesFor(dateStr);
-  var last=entries.length?Math.max.apply(null,entries.map(function(e){ return e.end; })):null;
-  var start,end;
-  if(dateStr===iso(new Date())){
-    var now=new Date();
-    var mins=Math.min(Math.round((now.getHours()*60+now.getMinutes())/5)*5,1439);
-    start=(last!==null)?last:Math.max(mins-30,0);
-    end=(mins>start)?mins:start+30;
-  }else{
-    start=(last!==null)?last:9*60;
-    end=Math.min(start+60,1440);
-  }
-  openSheet(focusDay,start,end,null);
+  var t=defaultEntryTimes(dateStr);
+  openSheet(focusDay,t.start,t.end,null);
 });
 
 var SEEN="hours-ledger-seen";
