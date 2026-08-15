@@ -452,6 +452,35 @@ second. When a fix "isn't taking effect" despite the source clearly being
 correct, check whether you're actually looking at the code you think you
 are before concluding the fix itself is wrong.
 
+**It happened a third time — this time in Hours Ledger itself, not just
+its sibling — and the "watch for it" habit still didn't prevent it.**
+2026-08-15: a bug reported as "Also put it on" silently blocking save
+was investigated, found already-fixed on paper (the exact code the two
+incidents above should have made suspect), and only closed out after
+Sebastian re-tested on a hard-refreshed browser and confirmed it — i.e.
+a real user, on a real device, hit the exact stale-`app.js` shape this
+section already documented twice, in the one project that had this
+document in hand the whole time it was being built. Two prior
+encounters and an explicit note in this file were not, on their own,
+enough to prevent a third. The fix is now structural rather than a
+third instance of "be more careful": `index.html`'s
+`<script src="app.js">` is replaced with a two-line bootstrap that
+inserts the script tag with `?v=`+`Date.now()`, so the browser can never
+serve a stale disk-cached copy, on any load, with nothing to remember to
+bump. `selftest.html`'s own iframe loads got the same treatment (its
+`?hltest=1` was static too, not actually cache-busting despite this
+document, written before Hours Ledger's own harness existed, assuming
+the *pattern* would carry over — it hadn't). The accepted tradeoff:
+`app.js` is now never cached between opens, only ever freshly fetched,
+which also forecloses caching it for backlog item 2's eventual offline
+support (see `CLAUDE.md`'s backlog item 11 and item 2's note) — decided
+deliberately rather than rediscovered mid-build later. The general
+lesson underneath both the two-instance and three-instance version of
+this: a documented lesson that only changes what you *watch for* is
+weaker than one that changes what the *code itself* can do — prefer
+closing a repeat failure mode structurally over trusting a habit to
+hold a third time, especially once it's already failed to hold once.
+
 **Be honest about what went wrong on the Claude side specifically, not
 just "bugs happened."** In order, plainly:
 

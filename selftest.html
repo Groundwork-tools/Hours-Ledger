@@ -21,7 +21,7 @@ see the <code>TEST_MODE</code> switch at the top of index.html's storage section
 This file is never linked from the real app; open it by hand before deploying.</p>
 <div id="out">Loading index.html…</div>
 
-<iframe id="sandbox" src="index.html?hltest=1"></iframe>
+<iframe id="sandbox"></iframe>
 
 <script>
 (function(){
@@ -51,6 +51,9 @@ function appendResults(more){
   renderResults();
 }
 
+/* cache-bust the same way index.html's own app.js load does (see CLAUDE.md
+   backlog item 11) - listener attached before src is set, so a fast/cached
+   load can't fire "load" before this runs and gets missed */
 document.getElementById("sandbox").addEventListener("load",function(){
   var hook,doc;
   try{
@@ -73,6 +76,7 @@ document.getElementById("sandbox").addEventListener("load",function(){
     appendResults([{name:"the async test continuation itself threw: "+(e&&e.message||e),pass:false}]);
   });
 });
+document.getElementById("sandbox").src="index.html?hltest=1&v="+Date.now();
 
 function runTests(H,d){
   var results=[];
@@ -1372,7 +1376,7 @@ function freshSandbox(){
         resolve({H:iframeEl.contentWindow.__HL_TEST__,d:iframeEl.contentDocument,el:iframeEl});
       },100);
     });
-    iframeEl.src="index.html?hltest=1";
+    iframeEl.src="index.html?hltest=1&v="+Date.now();
     document.body.appendChild(iframeEl);
   });
 }

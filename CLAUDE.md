@@ -347,7 +347,15 @@ dashboard styling.
 1. ~~Split into three files.~~ Done.
 2. **Offline support.** A service worker so it opens on the train with no signal.
    Deliberately deprioritized for now (not a workflow gap for the current user) —
-   still worth doing eventually, not a dead item.
+   still worth doing eventually, not a dead item. **Interacts with backlog item
+   16.11**: `app.js` is now deliberately never browser-cached (a `?v=`+`Date.now()`
+   bust on every load, to close a stale-JS bug that had cost three separate
+   debugging sessions) — a service worker's own cache strategy for offline use
+   has to be designed against that decision on purpose (e.g. the service worker
+   itself becomes the one place `app.js` gets cached, with its own explicit
+   invalidation on deploy) rather than either fighting the no-cache bootstrap or
+   silently reintroducing the staleness risk item 16.11 exists to close. Read
+   that item's reasoning before starting this one.
 3. ~~Weekly review view.~~ Done — last 4 weeks side by side, paged by full 4-week
    windows, majority verdict per category, % of that week's logged time per cell.
 4. **Ideal-week layer.** A second grid where chosen blocks are placed first and
@@ -453,23 +461,20 @@ dashboard styling.
     specifically confirmed item 10 on their own device — a fix believed
     correct isn't the same claim as one seen working, same standard as
     everywhere else in this file.
-    - **(1) "Also put it on" — investigated, not reproduced, no code
-      changed.** Static reading found the `fDay`-change/`saveSheet`
-      fallback logic already correct (see the investigation this replaced,
-      preserved in git history on this branch). Built an actual repro
-      instead of trusting that reading: ran the full suite headless
-      (0/199 failing) via a real Chrome binary, then added two direct
-      assertions on the Repeat toggle's own `aria-pressed` state (not just
-      the save outcome, which an existing test already covered) for the
-      exact scenario reported — Monday deselects, Tuesday should
-      auto-select. Both pass against current code (0/201 failing,
-      `selftest.html`). Per the standing rule this project already
-      follows for a passing repro: **not fixed, because nothing was
-      broken.** Very likely stale deployed JS (a browser cache artifact —
-      see `SYNC-LESSONS.md`'s own note about this exact trap) rather than
-      a live bug. The two new assertions stay in as permanent regression
-      coverage regardless. Sebastian to re-test on a hard-refreshed
-      browser to confirm the cache-artifact read and close this out.
+    - **(1) "Also put it on" — investigated, not reproduced, confirmed
+      closed.** Static reading found the `fDay`-change/`saveSheet`
+      fallback logic already correct. Built an actual repro instead of
+      trusting that reading: ran the full suite headless (0/199 failing)
+      via a real Chrome binary, then added two direct assertions on the
+      Repeat toggle's own `aria-pressed` state (not just the save outcome,
+      which an existing test already covered) for the exact scenario
+      reported — Monday deselects, Tuesday should auto-select. Both pass
+      against current code. Per the standing rule this project already
+      follows for a passing repro: not fixed, because nothing was broken.
+      **Confirmed by Sebastian on a hard-refreshed browser: picking
+      another day does auto-select it.** Cache artifact, not a bug — this
+      exact shape is the reason item 11 below exists. Closed; the two new
+      assertions stay in as permanent regression coverage.
     - **(2) Add entry (laptop) only filled one hour forward — fixed.**
       `addBtn`'s handler always set `end = start + 60`; the FAB's handler
       already anchored `end` to the real current time on today. Extracted
@@ -604,6 +609,45 @@ dashboard styling.
       within a short window before fully committing to drag-select, or a
       visible cue the instant drag-mode arms so an accidental hold can be
       released before it eats a scroll — needs a decision, not built yet.
-
-Do not add features that are not on this list without discussing them first.
+    - **(11) Cache-bust `app.js` on every load — fixed, deliberate
+      decision.** Closing item 1 above (a report that ultimately turned
+      out to be stale deployed JS, not a real bug) was the *third* time
+      this exact shape has cost real debugging time — `SYNC-LESSONS.md`
+      documents two prior incidents in this project's sibling (Money
+      Ledger) and explicitly notes the first didn't produce a habit that
+      prevented the second; it hadn't prevented a third either, this time
+      in Hours Ledger itself. `index.html`'s plain
+      `<script src="app.js">` let a browser's disk cache keep serving an
+      old `app.js` indefinitely, with nothing to force a re-fetch. Fixed
+      structurally rather than with another "be more careful" note:
+      replaced with a two-line bootstrap
+      (`var s=document.createElement("script");
+      s.src="app.js?v="+Date.now(); document.body.appendChild(s);`) that
+      cache-busts on every single load, no manual version string to
+      remember to bump, no build step, no git hook — the repo file does
+      its own busting at runtime, so hard rule 3 ("what's in the repo is
+      what runs") stays exactly true. `selftest.html`'s own iframe loads
+      (both the initial sandbox and `freshSandbox()`'s reload-simulation)
+      got the identical treatment — its `?hltest=1` was static, not
+      actually cache-busting despite `SYNC-LESSONS.md`'s note (written
+      about Money Ledger's harness, before Hours Ledger's own harness
+      existed to check the pattern had actually carried over — it hadn't;
+      corrected here rather than assumed).
+      **Rejected alternative**: a version string bumped by hand on every
+      `app.js`-touching commit (e.g. `?v=2026-08-15a`). Rejected because
+      it reintroduces the exact "remember to do this every time" manual
+      step that had already failed twice before this fix — a note to be
+      careful a third time wasn't judged good enough once the pattern was
+      that consistent.
+      **Accepted tradeoff, decided deliberately**: `app.js` is now never
+      cached between opens — every load re-fetches it fresh from GitHub
+      Pages' CDN instead of reusing a valid cached copy. For a small file
+      opened a handful of times a day this is a negligible cost against
+      three lost debugging sessions. **This interacts with backlog item 2
+      (offline support) below** — a service worker built later needs to
+      reconcile with "never cache `app.js`" deliberately rather than
+      silently fighting it or quietly reintroducing the staleness risk
+      this item exists to close; flagged there too so whoever builds
+      offline support hits this as a known interaction, not a surprise
+      mid-build.
 Feature creep is the known failure mode of this project.
