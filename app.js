@@ -1601,7 +1601,20 @@ document.getElementById("fDelete").addEventListener("click",function(){
   }
   closeSheet();
 });
-scrim.addEventListener("click",function(ev){ if(ev.target===scrim) closeSheet(); });
+/* closing on a click outside the sheet needs to be a genuine click there,
+   not just a click event that happens to resolve to the scrim - dragging to
+   select text inside the sheet (e.g. the Activity field) and releasing the
+   mouse outside it produces a "click" whose target is the nearest common
+   ancestor of the mousedown and mouseup targets, which is scrim itself,
+   reading as an outside click even though the press began inside the
+   sheet. Tracking where the press itself landed is what tells the two
+   apart. */
+var scrimPressed=false;
+scrim.addEventListener("mousedown",function(ev){ scrimPressed=(ev.target===scrim); });
+scrim.addEventListener("click",function(ev){
+  if(ev.target===scrim&&scrimPressed) closeSheet();
+  scrimPressed=false;
+});
 document.addEventListener("keydown",function(ev){
   if(!scrim.classList.contains("on")) return;
   if(ev.key==="Escape") closeSheet();

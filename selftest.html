@@ -422,6 +422,24 @@ function runTests(H,d){
     newBtn2.getAttribute("aria-pressed")==="true");
   d.getElementById("fCancel").click();
 
+  /* 26c. item 5 - dragging to select text inside the sheet (e.g. the
+     Activity field) and releasing outside it must not close the sheet.
+     A real drag produces a "click" event whose target is the nearest
+     common ancestor of the mousedown and mouseup targets - scrim itself -
+     which reads identically to a genuine outside click unless the press
+     is tracked separately. Simulated here without a real drag gesture:
+     mousedown targeted at an element inside the sheet, click targeted
+     directly at scrim (exactly what the browser resolves to). */
+  d.getElementById("addBtn").click();
+  d.getElementById("fLabel").dispatchEvent(new Event("mousedown",{bubbles:true}));
+  d.getElementById("scrim").dispatchEvent(new Event("click",{bubbles:true}));
+  assert("dragging from inside the sheet to outside it doesn't close the sheet",
+    d.getElementById("scrim").classList.contains("on"));
+  d.getElementById("scrim").dispatchEvent(new Event("mousedown",{bubbles:true}));
+  d.getElementById("scrim").dispatchEvent(new Event("click",{bubbles:true}));
+  assert("a genuine press-and-release on the scrim itself still closes the sheet",
+    !d.getElementById("scrim").classList.contains("on"));
+
   /* 27. manually toggling "Also put it on" for extra days still works and
      isn't fought by the Day-dropdown sync once the user is driving it directly */
   H.getState().entries={};
