@@ -1441,6 +1441,19 @@ function closeSheet(){ scrim.classList.remove("on"); editing=null; }
 
 fLabel.addEventListener("input",function(){ labelTouched=true; });
 
+/* native <input type=time> doesn't self-close its picker/stepper once both
+   segments are filled on some browsers - there's no custom picker in this
+   codebase to control, so the best available fix is handing focus away the
+   moment the value is actually complete, which closes the native UI in
+   most browsers. A time input's .value is only ever a full valid HH:MM or
+   "" - browsers never populate it with a partial value - so checking
+   ev.target.value on "input" is enough to know the value just became
+   complete. Delegated on scrim so this also covers the dynamically-added
+   break-row time inputs without touching makeBreakRow(). */
+scrim.addEventListener("input",function(ev){
+  if(ev.target.matches&&ev.target.matches('input[type="time"]')&&ev.target.value) ev.target.blur();
+});
+
 document.getElementById("fChips").addEventListener("click",function(ev){
   var b=ev.target.closest(".chip"); if(!b) return;
   var was=chosenCat;
