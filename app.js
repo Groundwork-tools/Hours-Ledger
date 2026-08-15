@@ -621,49 +621,58 @@ var GIS_RECONNECT_TIMEOUT_MS=TEST_MODE?80:25000;
    time - the next attempt just works instead of prompting again. */
 function withGisTimeout(cb){
   var settled=false;
+  console.log("[drive] withGisTimeout: armed, "+GIS_RECONNECT_TIMEOUT_MS+"ms");
   var timeoutId=setTimeout(function(){
-    if(settled) return;
+    if(settled){ console.log("[drive] withGisTimeout: timer fired but already settled - no-op"); return; }
     settled=true;
+    console.log("[drive] withGisTimeout: TIMEOUT FIRED - real callback never came, calling back with a dismissed error");
     var e=new Error("Drive sign-in didn't complete - closed or timed out");
     e.dismissed=true;
     cb(e);
   },GIS_RECONNECT_TIMEOUT_MS);
   return function(err,token){
-    if(settled) return;
+    if(settled){ console.log("[drive] withGisTimeout: real callback arrived but timeout already settled it - discarding cb call (token, if any, was still cached by the caller)"); return; }
     settled=true;
     clearTimeout(timeoutId);
+    console.log("[drive] withGisTimeout: real callback arrived first, "+(err?"with an error: "+err.message:"with a token")+" - calling back now");
     cb(err,token);
   };
 }
 function getAccessToken(cb,interactive){
+  console.log("[drive] getAccessToken called: interactive="+interactive+" TEST_MODE="+TEST_MODE);
   if(TEST_MODE){
     if(interactive&&TEST_MODE_HANG_TOKEN){ withGisTimeout(cb); return; } /* never resolves on its own - only the timeout above ever calls back, exercising the same safety net the real branch below relies on */
     cb(null,"fake-token-"+getDeviceId());
     return;
   }
   var cached=getCachedToken();
+  console.log("[drive] getAccessToken: cached token "+(cached?"found, using it, no network/popup":"not found"));
   if(cached){ cb(null,cached); return; }
   if(!interactive){
+    console.log("[drive] getAccessToken: non-interactive with no cached token - refusing to open the picker, returning needsReconnect");
     var needsReconnect=new Error("Drive needs you to reconnect");
     needsReconnect.needsReconnect=true;
     cb(needsReconnect);
     return;
   }
+  console.log("[drive] getAccessToken: interactive, no cached token - proceeding to loadGisScript/requestAccessToken");
   var settle=withGisTimeout(cb);
   loadGisScript(function(err){
-    if(err){ settle(err); return; }
+    if(err){ console.log("[drive] getAccessToken: loadGisScript failed: "+err.message); settle(err); return; }
     try{
+      console.log("[drive] getAccessToken: calling client.requestAccessToken() now - the picker should appear");
       var client=google.accounts.oauth2.initTokenClient({
         client_id:GOOGLE_CLIENT_ID,
         scope:DRIVE_SCOPE,
         callback:function(resp){
-          if(resp.error){ settle(new Error(resp.error)); return; }
+          if(resp.error){ console.log("[drive] getAccessToken: GIS callback fired with an error: "+resp.error); settle(new Error(resp.error)); return; }
+          console.log("[drive] getAccessToken: GIS callback fired with a real token");
           cacheToken(resp.access_token,resp.expires_in);
           settle(null,resp.access_token);
         }
       });
       client.requestAccessToken();
-    }catch(e){ settle(e); }
+    }catch(e){ console.log("[drive] getAccessToken: requestAccessToken() threw synchronously: "+e.message); settle(e); }
   });
 }
 
@@ -834,7 +843,8 @@ var driveSyncTimer=null,driveSyncInFlight=false,driveSyncApplyingRemote=false;
 var driveNeedsReconnect=false, driveReconnectAttemptedThisSession=false;
 
 function connectDrive(){
-  if(state.driveConnected){ runDriveSync(true); return; } /* already connected - button doubles as "sync now" */
+  console.log("[drive] connectDrive() click handler ran. driveConnected="+state.driveConnected+" driveSyncInFlight="+driveSyncInFlight+" driveNeedsReconnect="+driveNeedsReconnect);
+  if(state.driveConnected){ console.log("[drive] connectDrive: already connected, delegating to runDriveSync(true)"); runDriveSync(true); return; } /* already connected - button doubles as "sync now" */
   hideToast();
   var proceed=confirm("Before connecting, it's worth exporting a copy as a backup first - Your data → Export a copy.\n\nContinue connecting Google Drive now?");
   if(!proceed) return;
@@ -886,17 +896,24 @@ function scheduleDriveSync(){
    normal edit or the button doubling as "sync now" once already connected -
    manual just skips the debounce and shows an immediate status change */
 function runDriveSync(manual){
-  if(!state.driveConnected||driveSyncInFlight) return;
+  console.log("[drive] runDriveSync("+manual+") called. driveConnected="+state.driveConnected+" driveSyncInFlight="+driveSyncInFlight);
+  if(!state.driveConnected||driveSyncInFlight){
+    console.log("[drive] runDriveSync: BLOCKED at the guard - "+(!state.driveConnected?"not connected":"driveSyncInFlight is already true")+". Nothing else in this call happens.");
+    return;
+  }
   driveSyncInFlight=true;
+  console.log("[drive] runDriveSync: guard passed, driveSyncInFlight set true, calling getAccessToken(interactive="+manual+")");
   if(manual) setStatus("Syncing with Drive…");
   /* manual doubles as "interactive" here - true for a real click (the
      connectDrive button, or the pointerdown-delegated reconnect listener
      below), false for the automatic page-load/post-edit debounce, which
      must never be allowed to open the account picker on its own. */
   getAccessToken(function(err,token){
+    console.log("[drive] runDriveSync: getAccessToken callback fired. err="+(err?err.message+" (needsReconnect="+!!err.needsReconnect+", dismissed="+!!err.dismissed+")":"none"));
     if(err){
       driveSyncInFlight=false;
       driveNeedsReconnect=true;
+      console.log("[drive] runDriveSync: driveSyncInFlight reset to false. Button set to 'tap to resume syncing'.");
       /* only an actual attempted interactive flow "uses up" the one
          auto-retry per episode - a passive automatic skip (err.needsReconnect,
          manual===false) never even tried, so it shouldn't block the next
@@ -906,6 +923,7 @@ function runDriveSync(manual){
       setStatus(err.needsReconnect?"Drive: tap anywhere in the app to resume syncing":"Drive sync needs reconnecting",true);
       return;
     }
+    console.log("[drive] runDriveSync: got a real token, proceeding to sync");
     driveNeedsReconnect=false;
     driveReconnectAttemptedThisSession=false;
     driveFindFileId(token).then(function(fileId){
@@ -2157,11 +2175,34 @@ if(state.driveConnected) document.getElementById("connectDrive").textContent="Dr
    which already has its own explicit click handler - no need to also
    race it from here. */
 document.addEventListener("pointerdown",function(ev){
-  if(!state.driveConnected||!driveNeedsReconnect||driveReconnectAttemptedThisSession||driveSyncInFlight) return;
-  if(ev.target&&ev.target.closest&&ev.target.closest("#connectDrive")) return;
+  if(ev.target&&ev.target.closest&&ev.target.closest("#connectDrive")){
+    console.log("[drive] pointerdown listener: tap was on #connectDrive itself, deferring to its own click handler");
+    return;
+  }
+  if(!state.driveConnected||!driveNeedsReconnect||driveReconnectAttemptedThisSession||driveSyncInFlight){
+    console.log("[drive] pointerdown listener: not acting - driveConnected="+state.driveConnected+" driveNeedsReconnect="+driveNeedsReconnect+" driveReconnectAttemptedThisSession="+driveReconnectAttemptedThisSession+" driveSyncInFlight="+driveSyncInFlight);
+    return;
+  }
+  console.log("[drive] pointerdown listener: reconnecting from this tap");
   driveReconnectAttemptedThisSession=true;
   runDriveSync(true);
 },true);
+
+/* not gated by TEST_MODE, unlike __HL_TEST__ below - this is for reading
+   live state from a real, connected browser's own console while debugging
+   the reconnect flow, not for tests. Read-only: type __driveDebug__.state()
+   in DevTools at any point to see exactly what the [drive] log lines are
+   reasoning from, rather than inferring it from timing. */
+window.__driveDebug__={
+  state:function(){
+    return {driveConnected:state.driveConnected,driveSyncInFlight:driveSyncInFlight,
+      driveNeedsReconnect:driveNeedsReconnect,
+      driveReconnectAttemptedThisSession:driveReconnectAttemptedThisSession,
+      cachedTokenValid:!!getCachedToken(),
+      buttonText:document.getElementById("connectDrive").textContent,
+      buttonDisabled:document.getElementById("connectDrive").disabled};
+  }
+};
 
 document.getElementById("save").addEventListener("click",function(){
   var blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});
