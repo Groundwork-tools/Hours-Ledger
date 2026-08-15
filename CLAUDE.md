@@ -235,6 +235,27 @@ on purpose.
   would have hinted that Drive had stopped hearing about them. Only fires
   when there was a real connection to lose; importing into a device that
   was never connected leaves the button on its correct default.
+- **`driveNeedsReconnect`/`driveReconnectAttemptedThisSession` (both
+  in-memory only, never persisted, reset on every load)** exist for the
+  same silent-desync shape one more time, from a third direction: a Drive
+  access token silently expiring (~1hr life) mid-session, on a device that
+  still looks fully connected. Without this, the automatic sync paths
+  (page-load catch-up, the post-edit debounce) would either open an
+  interactive Google account picker with no click behind it (the actual
+  bug — see the backlog batch below) or, once that's closed off, would
+  otherwise just quietly stop reaching Drive with nothing on screen to
+  say so, the same "entries save locally, nothing hints they've stopped
+  syncing" shape as the import and `driveSyncApplyingRemote` fixes above.
+  `driveNeedsReconnect` flips the `connectDrive` button to a visible
+  "Drive: tap to resume syncing" state instead of failing silently; a
+  capture-phase `pointerdown` listener on `document` resolves it from
+  whatever the user taps next anywhere in the app — deliberately not a
+  dedicated button, since requiring one defeats the point of a ledger
+  that's supposed to stay out of the way. Both fields are session-scoped
+  on purpose, same as `driveSyncInFlight`: a fresh load always starts
+  clean, and a dismissed/failed attempt only suppresses auto-retry for
+  that one episode, not forever, so a later, separate expiry can still
+  resolve itself smoothly.
 - **Known, accepted gap: undo/redo while connected doesn't itself trigger a
   Drive push.** `undo()`/`redo()` go through `applyState()`, which writes
   straight to `localStorage` and never calls `persist()` — so the specific
@@ -424,146 +445,165 @@ dashboard styling.
     exist to prevent (hard rule 7)? Needs its own design discussion before
     any code, same discipline as phases 1 and 2 — not a quick fix.
 
-16. **Real-user bug batch (reported 2026-08-15)** — one real friend using
-    Hours Ledger day-to-day on a laptop, plus Sebastian's own list. Logged
-    here in full before any of it was built, per the project's own rule
-    about surviving a `/clear`. Investigate-before-fix findings included
-    where already known; build in the order below (bugs, then interaction,
-    then polish), tests in the same commit wherever the testing section
-    above requires one.
-    - **(1) "Also put it on" can block saving.** Reported: today is Monday
-      the 10th; picking Tuesday the 11th on the entry sheet's Date field
-      deselects Monday in "Also put it on" without selecting Tuesday, and
-      the sheet won't save with nothing picked. **Investigated, not yet
-      reproduced from static reading**: the `fDay` `change` handler
-      (`app.js`, the `fDaySyncedIdx` block) already does exactly the right
-      thing on paper — it was written for this exact bug on 2026-08-10
-      (`ba2fd57`) and moves the single Repeat toggle to match Date whenever
-      the user hasn't touched Repeat directly. `saveSheet()` also already
-      has a fallback for zero days picked (falls back to whichever day
-      matches the Date field, or day 0) — so on today's code, saving
-      shouldn't actually be blockable this way at all. Nothing since
-      `ba2fd57` has touched this code. Needs a live repro (real browser or
-      a jsdom harness against the real `openSheet`/`fDay`-change/`saveSheet`
-      functions, not a reimplementation — see `SYNC-LESSONS.md`'s test
-      isolation notes) before concluding whether this is stale-deployed-JS
-      (`SYNC-LESSONS.md`'s "confirm the code under test is actually the
-      code that's deployed") or a real remaining edge case. Build the repro
-      first, same discipline as sync work.
-    - **(2) Add entry (laptop) only fills one hour forward — root cause
-      found.** The `addBtn` click handler always sets `end = start + 60`,
-      full stop. The FAB's ("Log now") handler is the one that anchors to
-      the actual current time when the target day is today
-      (`mins = now rounded to 5min; end = mins if mins > start`) — that's
-      why phone (which only exposes the FAB pre-fix, see item 7) behaves
-      correctly and laptop (which only exposes `addBtn`) doesn't. Fix:
-      give `addBtn` the same "anchor to now, if today" logic the FAB
-      already has, rather than a flat +60. Once item 7 ships a desktop FAB
-      using the same shared logic, this may collapse into "both buttons
-      call the same helper" rather than staying two copies of the anchoring
-      logic.
-    - **(3) "Add a break" bar is an invisible full-width click target —
-      root cause found.** `.breaktoggle` is a `<label>` (wrapping the
-      checkbox and the "Add a break" text) styled `display:flex`, which
-      makes it a block-level box that stretches to the sheet's full
-      content width — and a `<label>` toggles its checkbox on a click
-      anywhere in its own box, not just its visible content. Fix:
-      constrain the label to its content width (e.g. `width:fit-content`
-      or `display:inline-flex`) so only the checkbox and its text are
-      clickable, per the report.
-    - **(4) Can Hours Ledger ever trigger an interactive OAuth prompt
-      without a click? Investigated — yes, and this is a real bug to
-      fix.** `getAccessToken()` is the only path that can call the actual
-      interactive `google.accounts.oauth2...client.requestAccessToken()`,
-      and it is **not** gated behind a click: `scheduleDriveSync()` (which
-      calls it via `runDriveSync()`) fires automatically after every
-      `persist()` while `driveConnected` (line ~729) *and* unconditionally
-      on every page load if `driveConnected` (line ~2126, `if
-      (state.driveConnected) scheduleDriveSync();`). `getAccessToken()`
-      only skips the network/Google entirely when a cached token is still
-      valid (~1hr life, see `getCachedToken`); once that cache expires,
-      the next debounced sync or the next page load calls
-      `requestAccessToken()` with no user gesture anywhere in that call
-      stack. Per `SYNC-LESSONS.md`'s own OAuth notes, GIS's silent-reauth
-      increasingly fails under third-party-cookie blocking, meaning that
-      call can surface real account-picker/consent UI — exactly the
-      phone/Amazon symptom described — on a timer, not a press. This
-      directly contradicts "the app should never initiate sign-in except
-      from a deliberate button press." Fix direction (not yet built): when
-      `getAccessToken()` has no valid cached token, the *automatic*
-      (debounce/page-load) sync path should stop short of
-      `requestAccessToken()` and instead surface a "Drive: reconnect
-      needed" state on the existing button (same pattern already used for
-      `driveSyncInFlight`/failure states) — only a real click should ever
-      be allowed to open the interactive picker. The explicit
-      "connectDrive" button click (already-connected "sync now" case) is a
-      real gesture and can keep calling it as today.
-    - **(5) Drag-selecting text in the entry sheet closes the sheet —
-      root cause found.** `scrim`'s `click` listener closes on
-      `ev.target===scrim`, but when a mousedown starts inside the sheet
-      (e.g. dragging to select text in the Activity field) and the mouseup
-      lands outside the sheet, the browser resolves the resulting `click`
-      event's target to the nearest common ancestor of the two — `scrim`
-      itself — so it reads as a genuine outside click. Fix: track whether
-      `mousedown` itself landed on `scrim` and only close if both the
-      press and the release did.
-    - **(6) Native time picker doesn't self-close on laptop.** `fStart`/
-      `fEnd`/break-row times are plain `<input type="time">` — there is no
-      custom picker in this codebase to control. Whatever popup/stepper UI
-      is staying open is the browser's own, largely outside page JS's
-      reach. Best available fix: once a field's value is a complete valid
-      time, call `.blur()` to hand focus (and, in most browsers, the
-      native popup) away — needs verifying by hand in the actual browser
-      involved, since this isn't observable in `selftest.html`'s
-      real-logic harness (no native picker UI exists in that environment).
-    - **(7) No floating "Log now" button on laptop.** `.fab` is
-      `display:none` by default and only flips to `display:block` under
-      `@media(max-width:820px)` (`styles.css`). The FAB's own click handler
-      already has the correct "continue from now" logic (see item 2) —
-      showing it above 820px too, positioned the same fixed
-      bottom-right way, is mostly a CSS change; worth checking it doesn't
-      collide with anything else fixed-positioned at desktop widths first.
-    - **(8) Logo doesn't return to the main page.** `.wordmark` (`<h1>` in
-      the masthead) has no click handler. Since this is a single-page app
-      with no separate "pages," "return to main page" means a "home reset"
-      action: close Review if open, drop back to week view, jump
-      `weekStart` to the current week, close any open sheet.
-    - **(9) "Connect Google Drive" button text overflows on phone.** Every
-      *other* Drive-button state already uses a short "Drive: …" phrasing
-      (`Drive: synced`, `Drive: syncing…`, `Drive: sync failed`, `Drive:
-      disconnected after import…`) — only the initial, unclicked label in
-      `index.html` is the longer "Connect Google Drive." Simplest fix
-      consistent with the existing convention: shorten the default label
-      itself (e.g. "Connect Drive") rather than a CSS-only patch.
-    - **(10) Scroll trapping inside the log grid on phone — investigated,
-      repro found.** Root cause is a timing gap in the grid's touch
-      handling (`gridbody`'s `touchstart`/`touchmove` in `app.js`), not
-      the `.gridscroll{overflow-x:auto}` container itself: `touchstart`
-      arms a 350ms timer that commits to `dragging` (drag-select mode)
-      purely on **holding still**, before any movement happens. If the
-      user's finger is still resting on a slot when that timer fires, the
-      very next `touchmove` — even the first frame of what the user means
-      as an ordinary scroll swipe — hits `touchmove` with `dragging`
-      already truthy, skips the "did this move far/fast enough to be a
-      scroll" check entirely, and goes straight to `ev.preventDefault()`,
-      capturing the rest of that touch gesture and blocking the page's
-      native scroll for it. Direction can't disambiguate the two cases —
-      a real drag-select and a real scroll both start as vertical motion —
-      so this is a genuine ambiguity in the current heuristic, not a
-      simple typo. **Deliberate repro, reproducible on demand regardless
-      of zoom/device**: rest a finger motionless on any grid slot for
-      over ~350ms *before* starting to swipe, then swipe down. This should
-      trap the scroll every time. The zoom-level correlation in the
-      original report is very likely incidental: zoomed-out slots are
-      smaller and more fiddly to land a finger on precisely, which makes a
-      brief involuntary pause before swiping more likely, not because zoom
-      itself changes any of this code's behavior. Fix needs a decision,
-      not just a patch — options include raising the 350ms threshold,
-      requiring a minimum post-hold movement within a short window before
-      fully committing to drag-select, or a visible cue the instant
-      drag-mode arms (so an accidental hold can be released before it eats
-      a scroll) — worth discussing before building rather than picking one
-      unilaterally.
+16. **Real-user bug batch (reported 2026-08-15) — built on branch
+    `friend-feedback-batch-2026-08-15`, not yet merged.** One real friend
+    using Hours Ledger day-to-day on a laptop, plus Sebastian's own list.
+    Nothing here moves to "What's live and verified" or `main` until
+    Sebastian has actually run what's testable and the friend has
+    specifically confirmed item 10 on their own device — a fix believed
+    correct isn't the same claim as one seen working, same standard as
+    everywhere else in this file.
+    - **(1) "Also put it on" — investigated, not reproduced, no code
+      changed.** Static reading found the `fDay`-change/`saveSheet`
+      fallback logic already correct (see the investigation this replaced,
+      preserved in git history on this branch). Built an actual repro
+      instead of trusting that reading: ran the full suite headless
+      (0/199 failing) via a real Chrome binary, then added two direct
+      assertions on the Repeat toggle's own `aria-pressed` state (not just
+      the save outcome, which an existing test already covered) for the
+      exact scenario reported — Monday deselects, Tuesday should
+      auto-select. Both pass against current code (0/201 failing,
+      `selftest.html`). Per the standing rule this project already
+      follows for a passing repro: **not fixed, because nothing was
+      broken.** Very likely stale deployed JS (a browser cache artifact —
+      see `SYNC-LESSONS.md`'s own note about this exact trap) rather than
+      a live bug. The two new assertions stay in as permanent regression
+      coverage regardless. Sebastian to re-test on a hard-refreshed
+      browser to confirm the cache-artifact read and close this out.
+    - **(2) Add entry (laptop) only filled one hour forward — fixed.**
+      `addBtn`'s handler always set `end = start + 60`; the FAB's handler
+      already anchored `end` to the real current time on today. Extracted
+      the FAB's logic into a shared `defaultEntryTimes(dateStr)` and had
+      both `addBtn` and `fab` call it, so the two entry points can't drift
+      apart again — also folded in `addBtn`'s existing 23:30 clamp on the
+      last entry's end, fixing a latent zero-length-entry edge case that
+      existed in both copies once a day's last entry runs to exactly
+      midnight. New real-clock `selftest.html` cases, same pattern as the
+      FAB's own existing clock-dependent tests.
+    - **(3) "Add a break" full-width click target — fixed.** `.breaktoggle`
+      is a `<label>` that was `display:flex`, stretching to the sheet's
+      full width; a label toggles its checkbox on a click anywhere in its
+      own box. Swapped to `display:inline-flex` so only the checkbox and
+      text are clickable. CSS-only.
+    - **(4) Interactive OAuth without a click — fixed, and expanded beyond
+      the original ask.** Confirmed the automatic sync paths (page-load
+      catch-up, post-edit debounce) could reach the real
+      `requestAccessToken()` with no gesture at all, whenever the cached
+      token (~1hr life) had expired — the root cause of the phone/Amazon
+      incident. Sebastian rejected a dedicated-button-only fix as adding
+      friction; what's built instead: `getAccessToken(cb, interactive)`
+      now refuses to call `requestAccessToken()` when `interactive` is
+      false, and a capture-phase `pointerdown` listener on `document`
+      resolves a pending reconnect from *whatever the user taps next,
+      anywhere in the app* — not a dedicated button. `pointerdown` (not
+      `click`) specifically because the grid's own touch handlers call
+      `preventDefault()` on `touchend` in several places, which suppresses
+      the synthetic `click` that would otherwise follow, so a click-based
+      listener would have silently never fired for a tap on the grid
+      itself — the single largest tappable surface in the app. Excludes
+      the `connectDrive` button (has its own handler) and won't reprompt
+      again this session after a dismissed/failed attempt until a token is
+      actually obtained (`driveNeedsReconnect`/
+      `driveReconnectAttemptedThisSession`, both in-memory only). The GIS
+      script is pre-warmed on page load (the same inert JS-library fetch
+      that already happened unconditionally before this change — no
+      account interaction, nothing shown) so the eventual
+      `requestAccessToken()` call runs synchronously off the real tap
+      rather than behind an async script-load gap, which is what actually
+      determines whether a browser treats a popup as gesture-backed.
+      Verified by construction, not just by reasoning: grepped afterward
+      and confirmed `requestAccessToken()` has exactly one call site
+      (inside `getAccessToken`'s interactive branch) and
+      `getAccessToken(..., true)` is only ever reached from the
+      `connectDrive` button's own click or the pointerdown listener — no
+      timer, no page-load path reaches it, by construction rather than by
+      promise. `selftest.html` covers the listener's gating (fires on a
+      real tap, excluded on the `connectDrive` button itself, doesn't
+      reprompt twice in one episode) under `TEST_MODE`'s always-succeeds
+      fake token; the interactive popup itself isn't testable that way by
+      design (see `SYNC-LESSONS.md`) and needs a real connected device —
+      see the message Sebastian is using to test this himself, including
+      how to expire the cached token on demand rather than waiting an
+      hour.
+    - **(5) Drag-selecting text in the entry sheet closed the sheet —
+      fixed.** `scrim`'s `click` listener checked `ev.target===scrim`, but
+      a `click` event's target resolves to the nearest common ancestor of
+      the `mousedown`/`mouseup` targets — a drag starting inside the sheet
+      and releasing outside it resolves to `scrim` itself. Now tracks
+      whether `mousedown` itself landed on `scrim` and only closes if both
+      the press and the release did. New `selftest.html` case simulates
+      the browser's actual click-target resolution for a drag-out gesture
+      without needing a real drag.
+    - **(6) Native time picker doesn't self-close on laptop — best
+      available fix shipped.** No custom picker exists in this codebase to
+      control. Once a time field's value becomes a complete valid `HH:MM`
+      (a time input's `.value` is only ever a full valid value or empty,
+      never partial), `.blur()` hands focus away, which closes the native
+      popup in most browsers. Not testable in `selftest.html` — no native
+      picker UI exists in that hidden-iframe harness, and asserting on
+      focus/blur there can't distinguish a real pass from an environment
+      limitation (see `SYNC-LESSONS.md`'s own warning about exactly this
+      trap). Needs a manual check in the actual laptop browser involved.
+    - **(7) No floating "Log now" button on laptop — fixed.** `.fab` was
+      `display:none` by default, only `display:block` under
+      `@media(max-width:820px)`. Now always `display:block`, same fixed
+      bottom-right position at every width — nothing else fixed-positioned
+      shares that corner. CSS-only; the FAB's click handler already had
+      the correct anchoring logic (shared with item 2's fix).
+    - **(8) Logo now returns to the main page — fixed.** Single-page app,
+      so "return to main page" is a `goHome()` reset: closes Review if
+      open (reuses `reviewClose`'s own handler), drops out of Day view,
+      closes any open entry sheet, jumps `weekStart` to the current week —
+      the same state a fresh load starts in.
+    - **(9) "Connect Google Drive" button text overflowed on phone —
+      fixed.** Every other state this button shows already used a short
+      "Drive: …" phrasing; only the unclicked default label was the longer
+      "Connect Google Drive." Shortened the label itself to "Connect
+      Drive" to match the existing convention, rather than a CSS-only
+      patch — fixes the overflow and the inconsistency together.
+    - **(10) Scroll trapping inside the log grid on phone — root cause
+      corrected mid-investigation, fixed.** The first pass here (based on
+      static reading alone) blamed the grid's 350ms drag-select-commit
+      timer. Sebastian's friend's own screenshots disproved that: a
+      captured drag blocks scroll entirely via `preventDefault()` — it
+      cannot produce a scrolling *visual* — and what was actually reported
+      is the grid's own interior genuinely scrolling (hours disappearing
+      off the top) while the header and everything below stay fixed,
+      exactly like a second, independent scroll container. The real root
+      cause: `.gridscroll` has `overflow-x:auto` and **no `touch-action`
+      declared at all**, leaving the browser free to also decide it owns
+      vertical panning for that element — a known WebKit behavior where
+      such an element can get promoted to its own scrolling/compositing
+      layer under certain content-size/zoom conditions (plausibly
+      explaining the "zoomed fully out" correlation in both reports, and
+      why it varies by device) and capture a vertical swipe that should
+      have chained through to the page. Fix: `touch-action:pan-x` on
+      `.gridscroll`, telling the browser explicitly this element only
+      handles horizontal touch panning — horizontal scroll for the seven
+      day columns is unaffected. **Not reproducible or verifiable from
+      here**: this is real WebKit touch-dispatch/layer-promotion behavior
+      on an actual iOS device; Chrome DevTools' device toolbar emulates
+      viewport size and synthesizes touch on Blink, a different rendering
+      engine, and will not reproduce it. `selftest.html` confirms no
+      regression (0/213 failing) but can't confirm the fix itself — the
+      friend's own device, after this branch is verified and merged, is
+      the actual test. See the message Sebastian is sending them for
+      exactly what to try and what they should see.
+    - **Split out separately, not fixed in this batch**: the grid's 350ms
+      drag-select-commit timer really is ambiguous on its own terms — a
+      finger resting motionless on a slot for over ~350ms before it starts
+      moving can still get captured by the *drag-select* path even after
+      item 10's fix above, because direction alone can't tell a deliberate
+      long-press-then-drag apart from an unhurried scroll swipe that
+      happened to pause first. Real, reproducible on demand (rest a finger
+      on any slot for >350ms before swiping, then swipe — no dependency on
+      `.gridscroll`, zoom, or device), but a distinct, much smaller issue
+      from item 10's WebKit-layer bug, and explicitly not conflated with
+      it per Sebastian's own instruction. Options if this gets picked up:
+      raise the 350ms threshold, require a minimum post-hold movement
+      within a short window before fully committing to drag-select, or a
+      visible cue the instant drag-mode arms so an accidental hold can be
+      released before it eats a scroll — needs a decision, not built yet.
 
 Do not add features that are not on this list without discussing them first.
 Feature creep is the known failure mode of this project.
