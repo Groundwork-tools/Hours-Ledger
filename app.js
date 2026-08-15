@@ -603,8 +603,44 @@ function loadGisScript(cb){
    close. A non-interactive caller with no valid cached token gets back an
    error flagged needsReconnect instead of ever reaching
    requestAccessToken(). */
+var TEST_MODE_HANG_TOKEN=false;
+/* GIS has no dedicated "the user closed the picker" signal - requestAccessToken's
+   own callback only fires on an actual completion (a token, or an explicit
+   access_denied from clicking something inside Google's own flow). Closing
+   the picker directly instead - the browser/OS close control, not a button
+   inside the Google page - means that callback can simply never come. See
+   CLAUDE.md's guard-flag rule: this wraps cb so it is GUARANTEED to fire
+   exactly once, regardless of whether the thing it's guarding ever finishes
+   on its own - the reset path can't depend on the async call completing. */
+var GIS_RECONNECT_TIMEOUT_MS=TEST_MODE?80:25000;
+/* guarantees cb(err,token) fires exactly once, whichever comes first: the
+   real callback, or this timeout. Only decides WHETHER cb gets called -
+   callers still do their own caching etc. before calling the returned
+   function, so a genuine-but-late success (arriving after the timeout
+   already gave up) still gets cached even though cb won't fire a second
+   time - the next attempt just works instead of prompting again. */
+function withGisTimeout(cb){
+  var settled=false;
+  var timeoutId=setTimeout(function(){
+    if(settled) return;
+    settled=true;
+    var e=new Error("Drive sign-in didn't complete - closed or timed out");
+    e.dismissed=true;
+    cb(e);
+  },GIS_RECONNECT_TIMEOUT_MS);
+  return function(err,token){
+    if(settled) return;
+    settled=true;
+    clearTimeout(timeoutId);
+    cb(err,token);
+  };
+}
 function getAccessToken(cb,interactive){
-  if(TEST_MODE){ cb(null,"fake-token-"+getDeviceId()); return; }
+  if(TEST_MODE){
+    if(interactive&&TEST_MODE_HANG_TOKEN){ withGisTimeout(cb); return; } /* never resolves on its own - only the timeout above ever calls back, exercising the same safety net the real branch below relies on */
+    cb(null,"fake-token-"+getDeviceId());
+    return;
+  }
   var cached=getCachedToken();
   if(cached){ cb(null,cached); return; }
   if(!interactive){
@@ -613,20 +649,21 @@ function getAccessToken(cb,interactive){
     cb(needsReconnect);
     return;
   }
+  var settle=withGisTimeout(cb);
   loadGisScript(function(err){
-    if(err){ cb(err); return; }
+    if(err){ settle(err); return; }
     try{
       var client=google.accounts.oauth2.initTokenClient({
         client_id:GOOGLE_CLIENT_ID,
         scope:DRIVE_SCOPE,
         callback:function(resp){
-          if(resp.error){ cb(new Error(resp.error)); return; }
+          if(resp.error){ settle(new Error(resp.error)); return; }
           cacheToken(resp.access_token,resp.expires_in);
-          cb(null,resp.access_token);
+          settle(null,resp.access_token);
         }
       });
       client.requestAccessToken();
-    }catch(e){ cb(e); }
+    }catch(e){ settle(e); }
   });
 }
 
@@ -2316,6 +2353,7 @@ if(TEST_MODE){
     setDriveNeedsReconnect:function(v){ driveNeedsReconnect=v; },
     getDriveNeedsReconnect:function(){ return driveNeedsReconnect; },
     setDriveReconnectAttempted:function(v){ driveReconnectAttemptedThisSession=v; },
+    setTestHangToken:function(v){ TEST_MODE_HANG_TOKEN=v; },
     getDriveReconnectAttempted:function(){ return driveReconnectAttemptedThisSession; },
     clearLocalStateForTest:function(){
       try{ localStorage.removeItem(KEY); }catch(e){}

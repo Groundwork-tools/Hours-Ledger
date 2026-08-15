@@ -56,6 +56,29 @@ Teaching matters here as much as shipping.
    sync existed to make that dangerous. Do it again without a migration and
    every existing install duplicates its own starter categories the next time
    it syncs against a fresh one.
+9. **A boolean guard flag must always have a reset path that doesn't depend
+   on the async operation it's guarding actually completing.** `flag=true`
+   right before an async call, with the only `flag=false` living inside
+   that call's own success/callback path, means the flag is stuck `true`
+   forever the moment that call simply never calls back — not errors,
+   silence. Hit twice in three days on real, reachable code, not a
+   hypothetical: `driveSyncApplyingRemote` stuck `true` when `persist()`
+   threw (fixed with `try/finally`, since `persist()` is synchronous - an
+   exception is guaranteed to unwind through a `finally`), and
+   `driveSyncInFlight`/the `connectDrive` button's own `disabled` state
+   stuck `true` when Google's account picker was dismissed by closing it
+   directly rather than clicking anything inside Google's own flow -
+   GIS's `requestAccessToken()` callback only fires on an actual
+   completion (a token, or an explicit `access_denied`), never on a
+   silent close, so nothing was left to ever flip the flag back
+   (`getAccessToken`'s `withGisTimeout` wrapper, added 2026-08-15, closes
+   this one - see the backlog batch below). `try/finally` is the right
+   tool when the guarded operation is synchronous; a **timeout** is the
+   right tool when it's async and the third-party API gives no reliable
+   "this will never complete" signal of its own. Audited every boolean
+   guard flag in `app.js` against this rule when the second instance was
+   found: exactly these two existed, both now safe. Check this rule
+   before adding any new one.
 
 ## Testing before you claim it works
 
@@ -526,10 +549,40 @@ dashboard styling.
       real tap, excluded on the `connectDrive` button itself, doesn't
       reprompt twice in one episode) under `TEST_MODE`'s always-succeeds
       fake token; the interactive popup itself isn't testable that way by
-      design (see `SYNC-LESSONS.md`) and needs a real connected device —
-      see the message Sebastian is using to test this himself, including
-      how to expire the cached token on demand rather than waiting an
-      hour.
+      design (see `SYNC-LESSONS.md`) and needs a real connected device.
+      **Real-device testing (2026-08-15) found a second, worse bug in
+      this same flow**: dismissing the account picker by closing it
+      directly (not clicking anything inside Google's own UI) left the
+      `connectDrive` button doing nothing at all afterward — no popup, no
+      reaction, permanently, until a full reload. Root cause: GIS's
+      `requestAccessToken()` callback only fires on an actual completion
+      (a token, or an explicit `access_denied`), never on a silent close,
+      so nothing ever reset `driveSyncInFlight` back to `false` -
+      `runDriveSync`'s own first line then blocked every future call,
+      including the button's manual retry. Same class as
+      `driveSyncApplyingRemote`'s earlier fix, now written up as hard
+      rule 9. Fixed with `withGisTimeout()`, a wrapper guaranteeing
+      `getAccessToken`'s callback fires exactly once regardless of
+      whether GIS's own callback ever does (25s timeout; a genuine-but-
+      late success past that window is still cached, so the very next
+      attempt just works instead of prompting again). This also silently
+      fixes a second, previously-unreported instance of the identical
+      bug: `connectDrive`'s own first-ever-connect flow disables the
+      button and only re-enables it inside the same never-guaranteed
+      callback. Fail-first verified: a `TEST_MODE`-only hang simulation
+      (`setTestHangToken`) reproduced the stuck flag against the
+      pre-fix code (1/218 failing, the intended assertion), then passed
+      once the timeout wrapper was added (0/218 failing).
+      **Deliberate reproduction, precise**: get the button into "Drive:
+      tap to resume syncing" (expire the cached token, then let an
+      automatic sync attempt run), tap anything to raise the picker, then
+      close the picker using the browser/OS's own close control — the
+      window's X, a back-gesture, swiping it away — specifically *not*
+      a "Cancel" or "Deny" link if Google's own screen offers one, since
+      that path *does* fire the callback (with `access_denied`) and
+      doesn't reproduce this. Pre-fix, the button goes permanently dead.
+      Post-fix, it recovers on its own within `GIS_RECONNECT_TIMEOUT_MS`
+      (25 seconds) even with no further action.
     - **(5) Drag-selecting text in the entry sheet closed the sheet —
       fixed.** `scrim`'s `click` listener checked `ev.target===scrim`, but
       a `click` event's target resolves to the nearest common ancestor of

@@ -1561,6 +1561,56 @@ function runAsyncTests(H,d){
         });
     })
     .then(function(){
+      /* ---- driveSyncInFlight must reset even if the interactive OAuth
+         callback never fires at all - GIS has no dedicated "the user
+         closed the picker" signal, so dismissing it by closing it rather
+         than clicking something inside Google's own flow can mean the
+         callback genuinely never comes back. Without a safety net,
+         runDriveSync's very first line (driveSyncInFlight guard) then
+         blocks every future sync attempt forever, including the
+         connectDrive button's own manual retry - worse than the bug this
+         session's reconnect work was fixing. setTestHangToken(true) makes
+         TEST_MODE's getAccessToken simulate exactly that: never calling
+         cb on its own, so only a real safety net can ever recover. Fresh
+         sandbox so a stuck flag, if this regresses, can't leak into any
+         other test. */
+      return freshSandbox();
+    })
+    .then(function(fresh){
+      var h=fresh.H,dd=fresh.d;
+      h.fakeDriveReset(); h.clearLocalStateForTest();
+      dd.getElementById("connectDrive").click();
+      return waitFor(function(){ return dd.getElementById("connectDrive").textContent==="Drive: synced"; },4000)
+        .then(function(ok){
+          assert("driveSyncInFlight fix, setup: baseline device connects and does its first sync normally",ok);
+          /* the connect's own persist() schedules a debounced catch-up
+             sync (DRIVE_SYNC_DEBOUNCE_MS, 50ms under TEST_MODE) - let it
+             actually finish and clear driveSyncInFlight on its own before
+             arming the hang simulation below, so that unrelated sync
+             can't race with (and silently mask a still-broken) test */
+          return waitFor(function(){ return h.isDriveSyncInFlight()===false; },2000);
+        })
+        .then(function(clear){
+          assert("driveSyncInFlight fix, setup: no unrelated sync still in flight before arming the hang simulation",clear);
+          h.setTestHangToken(true);
+          h.runDriveSync(true);
+          return waitFor(function(){ return h.isDriveSyncInFlight()===true; },1000);
+        })
+        .then(function(armed){
+          assert("driveSyncInFlight fix, setup: the simulated hang actually armed (flight flag went true)",armed);
+          return waitFor(function(){ return h.isDriveSyncInFlight()===false; },3000);
+        })
+        .then(function(recovered){
+          assert("driveSyncInFlight resets on its own even when the interactive callback never fires - it cannot get stuck forever",recovered);
+          h.setTestHangToken(false);
+          dd.getElementById("connectDrive").click();
+          return waitFor(function(){ return dd.getElementById("connectDrive").textContent==="Drive: synced"; },4000);
+        })
+        .then(function(recoveredClick){
+          assert("the connectDrive button itself is usable again after the stuck flag clears - not permanently dead until a reload",recoveredClick);
+        });
+    })
+    .then(function(){
       /* ---- BUG 1 repro: two devices that have never synced before share
          the same 8 real default categories in name only - DEFAULTS calls
          uid() fresh on every load, so each device invents its own random
