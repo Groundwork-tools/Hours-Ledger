@@ -90,13 +90,13 @@ for picking this back up cold. Suite passing is not the same claim as
 on purpose.
 
 - **Core grid/entries/undo/close-out/review**: covered by `selftest.html`'s
-  automated suite (169 tests as of the Drive sync merge below), run before
+  automated suite (199 tests as of the phase 2 sync merge below), run before
   every change that touches `app.js`. Manually verified on real usage over
   the life of the app (midnight-crossing entries, mobile resize, etc. — see
   "Testing before you claim it works" above).
-- **Google Drive sync** (2026-08-14): merged to `main` and live. Verified on
-  two real devices (a laptop and a phone) with real account data, both
-  directions:
+- **Google Drive sync, phase 1 — entries + categories** (2026-08-14): merged
+  to `main` and live. Verified on two real devices (a laptop and a phone)
+  with real account data, both directions:
   - Non-sync path on the laptop: clean, no console errors, entries persist —
     confirming the merge changed nothing for someone who never connects.
   - Phone connect: all 14 categories and all four logged weeks intact, one
@@ -110,6 +110,23 @@ on purpose.
     predicted — two already-diverged categories reappeared once on a fresh
     device's first connect — and resolved by deleting them once real
     tombstones exist; confirmed gone for good after a reload.
+- **Google Drive sync, phase 2 — weekly verdicts + week close-outs**
+  (2026-08-15): merged to `main` and live. Verified on the same two real
+  devices, both directions:
+  - Verdict set on the phone appeared on the laptop after connect.
+  - A verdict cleared on the laptop stayed cleared — the specific case this
+    phase existed to get right (an absence must never be misread as "new"
+    and resurrected; see hard rule 7).
+  - A close-out note written on the laptop appeared on the phone.
+  - All weeks and entries stayed intact throughout — no regression to
+    phase 1's coverage.
+  - A second look at what first appeared to be a duplication (16 categories
+    shown vs. 14 expected) turned out to be a stale page, not a bug — the
+    live Drive file itself held exactly 14 live categories with the two
+    stale ones correctly tombstoned; a reload resolved it. Worth remembering
+    this shape specifically: before treating a category-count mismatch as a
+    sync bug, check the Drive file directly, since a stale local render can
+    look identical to a real duplication from the screen alone.
 
 ---
 
@@ -362,10 +379,10 @@ dashboard styling.
       for anyone who opts in — both rules now carry the exact carve-out (see
       hard rule 4's note and the data model section's sync-fields entries)
       rather than being quietly broken.
-    - **Phase 2 (weekly verdicts + week close-outs): in progress, on a
-      branch, not yet on `main`.** Deliberately excluded from phase 1 —
-      `weeklyVerdicts`/`weekCloseouts` are nested maps keyed by week with no
-      record ids, a different shape from entries/categories, and that
+    - **Phase 2 (weekly verdicts + week close-outs): ~~done~~ — merged to
+      `main` and live since 2026-08-15.** Deliberately excluded from phase 1
+      — `weeklyVerdicts`/`weekCloseouts` are nested maps keyed by week with
+      no record ids, a different shape from entries/categories, and that
       exclusion was a real scope decision made at phase 1's design time, not
       an oversight discovered later. Composite key (`weekIso|categoryId` for
       verdicts, `weekIso` alone for close-outs) reuses `mergeRecords()`
@@ -380,11 +397,32 @@ dashboard styling.
       to remap verdicts pointing at a category id that loses a name-collision
       merge, the same way it already remaps `entries.cat` — otherwise a
       verdict silently orphans on a dead category id, the same invisible-loss
-      shape phase 1 kept finding.
+      shape phase 1 kept finding. Verified on two real devices, both
+      directions — see "What's live and verified" above.
 13. **Friend's laptop feedback.** A friend is using Hours Ledger day-to-day
     on a laptop and has feedback on things that need attention. Specifics
     not yet gathered — placeholder so it isn't lost; fill in and re-slot
     into the ordered list once the actual items are known.
+14. **Web app manifest logs two console warnings** — `"Manifest: property
+    'start_url' ignored, URL is invalid"` and the same for `'scope'`. The
+    manifest is built as a blob URL at runtime, so relative paths in it can't
+    resolve against it. Harmless today (nothing currently depends on either
+    field), but it affects Add to Home Screen, which needs a resolvable
+    `start_url` to install as anything more than a bookmark. Not urgent —
+    noted from real usage on the live site.
+15. **Tombstone accumulation.** `deletedCategories`/`deletedVerdicts` (and
+    to a lesser extent `deletedEntries`) only ever grow — nothing currently
+    prunes an old tombstone. Observed for real: one real Drive file holds
+    roughly 40 tombstones against 14 live categories after phase 1 and
+    phase 2 testing. Harmless at this size (nothing reads them but the merge
+    engine itself), but the file has no ceiling. Genuinely open question, not
+    a known answer yet: is there a safe point at which an old tombstone can
+    be dropped — e.g. once every device sharing a file has demonstrably seen
+    it (how would that even be confirmed, with devices that sync
+    intermittently and no server to track "last seen" per device?) — or does
+    any pruning rule reintroduce exactly the resurrection risk tombstones
+    exist to prevent (hard rule 7)? Needs its own design discussion before
+    any code, same discipline as phases 1 and 2 — not a quick fix.
 
 Do not add features that are not on this list without discussing them first.
 Feature creep is the known failure mode of this project.
