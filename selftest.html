@@ -1620,6 +1620,44 @@ function runAsyncTests(H,d){
       assert("BUG 1 (real cause, real data): same names, colors diverged from an older palette generation - these are the same category and should be recognized as such",
         live.length===5);
     })
+    .then(function(){
+      /* ---- item 4: reconnect fires off any real tap in the app, not a
+         dedicated button - regression coverage for an OAuth prompt that
+         once appeared from an unrelated navigation with no click on this
+         app at all. TEST_MODE's getAccessToken always succeeds instantly
+         (no real requestAccessToken() involved - see getAccessToken's own
+         TEST_MODE branch), so this exercises the real pointerdown listener
+         and the real runDriveSync(true) it calls, just not the interactive
+         popup itself, which only a live device can actually verify. */
+      var s2=H.getState(); s2.driveConnected=true; H.setState(s2);
+      H.setDriveNeedsReconnect(true); H.setDriveReconnectAttempted(false);
+      d.body.dispatchEvent(new Event("pointerdown",{bubbles:true}));
+      return waitFor(function(){ return H.getDriveNeedsReconnect()===false; },2000);
+    })
+    .then(function(ok){
+      assert("a real tap anywhere in the app resolves a pending reconnect",ok);
+      assert("driveReconnectAttemptedThisSession resets once a token is actually obtained",
+        H.getDriveReconnectAttempted()===false);
+    })
+    .then(function(){
+      H.setDriveNeedsReconnect(true); H.setDriveReconnectAttempted(false);
+      d.getElementById("connectDrive").dispatchEvent(new Event("pointerdown",{bubbles:true}));
+      return new Promise(function(resolve){ setTimeout(resolve,100); });
+    })
+    .then(function(){
+      assert("a tap on the connectDrive button itself is excluded from the delegated listener (it has its own click handler)",
+        H.getDriveNeedsReconnect()===true);
+    })
+    .then(function(){
+      H.setDriveNeedsReconnect(true); H.setDriveReconnectAttempted(true);
+      d.body.dispatchEvent(new Event("pointerdown",{bubbles:true}));
+      return new Promise(function(resolve){ setTimeout(resolve,100); });
+    })
+    .then(function(){
+      assert("once an attempt has been made and not resolved this session, the next tap doesn't reprompt",
+        H.getDriveNeedsReconnect()===true);
+      H.setDriveReconnectAttempted(false);
+    })
     .then(function(){ return results; });
 }
 })();

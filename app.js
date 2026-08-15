@@ -591,11 +591,28 @@ function loadGisScript(cb){
    same pattern as DEVICE_ID - a page reload within the token's ~1hr life
    reuses it with no Google round-trip (GIS's silent-reauth path is
    increasingly unreliable behind third-party-cookie blocking; this
-   sidesteps needing it at all for the common case, per SYNC-LESSONS.md). */
-function getAccessToken(cb){
+   sidesteps needing it at all for the common case, per SYNC-LESSONS.md).
+
+   interactive controls whether a missing/expired token is allowed to open
+   the real Google account picker. It must be false for every automatic
+   caller (the page-load and post-edit debounced syncs in scheduleDriveSync)
+   and true only for a real click (the connectDrive button, or the
+   pointerdown-delegated reconnect listener below) - this is the one thing
+   standing between "token expired" and an interactive OAuth prompt showing
+   up with no gesture behind it, which is the exact bug this exists to
+   close. A non-interactive caller with no valid cached token gets back an
+   error flagged needsReconnect instead of ever reaching
+   requestAccessToken(). */
+function getAccessToken(cb,interactive){
   if(TEST_MODE){ cb(null,"fake-token-"+getDeviceId()); return; }
   var cached=getCachedToken();
   if(cached){ cb(null,cached); return; }
+  if(!interactive){
+    var needsReconnect=new Error("Drive needs you to reconnect");
+    needsReconnect.needsReconnect=true;
+    cb(needsReconnect);
+    return;
+  }
   loadGisScript(function(err){
     if(err){ cb(err); return; }
     try{
@@ -767,6 +784,18 @@ var driveSyncTimer=null,driveSyncInFlight=false,driveSyncApplyingRemote=false;
    same silent-forever shape as the sync-on-load bug this file already
    fixed once, just from a different trigger. */
 
+/* driveNeedsReconnect/driveReconnectAttemptedThisSession exist for the
+   "reconnect on any tap" flow below (bug: an OAuth account picker appearing
+   from an unrelated navigation, with no click on this app at all). Both are
+   in-memory only, never persisted - a fresh page load always starts with a
+   clean slate, same as driveSyncInFlight. driveReconnectAttemptedThisSession
+   stays true only across a single failed/dismissed attempt, so one dismiss
+   doesn't reprompt on the very next tap; it resets to false the moment a
+   token is actually obtained (auto or manual), so a *later*, separate
+   expiry can still resolve itself smoothly instead of requiring the button
+   forever after the first time it was ever dismissed. */
+var driveNeedsReconnect=false, driveReconnectAttemptedThisSession=false;
+
 function connectDrive(){
   if(state.driveConnected){ runDriveSync(true); return; } /* already connected - button doubles as "sync now" */
   hideToast();
@@ -777,6 +806,7 @@ function connectDrive(){
   document.getElementById("connectDrive").disabled=true;
   getAccessToken(function(err,token){
     if(err){ driveConnectFailed(err); return; }
+    driveNeedsReconnect=false; driveReconnectAttemptedThisSession=false;
     driveFindFileId(token).then(function(fileId){
       return (fileId?driveReadFile(token,fileId):Promise.resolve(null)).then(function(remoteData){
         return {fileId:fileId,remoteData:remoteData};
@@ -802,7 +832,7 @@ function connectDrive(){
         showToast("Connected, but the first push to Drive failed — it'll retry on the next change.",false);
       });
     }).catch(function(e){ driveConnectFailed(e); });
-  });
+  },true);
 }
 function driveConnectFailed(e){
   document.getElementById("connectDrive").disabled=false;
@@ -822,8 +852,25 @@ function runDriveSync(manual){
   if(!state.driveConnected||driveSyncInFlight) return;
   driveSyncInFlight=true;
   if(manual) setStatus("Syncing with Drive…");
+  /* manual doubles as "interactive" here - true for a real click (the
+     connectDrive button, or the pointerdown-delegated reconnect listener
+     below), false for the automatic page-load/post-edit debounce, which
+     must never be allowed to open the account picker on its own. */
   getAccessToken(function(err,token){
-    if(err){ driveSyncInFlight=false; setStatus("Drive sync needs reconnecting",true); return; }
+    if(err){
+      driveSyncInFlight=false;
+      driveNeedsReconnect=true;
+      /* only an actual attempted interactive flow "uses up" the one
+         auto-retry per episode - a passive automatic skip (err.needsReconnect,
+         manual===false) never even tried, so it shouldn't block the next
+         real tap from trying */
+      if(manual) driveReconnectAttemptedThisSession=true;
+      document.getElementById("connectDrive").textContent="Drive: tap to resume syncing";
+      setStatus(err.needsReconnect?"Drive: tap anywhere in the app to resume syncing":"Drive sync needs reconnecting",true);
+      return;
+    }
+    driveNeedsReconnect=false;
+    driveReconnectAttemptedThisSession=false;
     driveFindFileId(token).then(function(fileId){
       return (fileId?driveReadFile(token,fileId):Promise.resolve(null)).then(function(remoteData){
         return {fileId:fileId,remoteData:remoteData};
@@ -840,12 +887,13 @@ function runDriveSync(manual){
       return driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts}).then(function(){
         driveSyncInFlight=false;
         setStatus("Synced with Drive");
+        document.getElementById("connectDrive").textContent="Drive: synced";
       });
     }).catch(function(){
       driveSyncInFlight=false;
       setStatus("Drive sync failed, will retry",true);
     });
-  });
+  },manual);
 }
 
 /* keeps hard rule 4's colophon promise honest once sync is opted into -
@@ -2018,6 +2066,26 @@ document.getElementById("linkFile").addEventListener("click",function(){
 document.getElementById("connectDrive").addEventListener("click",connectDrive);
 if(state.driveConnected) document.getElementById("connectDrive").textContent="Drive: synced";
 
+/* reconnect on any real tap in the app, not a dedicated button - a token
+   silently expiring shouldn't mean hunting for the right button before the
+   app is usable again. pointerdown (not click): the grid's own touch
+   handlers call preventDefault() on touchend in several places, which
+   suppresses the synthetic click that would otherwise follow, so a
+   click-based listener would silently never fire for a tap that lands on
+   the grid itself - the single biggest tappable surface in the app.
+   pointerdown fires before any of that and carries the same "real user
+   gesture" weight browsers use to decide whether a popup is allowed to
+   open. Capture phase so it runs regardless of what any other handler
+   does with the event afterward. Excludes the connectDrive button itself,
+   which already has its own explicit click handler - no need to also
+   race it from here. */
+document.addEventListener("pointerdown",function(ev){
+  if(!state.driveConnected||!driveNeedsReconnect||driveReconnectAttemptedThisSession||driveSyncInFlight) return;
+  if(ev.target&&ev.target.closest&&ev.target.closest("#connectDrive")) return;
+  driveReconnectAttemptedThisSession=true;
+  runDriveSync(true);
+},true);
+
 document.getElementById("save").addEventListener("click",function(){
   var blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});
   var a=document.createElement("a");
@@ -2134,6 +2202,15 @@ setStatus("Saved "+clockNow());
    decide); if something was missed, this is what actually sends it. */
 if(state.driveConnected) scheduleDriveSync();
 
+/* pre-warm the GIS script (just the JS library fetch - no account/network-
+   auth interaction, nothing shown, same script this page already fetched
+   unconditionally as part of the line above today) so that if a reconnect
+   is ever needed later this session, the delegated pointerdown listener's
+   call to requestAccessToken() can run synchronously off that real tap
+   instead of behind an async script-load gap - which is what popup
+   blockers actually key their "was this a real user gesture" check on. */
+if(!TEST_MODE&&state.driveConnected) loadGisScript(function(){});
+
 /* only present when opened as index.html?hltest=1 — see selftest.html.
    Exposes real functions so tests exercise actual app logic instead of a
    copy of it; storage is already isolated above via TEST_MODE. */
@@ -2196,6 +2273,10 @@ if(TEST_MODE){
     scheduleDriveSync:scheduleDriveSync,
     reassignCategoryEntries:reassignCategoryEntries,
     isDriveSyncInFlight:function(){ return driveSyncInFlight; },
+    setDriveNeedsReconnect:function(v){ driveNeedsReconnect=v; },
+    getDriveNeedsReconnect:function(){ return driveNeedsReconnect; },
+    setDriveReconnectAttempted:function(v){ driveReconnectAttemptedThisSession=v; },
+    getDriveReconnectAttempted:function(){ return driveReconnectAttemptedThisSession; },
     clearLocalStateForTest:function(){
       try{ localStorage.removeItem(KEY); }catch(e){}
       try{ localStorage.removeItem(DEVICE_KEY); }catch(e){}
