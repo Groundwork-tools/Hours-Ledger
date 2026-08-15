@@ -398,6 +398,30 @@ function runTests(H,d){
   assert("changing Date on a new entry saves it to the newly chosen day, not the original one",
     H.entriesFor(newIso).length===1&&H.entriesFor(origIso).length===0);
 
+  /* 26b. same scenario, but checking the Repeat toggle's own visible state
+     directly rather than just the save outcome - regression test for a
+     2026-08-15 report that changing Date deselects the old day's Repeat
+     toggle without selecting the new one, blocking save. The fallback in
+     saveSheet() means a genuinely empty selection still saves correctly
+     (test 26 above), so that report's save-outcome half can't be checked
+     this way - this checks the part it can: does the toggle itself track
+     Date the way it's supposed to. */
+  H.getState().entries={};
+  H.setWeekStart(weekStart);
+  d.getElementById("addBtn").click();
+  var origToggled2=d.querySelector('#fRepeat button[aria-pressed="true"]');
+  var origIdx2=+origToggled2.dataset.d, newIdx2=(origIdx2+1)%7;
+  var fDay3=d.getElementById("fDay");
+  fDay3.value=H.iso(H.addDays(weekStart,newIdx2));
+  fDay3.dispatchEvent(new Event("change"));
+  var oldBtn2=d.querySelector('#fRepeat button[data-d="'+origIdx2+'"]');
+  var newBtn2=d.querySelector('#fRepeat button[data-d="'+newIdx2+'"]');
+  assert("changing Date deselects the original day's Repeat toggle",
+    oldBtn2.getAttribute("aria-pressed")==="false");
+  assert("changing Date auto-selects the newly chosen day's Repeat toggle",
+    newBtn2.getAttribute("aria-pressed")==="true");
+  d.getElementById("fCancel").click();
+
   /* 27. manually toggling "Also put it on" for extra days still works and
      isn't fought by the Day-dropdown sync once the user is driving it directly */
   H.getState().entries={};
