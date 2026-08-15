@@ -166,7 +166,7 @@ button{cursor:pointer}
 .gap-row:last-child{border-bottom:0}
 .gap-row b{font-family:var(--display);color:var(--ink);font-weight:600;margin-right:6px}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.breaktoggle{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:8px}
+.breaktoggle{display:inline-flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:8px}
 .breaktoggle input{width:15px;height:15px}
 .breakrow{margin-bottom:8px}
 .breakrow .delbreak{border:0;background:transparent;color:var(--flag);font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.1em;padding:2px 0;margin-top:4px}
