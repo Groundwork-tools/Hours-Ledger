@@ -374,6 +374,24 @@ function runTests(H,d){
     lastWeekHeader.querySelector(".closeout-mark")!==null);
   d.getElementById("reviewClose").click();
 
+  /* 25b. item 8 - the logo resets to a fresh "home" state: closes Review
+     if it's open, drops out of Day view, closes any open entry sheet, and
+     jumps back to the current week - the same starting state a fresh
+     load would show. */
+  d.getElementById("reviewToggle").click();
+  d.getElementById("viewToggle").click();
+  H.setWeekStart(H.addDays(H.mondayOf(new Date()),-14));
+  d.getElementById("addBtn").click();
+  d.querySelector(".wordmark").click();
+  assert("clicking the logo closes Review if it was open",
+    d.getElementById("reviewSection").hidden);
+  assert("clicking the logo drops back out of Day view",
+    !d.getElementById("dayswitch").classList.contains("on"));
+  assert("clicking the logo closes any open entry sheet",
+    !d.getElementById("scrim").classList.contains("on"));
+  assert("clicking the logo jumps back to the current week",
+    H.iso(H.getWeekStart())===H.iso(H.mondayOf(new Date())));
+
   /* 26. changing the Date field on a NEW entry must actually save it to
      that day - regression test for a reported bug where "Also put it on"
      kept its stale toggle from the day the sheet was opened on, silently

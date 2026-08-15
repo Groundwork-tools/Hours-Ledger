@@ -1913,6 +1913,20 @@ document.getElementById("reviewClose").addEventListener("click",function(){
   document.getElementById("gauge").hidden=false;
   document.getElementById("cols").hidden=false;
 });
+
+/* the logo returning to "the main page" in a single-page app means a home
+   reset: back out of Review if it's open, drop out of Day view, close
+   whatever sheet is open, and jump to the current week - the same "start
+   from scratch" state a fresh load would show */
+function goHome(){
+  if(!document.getElementById("reviewSection").hidden) document.getElementById("reviewClose").click();
+  if(scrim.classList.contains("on")) closeSheet();
+  viewMode="week";
+  weekStart=mondayOf(new Date());
+  focusDay=(new Date().getDay()+6)%7;
+  renderGrid(); renderTotals();
+}
+document.querySelector(".wordmark").addEventListener("click",goHome);
 document.getElementById("reviewPrev").addEventListener("click",function(){
   reviewAnchor=addDays(reviewAnchor,-7*REVIEW_WEEKS); renderReview();
 });
