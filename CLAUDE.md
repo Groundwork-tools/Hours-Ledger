@@ -197,6 +197,21 @@ on purpose.
     this shape specifically: before treating a category-count mismatch as a
     sync bug, check the Drive file directly, since a stale local render can
     look identical to a real duplication from the screen alone.
+- **Real-user bug batch** (2026-08-15): merged to `main` and live. Items
+  1–9 and 11 confirmed by Sebastian on a real device before the merge —
+  item 1 as a closed non-issue (cache artifact), the rest as working
+  fixes; item 4 specifically went three real-device rounds (the stuck
+  `driveSyncInFlight` flag, the 25s-silence-reads-as-broken UX, the
+  late-token-leaves-the-button-lying bug) before it was actually done —
+  see `SYNC-LESSONS.md` for why the suite staying green throughout all
+  three wasn't evidence either way for that one code path. **Item 10
+  (`touch-action:pan-x` on `.gridscroll`) merged unverified, by explicit
+  decision** — Sebastian judged waiting on his friend's schedule wasn't
+  worth blocking eleven already-verified fixes for a single, isolated
+  CSS property whose failure mode is "no change," not breakage. Update
+  this entry once the friend actually confirms the scroll trap is gone
+  on his device — until then, item 10 is live but not yet in the
+  "verified" sense every other line on this list means.
 
 ---
 
@@ -523,14 +538,14 @@ dashboard styling.
     exist to prevent (hard rule 7)? Needs its own design discussion before
     any code, same discipline as phases 1 and 2 — not a quick fix.
 
-16. **Real-user bug batch (reported 2026-08-15) — built on branch
-    `friend-feedback-batch-2026-08-15`, not yet merged.** One real friend
-    using Hours Ledger day-to-day on a laptop, plus Sebastian's own list.
-    Nothing here moves to "What's live and verified" or `main` until
-    Sebastian has actually run what's testable and the friend has
-    specifically confirmed item 10 on their own device — a fix believed
-    correct isn't the same claim as one seen working, same standard as
-    everywhere else in this file.
+16. **Real-user bug batch (reported 2026-08-15) — ~~merged to `main`,
+    live~~.** One real friend using Hours Ledger day-to-day on a laptop,
+    plus Sebastian's own list. Items 1–9 and 11 confirmed by Sebastian on
+    a real device before merging — see "What's live and verified" above.
+    **Item 10 is the one exception**, merged unverified by explicit
+    decision rather than blocked on the friend's schedule for a single,
+    low-risk CSS property; still needs his confirmation to count as done
+    by this file's own standard, same as everywhere else here.
     - **(1) "Also put it on" — investigated, not reproduced, confirmed
       closed.** Static reading found the `fDay`-change/`saveSheet`
       fallback logic already correct. Built an actual repro instead of
