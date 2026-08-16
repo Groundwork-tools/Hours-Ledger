@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hours Ledger — see where your week actually goes</title>
-<meta name="description" content="A free weekly time tracker. Log your real week in half-hour blocks, see the totals per category, and decide what to keep, compress or cut. Nothing leaves your browser.">
+<meta name="description" content="A free weekly time tracker. Log your real week in half-hour blocks, see the totals per category, and decide what to increase, keep or cut. Nothing leaves your browser.">
 <meta property="og:title" content="Hours Ledger — see where your week actually goes">
 <meta property="og:description" content="Log your real week, see the totals, decide what to cut. Free, private, no account.">
 <meta property="og:type" content="website">
@@ -51,7 +51,7 @@
       <div class="gauge-count" id="gaugeCount"></div>
     </div>
     <div class="bar" id="bar"></div>
-    <div class="ticks" id="ticks"></div>
+    <div class="bar-tip" id="barTip" hidden></div>
   </div>
 
   <section class="review" id="reviewSection" hidden>
@@ -144,7 +144,7 @@
     <ol class="intro-steps">
       <li><b>Drag down a column</b> to mark a stretch of time, or click a single half-hour slot.</li>
       <li><b>Say what you were doing.</b> Any start and end time works &mdash; 18:45 to 20:10 is fine. A category is optional; breakfast is just breakfast.</li>
-      <li><b>Check the totals</b> at the end of the week, then mark each category <b>keep</b>, <b>compress</b> or <b>cut</b>.</li>
+      <li><b>Check the totals</b> at the end of the week, then mark each category <b>increase</b>, <b>keep</b> or <b>cut</b>.</li>
     </ol>
     <p class="intro-note">The bar at the top is all 168 hours of your week. Blank means nothing's logged there. It stays visible on purpose &mdash; resist the urge to tidy it.<br><br>Everything saves to this browser as you go. There is no save button to forget.</p>
     <div class="sheet-actions">

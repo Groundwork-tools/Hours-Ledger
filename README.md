@@ -1,7 +1,7 @@
 # Hours Ledger
 
 A free weekly time tracker. Log the week you actually had, see where the hours
-went, and decide what to keep, compress or cut.
+went, and decide what to increase, keep or cut.
 
 **Use it:** https://sebpoulsen.github.io/Hours-Ledger/
 
@@ -10,7 +10,7 @@ went, and decide what to keep, compress or cut.
 - Log any stretch of time in the week — 18:45 to 20:10 is fine, nothing rounds
   to the half hour. Anything crossing midnight splits itself across both days.
 - Make your own categories, with your own colours.
-- See totals per category for the week, and mark each one **keep**, **compress**
+- See totals per category for the week, and mark each one **increase**, **keep**
   or **cut**.
 - A bar across the top showing all 168 hours of the week. The blank part is time
   you haven't accounted for.

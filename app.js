@@ -92,6 +92,28 @@ function migrateVerdicts(s){
   }
   return s;
 }
+/* the Keep/Compress/Cut verdict scale became Increase/Keep/Cut (see
+   CLAUDE.md) - "compress" has no honest translation onto the new scale,
+   so any verdict still set to it is cleared outright rather than guessed
+   at. Reuses setVerdict's own v=null branch, not an inline delete, so
+   this is a REAL delete wherever sync fields already exist: a plain
+   local removal would leave the old value looking untouched to any other
+   device syncing against it, letting a stale un-updated device's
+   "compress" write resurrect it right back (hard rule 7) - it needs a
+   tombstone like any other delete. Called at the same three points
+   migrateVerdicts() is (initial load, undo/redo, import) - that covers
+   every device's own local data on its own next load. It does NOT by
+   itself cover a stale device pushing a FRESH "compress" over sync after
+   this has already run once here; see sweepCompressVerdicts() below,
+   inside syncEngine(), for the continuous half of this fix. */
+function migrateVerdictScale(s){
+  Object.keys(s.weeklyVerdicts).forEach(function(weekIso){
+    Object.keys(s.weeklyVerdicts[weekIso]).forEach(function(catId){
+      if(s.weeklyVerdicts[weekIso][catId]==="compress") setVerdict(catId,weekIso,null);
+    });
+  });
+  return s;
+}
 function migrateFromOldKey(){
   if(TEST_MODE) return null; /* test mode never reads or touches real data */
   var raw=readStore(OLD_KEY);
@@ -283,6 +305,28 @@ function unflattenCategories(flat){
    prunes those anyway, but flattenVerdicts doesn't depend on that pruning
    for correctness). */
 var VERDICT_FIELDS=["verdict","deleted","deletedAt"];
+/* the continuous half of the Keep/Compress/Cut -> Increase/Keep/Cut
+   cleanup (see migrateVerdictScale() above for the load-time half).
+   Without this, a device still on old code pushing a FRESH "compress"
+   sometime after a device here has already migrated would just sit there
+   until this device's own next full reload - worse, migrateVerdictScale
+   alone can't even push the tombstone it writes back out to Drive in the
+   SAME sync exchange it arrived in, since toPush is already computed by
+   the time a plain state-level migration could run. Living here instead,
+   on the merged flat records themselves, means it runs on every connect
+   AND every ongoing sync, and the tombstone it produces flows into both
+   newLocalState and toPush from the same array - so a stray "compress"
+   self-heals within one sync round trip, the same always-on shape
+   dedupeCategoriesByName already uses for its own self-heal, not a
+   one-time fix that needs remembering to re-run. */
+function sweepCompressVerdicts(flat,deviceId){
+  var now=nowIso();
+  return flat.map(function(r){
+    if(r.deleted||r.verdict!=="compress") return r;
+    return {id:r.id,weekIso:r.weekIso,catId:r.catId,verdict:null,
+      updatedAt:now,updatedBy:deviceId,deleted:true,deletedAt:now};
+  });
+}
 function flattenVerdicts(s){
   var out=[];
   Object.keys(s.weeklyVerdicts).forEach(function(weekIso){
@@ -516,6 +560,7 @@ function syncEngine(localStateIn,remoteFile,deviceId){
   mergedCatsFlat=deduped.categories;
   mergedEntriesFlat=deduped.entries;
   mergedVerdictsFlat=deduped.verdicts;
+  mergedVerdictsFlat=sweepCompressVerdicts(mergedVerdictsFlat,deviceId);
 
   var catsResult=unflattenCategories(mergedCatsFlat);
   var entriesResult=unflattenEntries(mergedEntriesFlat);
@@ -844,6 +889,7 @@ if(!state.settings) state.settings={startHour:6,endHour:24};
 if(!state.entries) state.entries={};
 if(!state.weekCloseouts) state.weekCloseouts={};
 migrateVerdicts(state);
+migrateVerdictScale(state);
 
 /* ---------------- file linking (Chrome / Edge) ---------------- */
 var fileHandle=null, fileName="", writeTimer=null;
@@ -1098,6 +1144,7 @@ function applyState(json){
   if(!state.entries) state.entries={};
   if(!state.weekCloseouts) state.weekCloseouts={};
   migrateVerdicts(state);
+  migrateVerdictScale(state);
   writeStore(KEY,JSON.stringify(state));
   if(fileHandle){ clearTimeout(writeTimer); writeTimer=setTimeout(writeLinkedFile,600); }
   render();
@@ -1441,7 +1488,7 @@ function renderTotals(){
       escapeHtml(c.name)+'<span class="h">'+dur(m)+'</span></div>'+
       (ov>0?'<div class="tot-overlap">overlaps '+dur(ov)+' with another entry</div>':'')+
       '<div class="tot-bar"><i style="width:'+pct+"%;background:"+c.color+'"></i></div>'+
-      '<div class="verdict" data-cat="'+c.id+'">'+["keep","compress","cut"].map(function(dv){
+      '<div class="verdict" data-cat="'+c.id+'">'+["increase","keep","cut"].map(function(dv){
         return '<button data-v="'+dv+'" aria-pressed="'+(v===dv)+'">'+dv+"</button>";
       }).join("")+"</div></div>";
   }).join("");
@@ -1459,13 +1506,38 @@ function renderTotals(){
 
   var segs=state.categories.map(function(c){
     var m=r.t[c.id]||0;
-    return m?'<div class="seg" style="width:'+(m/10080*100)+"%;background:"+c.color+'" title="'+escapeHtml(c.name)+" "+dur(m)+'"></div>':"";
+    return m?'<div class="seg" style="width:'+(m/10080*100)+"%;background:"+c.color+'" data-name="'+escapeHtml(c.name)+'" data-dur="'+dur(m)+'"></div>':"";
   }).join("");
-  if(r.none) segs+='<div class="seg" style="width:'+(r.none/10080*100)+'%;background:var(--none)" title="No category"></div>';
+  if(r.none) segs+='<div class="seg" style="width:'+(r.none/10080*100)+'%;background:var(--none)" data-name="No category" data-dur="'+dur(r.none)+'"></div>';
   segs+='<div class="seg void" style="width:'+(Math.max(10080-r.logged,0)/10080*100)+'%"></div>';
   document.getElementById("bar").innerHTML=segs;
   document.getElementById("gaugeCount").innerHTML="<b>"+dur(r.logged)+"</b> logged &nbsp;/&nbsp; "+dur(Math.max(10080-r.logged,0))+" still blank";
-  document.getElementById("ticks").innerHTML=DAYNAMES.map(function(n){ return "<span>"+n.toUpperCase()+"</span>"; }).join("");
+}
+
+/* hover tooltip on the 168-hour bar - one delegated listener on #bar
+   rather than one per segment, since renderTotals() fully rebuilds the
+   segments on every call. Gated behind matchMedia("hover: hover"),
+   checked once here rather than left to the absence of touch events:
+   some mobile browsers do synthesize a stray hover on tap, and doing
+   nothing on touch is the explicit goal, not just an assumption about
+   what events fire there. */
+if(window.matchMedia&&window.matchMedia("(hover: hover)").matches){
+  var barEl=document.getElementById("bar"),barTip=document.getElementById("barTip");
+  /* barTip is a sibling of #bar, not a child - #bar's innerHTML is fully
+     replaced on every renderTotals() call, which would silently delete a
+     tooltip element living inside it. Position math below is done in
+     offsetLeft/offsetWidth terms (bar's own position within its
+     offsetParent, .gauge) rather than getBoundingClientRect on barTip
+     itself, so it stays correct regardless of that split. */
+  barEl.addEventListener("mousemove",function(ev){
+    var seg=ev.target.closest(".seg:not(.void)");
+    if(!seg){ barTip.hidden=true; return; }
+    barTip.textContent=seg.dataset.name+", "+seg.dataset.dur;
+    barTip.hidden=false;
+    var x=ev.clientX-barEl.getBoundingClientRect().left, half=barTip.offsetWidth/2;
+    barTip.style.left=(barEl.offsetLeft+Math.min(Math.max(x,half),barEl.offsetWidth-half))+"px";
+  });
+  barEl.addEventListener("mouseleave",function(){ barTip.hidden=true; });
 }
 
 function renderCats(){
@@ -1875,20 +1947,25 @@ document.getElementById("fDelete").addEventListener("click",function(){
   }
   closeSheet();
 });
-/* closing on a click outside the sheet needs to be a genuine click there,
+/* closing on a click outside a sheet needs to be a genuine click there,
    not just a click event that happens to resolve to the scrim - dragging to
    select text inside the sheet (e.g. the Activity field) and releasing the
    mouse outside it produces a "click" whose target is the nearest common
-   ancestor of the mousedown and mouseup targets, which is scrim itself,
+   ancestor of the mousedown and mouseup targets, which is the scrim itself,
    reading as an outside click even though the press began inside the
    sheet. Tracking where the press itself landed is what tells the two
-   apart. */
-var scrimPressed=false;
-scrim.addEventListener("mousedown",function(ev){ scrimPressed=(ev.target===scrim); });
-scrim.addEventListener("click",function(ev){
-  if(ev.target===scrim&&scrimPressed) closeSheet();
-  scrimPressed=false;
-});
+   apart. Shared by every scrim/sheet pair in the app (the entry sheet and
+   the close-out sheet so far) so a future fix to this logic can't be
+   applied to one and missed on the other. */
+function wireOutsideClose(scrimEl,closeFn){
+  var pressed=false;
+  scrimEl.addEventListener("mousedown",function(ev){ pressed=(ev.target===scrimEl); });
+  scrimEl.addEventListener("click",function(ev){
+    if(ev.target===scrimEl&&pressed) closeFn();
+    pressed=false;
+  });
+}
+wireOutsideClose(scrim,closeSheet);
 document.addEventListener("keydown",function(ev){
   if(!scrim.classList.contains("on")) return;
   if(ev.key==="Escape") closeSheet();
@@ -2106,7 +2183,7 @@ function majorityVerdict(catId,cols){
     var v=getVerdict(catId,iso(ws));
     if(v) counts[v]=(counts[v]||0)+1;
   });
-  var order=["keep","compress","cut"];
+  var order=["increase","keep","cut"];
   var present=order.filter(function(k){ return counts[k]; });
   if(!present.length) return "";
   var max=Math.max.apply(null,present.map(function(k){ return counts[k]; }));
@@ -2160,10 +2237,17 @@ function renderReview(){
 
   document.getElementById("reviewTable").innerHTML="<thead>"+head+"</thead><tbody>"+rows+"</tbody>";
 }
+/* grid-only controls: anything meant to only appear over the main log,
+   not Review. The FAB is position:fixed and sits outside weeknav/gauge/
+   cols/reviewSection in the DOM, so it needs its own line here rather
+   than being caught by any of those - checked at the time this was added
+   and it's the only position:fixed control with that gap (toast and the
+   scrims already gate their own visibility independently of Review). */
 document.getElementById("reviewToggle").addEventListener("click",function(){
   document.getElementById("weeknav").hidden=true;
   document.getElementById("gauge").hidden=true;
   document.getElementById("cols").hidden=true;
+  document.getElementById("fab").hidden=true;
   document.getElementById("reviewSection").hidden=false;
   reviewAnchor=mondayOf(new Date());
   renderReview();
@@ -2173,6 +2257,7 @@ document.getElementById("reviewClose").addEventListener("click",function(){
   document.getElementById("weeknav").hidden=false;
   document.getElementById("gauge").hidden=false;
   document.getElementById("cols").hidden=false;
+  document.getElementById("fab").hidden=false;
 });
 
 /* the logo returning to "the main page" in a single-page app means a home
@@ -2220,6 +2305,7 @@ function openCloseout(ws){
   document.getElementById("closeoutScrim").classList.add("on");
 }
 function closeCloseoutSheet(){ document.getElementById("closeoutScrim").classList.remove("on"); closeoutWeek=null; }
+wireOutsideClose(document.getElementById("closeoutScrim"),closeCloseoutSheet);
 
 function renderCloseoutTotals(){
   var wk=iso(closeoutWeek);
@@ -2231,7 +2317,7 @@ function renderCloseoutTotals(){
     return '<div class="tot"><div class="tot-top"><span class="dot" style="background:'+c.color+'"></span>'+
       escapeHtml(c.name)+'<span class="h">'+dur(m)+'</span></div>'+
       '<div class="tot-bar"><i style="width:'+pct+"%;background:"+c.color+'"></i></div>'+
-      '<div class="verdict" data-cat="'+c.id+'">'+["keep","compress","cut"].map(function(dv){
+      '<div class="verdict" data-cat="'+c.id+'">'+["increase","keep","cut"].map(function(dv){
         return '<button data-v="'+dv+'" aria-pressed="'+(v===dv)+'">'+dv+"</button>";
       }).join("")+"</div></div>";
   }).join("");
@@ -2274,7 +2360,10 @@ document.getElementById("closeoutBannerBtn").addEventListener("click",function()
    of the way for the rest of the week regardless of whether it was used */
 function updateCloseoutAvailability(){
   var lw=lastCompleteWeekStart(), hasData=weekHasEntries(lw), closed=!!state.weekCloseouts[iso(lw)];
-  document.getElementById("closeoutBtn").hidden=!hasData;
+  /* closeoutBtn used to only check hasData, so it stayed visible forever
+     once a week was already closed out - the banner right below it already
+     had the closed check right; this just brings the button in line with it. */
+  document.getElementById("closeoutBtn").hidden=!(hasData&&!closed);
   document.getElementById("closeoutBanner").hidden=!(new Date().getDay()===1&&hasData&&!closed);
 }
 document.getElementById("reviewTable").addEventListener("click",function(ev){
@@ -2433,6 +2522,7 @@ function importBackupJson(jsonText){
   if(!state.settings) state.settings={startHour:6,endHour:24};
   if(!state.weekCloseouts) state.weekCloseouts={};
   migrateVerdicts(state);
+  migrateVerdictScale(state);
   /* an imported file never carries sync connection forward, even if it
      says driveConnected:true - reconnecting is one click, but silently
      resuming a background network sync right after opening an arbitrary
@@ -2550,6 +2640,8 @@ if(TEST_MODE){
     getVerdict:getVerdict,
     setVerdict:setVerdict,
     migrateVerdicts:migrateVerdicts,
+    migrateVerdictScale:migrateVerdictScale,
+    sweepCompressVerdicts:sweepCompressVerdicts,
     snapshot:snapshot,
     undo:undo,
     redo:redo,

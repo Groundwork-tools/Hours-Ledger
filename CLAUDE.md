@@ -1,7 +1,7 @@
 # Hours Ledger
 
 A weekly time tracker. You log the week you actually had in half-hour resolution,
-see the totals per category, and decide what to keep, compress or cut.
+see the totals per category, and decide what to increase, keep or cut.
 Deployed as a static site on GitHub Pages. No backend, no accounts, no analytics.
 
 Built and maintained by Sebastian Poulsen, who is learning to work with Claude Code
@@ -226,7 +226,7 @@ on purpose.
     "2026-07-27": [ { id, label, cat, start, end } ]   // start/end = minutes from midnight
   },
   weeklyVerdicts: {
-    "2026-07-27": { categoryId: 'keep'|'compress'|'cut' }   // keyed by that week's Monday
+    "2026-07-27": { categoryId: 'increase'|'keep'|'cut' }   // keyed by that week's Monday
   },
   weekCloseouts: {
     "2026-07-27": { note: string, closedAt: isoString }   // keyed by that week's Monday

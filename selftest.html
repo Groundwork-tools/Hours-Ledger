@@ -211,6 +211,26 @@ function runTests(H,d){
   assert("no verdict set on any visible week shows blank", tag3==="");
   d.getElementById("reviewClose").click();
 
+  /* 10b. item D - "increase" (replacing "compress") participates in the
+     majority tally and the tie-break order the same way keep/cut always
+     have */
+  H.setVerdict(catId,weeks[0],"increase");
+  H.setVerdict(catId,weeks[1],"increase");
+  H.setVerdict(catId,weeks[2],"cut");
+  d.getElementById("reviewToggle").click();
+  var tag1b=d.querySelector("#reviewTable tbody tr .verdict-tag").textContent.trim();
+  assert("2 increase + 1 cut shows the majority 'increase'", tag1b==="increase");
+  d.getElementById("reviewClose").click();
+
+  weeks.forEach(function(w){ H.setVerdict(catId,w,null); });
+  H.setVerdict(catId,weeks[0],"increase");
+  H.setVerdict(catId,weeks[1],"cut");
+  d.getElementById("reviewToggle").click();
+  var tag2c=d.querySelector("#reviewTable tbody tr .verdict-tag").textContent.trim();
+  assert("a tie between increase and cut joins them in increase/keep/cut order", tag2c==="increase/cut");
+  d.getElementById("reviewClose").click();
+  weeks.forEach(function(w){ H.setVerdict(catId,w,null); });
+
   /* 11. migrateVerdicts converts an old category.verdict-shaped state, carrying
      a set verdict forward as this week's, and is a no-op run again afterward */
   var oldShaped={
@@ -228,6 +248,40 @@ function runTests(H,d){
   var beforeRerun=JSON.stringify(oldShaped.weeklyVerdicts);
   H.migrateVerdicts(oldShaped);
   assert("migrateVerdicts is a no-op on already-migrated data", JSON.stringify(oldShaped.weeklyVerdicts)===beforeRerun);
+
+  /* 11c. migrateVerdictScale (item D) clears a stored "compress" verdict -
+     the Keep/Compress/Cut -> Increase/Keep/Cut rename has no honest mapping
+     for the old middle value, so it's a real delete, not a guess at intent.
+     Two cases: a device that's never touched sync just drops it locally
+     (identical to pre-sync behavior everywhere else in this app); a device
+     that HAS synced before writes a real tombstone instead, via setVerdict's
+     own v=null branch, so the clear can't be resurrected later by a stale
+     device syncing an older "compress" write back in (hard rule 7).
+     migrateVerdictScale relies on setVerdict, which always mutates the
+     module's own global state, not whatever object is passed in - so this
+     has to go through H.setState() like the fixture, and MUST restore the
+     real shared state afterward or every later test in this suite that
+     assumes the default categories are still there breaks. */
+  var stateBeforeScaleTest=H.getState();
+  var scaleFixture1=(function(){ var s={version:2,settings:{startHour:6,endHour:24},categories:[],entries:{},
+    weeklyVerdicts:{"2026-02-02":{a:"compress",b:"keep",c:"cut"}},weekCloseouts:{}}; return s; })();
+  H.setState(scaleFixture1);
+  H.migrateVerdictScale(H.getState());
+  assert("migrateVerdictScale clears a stored 'compress' verdict",
+    !("a" in H.getState().weeklyVerdicts["2026-02-02"]));
+  assert("migrateVerdictScale leaves 'keep' and 'cut' untouched",
+    H.getState().weeklyVerdicts["2026-02-02"].b==="keep"&&H.getState().weeklyVerdicts["2026-02-02"].c==="cut");
+  assert("on a device with no sync fields yet, clearing 'compress' is a plain local drop - no tombstone container exists to write into",
+    !H.getState().deletedVerdicts);
+
+  var scaleFixture2=(function(){ var s={version:2,settings:{startHour:6,endHour:24},categories:[],entries:{},
+    weeklyVerdicts:{"2026-02-09":{a:"compress"}},weekCloseouts:{}}; return s; })();
+  H.setState(scaleFixture2);
+  H.migrateSyncFields(H.getState());
+  H.migrateVerdictScale(H.getState());
+  assert("on a device that HAS synced before, clearing a 'compress' verdict writes a real tombstone",
+    H.getState().deletedVerdicts&&!!H.getState().deletedVerdicts["2026-02-09|a"]);
+  H.setState(stateBeforeScaleTest);
 
   /* 12. two entries in the SAME category overlapping each other: the real
      time they cover (logged) is deduped, but that's not cross-category
@@ -353,6 +407,23 @@ function runTests(H,d){
     d.getElementById("closeoutNote").value==="Busy with exams");
   d.getElementById("closeoutCancel").click();
 
+  /* 23b. item C - the close-out sheet now closes on an outside click too,
+     sharing wireOutsideClose() with the entry sheet rather than a second
+     copy of the same drag-vs-click-target logic (see item 5 last batch,
+     tested just above for the entry sheet's own scrim). Same drag-out
+     simulation: mousedown targeted inside the sheet, click resolving to
+     the scrim itself - must NOT close; a genuine press-and-release on the
+     scrim itself must. */
+  H.openCloseout(lastWeek);
+  d.getElementById("closeoutNote").dispatchEvent(new Event("mousedown",{bubbles:true}));
+  d.getElementById("closeoutScrim").dispatchEvent(new Event("click",{bubbles:true}));
+  assert("dragging from inside the close-out sheet to outside it doesn't close the sheet",
+    d.getElementById("closeoutScrim").classList.contains("on"));
+  d.getElementById("closeoutScrim").dispatchEvent(new Event("mousedown",{bubbles:true}));
+  d.getElementById("closeoutScrim").dispatchEvent(new Event("click",{bubbles:true}));
+  assert("a genuine outside click closes the close-out sheet",
+    !d.getElementById("closeoutScrim").classList.contains("on"));
+
   /* 24. the "Close out last week" button's visibility follows whether last
      week actually has anything logged, independent of the day of week */
   H.getState().entries={};
@@ -362,6 +433,70 @@ function runTests(H,d){
   H.putEntry(H.iso(H.lastCompleteWeekStart()),"Work",catId,9*60,10*60,null);
   H.updateCloseoutAvailability();
   assert("close-out button shows once last week has something logged", !d.getElementById("closeoutBtn").hidden);
+
+  /* 24b. item A - the button used to only check hasData, so it stayed
+     visible forever once last week was already closed out; the banner
+     right below it already had this right (see updateCloseoutAvailability
+     in app.js). Confirms the button now hides once closed, and reappears
+     next Monday once lastCompleteWeekStart() has moved on to a new,
+     not-yet-closed week - it's a pure function of today's date, so
+     "moving on" needs no extra state of its own. */
+  H.getState().weekCloseouts[H.iso(H.lastCompleteWeekStart())]={note:"",closedAt:new Date().toISOString()};
+  H.updateCloseoutAvailability();
+  assert("close-out button hides once last week is already closed out",
+    d.getElementById("closeoutBtn").hidden);
+  delete H.getState().weekCloseouts[H.iso(H.lastCompleteWeekStart())];
+  H.updateCloseoutAvailability();
+  assert("close-out button reappears if that week's close-out is removed again",
+    !d.getElementById("closeoutBtn").hidden);
+  H.getState().weekCloseouts[H.iso(H.lastCompleteWeekStart())]={note:"",closedAt:new Date().toISOString()};
+  H.updateCloseoutAvailability();
+
+  /* 24c. item B - the floating "Log now" button is position:fixed outside
+     weeknav/gauge/cols/reviewSection, so Review's own show/hide toggle has
+     to name it explicitly; confirm it does, and that "Back to log" (a
+     path back to the grid that survives even with the FAB hidden) restores it */
+  assert("Log now is visible on the main grid before Review opens", !d.getElementById("fab").hidden);
+  d.getElementById("reviewToggle").click();
+  assert("Log now is hidden while Review is open", d.getElementById("fab").hidden);
+  d.getElementById("reviewClose").click();
+  assert("Log now reappears after leaving Review via Back to log", !d.getElementById("fab").hidden);
+
+  /* 24d. item D/E/F - what actually renders in the DOM: the verdict
+     buttons use the new Increase/Keep/Cut scale, the removed weekday
+     ticks under the bar are gone, and each bar segment now carries its
+     name/duration as data attributes (for the new hover tooltip) instead
+     of the old native title tooltip */
+  H.getState().entries={};
+  H.putEntry(H.iso(weekStart),"Work",catId,9*60,10*60,null);
+  H.setWeekStart(weekStart);
+  H.render();
+  var verdictBtns=Array.prototype.map.call(d.querySelectorAll("#totals .verdict button"),function(b){ return b.dataset.v; });
+  assert("the entry sheet's verdict buttons render the new Increase/Keep/Cut scale, not the old Keep/Compress/Cut one",
+    verdictBtns.indexOf("increase")>-1&&verdictBtns.indexOf("compress")===-1&&
+    verdictBtns.indexOf("keep")>-1&&verdictBtns.indexOf("cut")>-1);
+  assert("item F - the weekday tick labels under the bar are gone", !d.getElementById("ticks"));
+  var seg=d.querySelector("#bar .seg:not(.void)");
+  assert("item E - bar segments carry name/duration as data attributes for the hover tooltip, not the old native title tooltip",
+    !!seg&&!!seg.dataset.name&&!!seg.dataset.dur&&!seg.hasAttribute("title"));
+  assert("item E - the tooltip element itself exists in the DOM, starting hidden", d.getElementById("barTip")&&d.getElementById("barTip").hidden);
+  /* the hover handler itself (not just its data plumbing) is real testable
+     JS reacting to a mousemove DOM event - unlike a native OAuth popup or a
+     real OS keystroke, there's nothing opaque about it, so a synthetic
+     MouseEvent is a faithful test of this code path. What it can't cover:
+     the actual on-screen position, since selftest.html's sandbox iframe is
+     display:none (see SYNC-LESSONS.md), which zeroes every element's
+     layout box - getBoundingClientRect/offsetWidth/offsetLeft all report 0
+     in here regardless of the real math, the same structural gap already
+     documented for focus/blur testing in this file. Positioning itself
+     needs a real hover on a real device, same as everywhere else this
+     project draws that line. */
+  var barTip=d.getElementById("barTip");
+  seg.dispatchEvent(new (d.defaultView.MouseEvent)("mousemove",{bubbles:true,clientX:50,clientY:50}));
+  assert("hovering a segment shows the tooltip", barTip.hidden===false);
+  assert("the tooltip text matches the 'Name, duration' format", barTip.textContent===seg.dataset.name+", "+seg.dataset.dur);
+  d.getElementById("bar").dispatchEvent(new (d.defaultView.MouseEvent)("mouseleave",{bubbles:false}));
+  assert("leaving the bar hides the tooltip again", barTip.hidden===true);
 
   /* 25. Review only makes strictly-past weeks clickable for close-out
      (never the in-progress rightmost column), and marks a week that's
@@ -1186,6 +1321,29 @@ function runTests(H,d){
     var pullB2=H.syncEngine(pullB.newLocalState,remoteAfterA2,deviceB);
     assert("a verdict cleared on device A is actually gone on device B after its next sync, not resurrected as 'present on one side'",
       !(pullB2.newLocalState.weeklyVerdicts["2026-05-11"]&&("studies" in pullB2.newLocalState.weeklyVerdicts["2026-05-11"])));
+  })();
+  /* ---- item D: Keep/Compress/Cut became Increase/Keep/Cut. A friend's
+     real, un-updated device (not everyone updates the instant this ships)
+     can still write a fresh "compress" verdict after this device has
+     already run its own local migration once - sweepCompressVerdicts()
+     runs on every syncEngine() call, on the merged flat records, so this
+     self-heals within the SAME sync exchange rather than needing a reload
+     or a manually re-run migration, and the tombstone it produces is
+     already part of that same call's own outgoing push. */
+  (function(){
+    var deviceA="sim-device-verdictscale-A",deviceStale="sim-device-verdictscale-stale";
+    var remoteFromStaleDevice={categories:[],entries:[],closeouts:[],
+      verdicts:[{id:"2026-06-01|studies",weekIso:"2026-06-01",catId:"studies",verdict:"compress",
+        updatedAt:T0,updatedBy:deviceStale,deleted:false,deletedAt:null}]};
+    var stateA=freshState([{id:"studies",name:"Studies",color:"#2B52A1"}],{});
+    H.setState(stateA);
+    H.migrateSyncFields(H.getState());
+    var pullA=H.syncEngine(H.getState(),remoteFromStaleDevice,deviceA);
+    assert("a fresh 'compress' pulled in from a stale device is cleared on THIS sync, not left sitting until a reload",
+      !(pullA.newLocalState.weeklyVerdicts["2026-06-01"]&&("studies" in pullA.newLocalState.weeklyVerdicts["2026-06-01"])));
+    var pushedTombstone=pullA.toPush.verdicts.filter(function(v){ return v.id==="2026-06-01|studies"; })[0];
+    assert("the cleanup writes a real tombstone (not a silent local-only drop), and it's already part of THIS SAME call's toPush - it doesn't wait for some later trigger to reach Drive",
+      pushedTombstone&&pushedTombstone.deleted===true);
   })();
   (function(){ // close-outs resolve last-write-wins too, same as verdicts and everything else
     var deviceA="sim-device-coA",deviceB="sim-device-coB";
