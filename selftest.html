@@ -1585,8 +1585,7 @@ function runAsyncTests(H,d){
          treats as complete-looking - exactly what the real report
          described (typing "1" into minutes committing to "13:01" before
          a second digit arrives, on an ordinary typing cadence). Still
-         ambiguous on its own - first edit this session - so it must
-         still wait for the debounce, not close immediately. */
+         ambiguous on its own - first edit this session. */
       fStart.value="13:01";
       fStart.dispatchEvent(new Event("input",{bubbles:true}));
       return delay(20);
@@ -1594,38 +1593,48 @@ function runAsyncTests(H,d){
     .then(function(){
       assert("a single-keystroke-shaped time value doesn't call blur() immediately - regression for stealing focus mid-type",
         blurCalls===0);
-      return waitFor(function(){ return blurCalls>0; },2000);
-    })
-    .then(function(calledEventually){
-      assert("a single, unfollowed edit still closes via the debounce backstop - covers a completed dropdown pick and a genuinely single-digit entry, same mechanism as before the fast path existed",
-        calledEventually);
+      /* item D of the second real-user batch removed the debounce timer
+         entirely - an ambiguous edit (a single digit left mid-entry, or a
+         native dropdown-style pick that doesn't land as two same-segment
+         edits) is now left open on purpose rather than closed on a guess,
+         since a timer-based guess was what caused the phone regression
+         this same change fixes. Confirm it actually stays open well past
+         where the old debounce (100ms under TEST_MODE) would have fired -
+         not just "hasn't closed yet" a moment later. */
+      return delay(400);
     })
     .then(function(){
-      /* ---- the fast path: two consecutive edits to the SAME half
+      assert("a single, unfollowed edit does NOT auto-close anymore - no timer fallback; it stays open for a manual dismiss (click away / Tab / Enter)",
+        blurCalls===0);
+    })
+    .then(function(){
+      /* ---- the fast path (the only closing mechanism left, now that
+         there's no timer): two consecutive edits to the SAME half
          (minute, here) can only mean its second digit just landed - no
-         third digit is coming for a 2-digit segment - so this should
-         close immediately, not wait out the debounce at all. */
+         third digit is coming for a 2-digit segment - so this closes
+         immediately, a conclusive signal rather than a guess. */
       openFreshTimeField();
       fStart.value="13:01";
       fStart.dispatchEvent(new Event("input",{bubbles:true}));
-      return delay(15); // well inside the debounce window - this edit alone must not have closed it yet
+      return delay(15); // this edit alone must not have closed it yet
     })
     .then(function(){
       assert("fast path, setup: the first digit alone hasn't closed the field yet",blurCalls===0);
       fStart.value="13:10"; // minute changes again - same half as the previous edit
       fStart.dispatchEvent(new Event("input",{bubbles:true}));
-      return delay(15); // deliberately shorter than the debounce (100ms under TEST_MODE) - only the fast path could close it this quickly
+      return delay(15); // short delay - nothing else would close this without the fast path
     })
     .then(function(){
-      assert("a second digit completing the same segment closes immediately, well before the debounce would have fired on its own",
+      assert("a second digit completing the same segment closes immediately",
         blurCalls===1);
     })
     .then(function(){
       /* ---- editing a DIFFERENT half right after the first must NOT
          fast-close - that's still someone actively moving through the
          field (e.g. tabbing from hours into minutes), not a segment
-         getting its second digit. Falls through to the ordinary
-         debounce, same as any other ambiguous edit. */
+         getting its second digit. This is now a genuinely ambiguous case
+         with no fallback: it stays open, same as the single-digit case
+         above, rather than closing on a guess once editing stops. */
       openFreshTimeField();
       fStart.value="09:00"; // hour changes
       fStart.dispatchEvent(new Event("input",{bubbles:true}));
@@ -1639,11 +1648,11 @@ function runAsyncTests(H,d){
     .then(function(){
       assert("editing a different segment right after the first doesn't fast-close - only a repeated edit to the SAME segment does",
         blurCalls===0);
-      return waitFor(function(){ return blurCalls>0; },2000);
+      return delay(400); // well past where the old debounce (100ms under TEST_MODE) would have fired
     })
-    .then(function(calledEventually){
-      assert("...but it still closes via the debounce backstop once editing genuinely stops, same as any other ambiguous case",
-        calledEventually);
+    .then(function(){
+      assert("...and it stays open with no timer fallback - a different-segment edit is exactly as ambiguous as a single digit, and gets the same treatment",
+        blurCalls===0);
       fStart.blur=origBlur;
       d.getElementById("fCancel").click();
     })

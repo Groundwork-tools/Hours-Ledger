@@ -1687,77 +1687,49 @@ function closeSheet(){ scrim.classList.remove("on"); editing=null; }
 fLabel.addEventListener("input",function(){ labelTouched=true; });
 
 /* native <input type=time> doesn't self-close its picker/stepper once both
-   segments are filled on some browsers - there's no custom picker in this
-   codebase to control, so the best available fix is handing focus away
-   once the value looks complete, which closes the native UI in most
+   segments are filled on some DESKTOP browsers - there's no custom picker
+   in this codebase to control, so the best available fix is handing focus
+   away once the value looks complete, which closes the native UI in most
    browsers. Delegated on scrim so this also covers the dynamically-added
    break-row time inputs without touching makeBreakRow().
 
-   Debounced, not immediate - the first version blurred on every "input"
-   event unconditionally, which also fires - already looking complete -
-   after a single digit typed into a two-digit segment (e.g. typing "1"
-   into minutes when the field reads 13:00 can commit to "13:01" before a
-   second digit arrives, on an ordinary typing cadence, not just a fast
-   one - confirmed against the real handler, not assumed: dispatching one
-   synthetic "input" event with a single-keystroke-shaped value made it
-   blur before a second keystroke could ever land). That stole focus
-   mid-type and dropped the rest of the keystroke.
+   Desktop only, gated behind matchMedia("hover: hover") - same signal and
+   same reasoning as the 168-hour bar's hover tooltip. A phone's native
+   time picker is a wheel/scroll UI with its own confirm control; closing
+   it out from under someone mid-scroll, on any guess at all, is simply
+   wrong there, not just imprecise - real-device testing found exactly
+   that: a 500ms debounce still fired while the user had only set the
+   HOUR and was still moving to MINUTES, closing the picker before the
+   second value could ever be set. Gating the whole mechanism off for
+   touch removes it structurally rather than relying on touch events
+   happening not to trigger it - the whole reason the bar tooltip was
+   gated the same way, not left to matchMedia's absence being incidental.
 
    No property on a native time input's "input" event distinguishes "the
-   user picked this from the dropdown" from "the user is mid-keystroke" -
-   checked before reaching for a debounce, not defaulted to one; unlike
-   <input type=text>'s InputEvent.inputType, time inputs don't expose
-   that distinction in any standardized, cross-browser way. So: wait
-   TIME_INPUT_BLUR_DEBOUNCE_MS with no further "input" event on THIS
-   field before actually blurring; another edit within that window
-   (a second digit, a corrected first digit) cancels and reschedules it.
-   A completed dropdown pick still closes itself, just slightly after
-   instead of instantly - the tradeoff this makes on purpose. The timer
-   lives on the element itself (not one shared variable) since fStart,
-   fEnd, and break-row times can all be mid-edit independently - a
-   shared timer would let editing one field cancel another's pending
-   close. Tabbing between a field's own hour/minute segments doesn't
-   fire "input" at all (the value doesn't change), so it never disturbs
-   a pending timer either way - confirmed, not assumed.
-
-   500ms is a guess about typing speed, not a measured constant - it's
-   named specifically so it's one number to tune, not a value to go
-   hunting for across the file if it ever feels wrong in either
-   direction (too slow after a dropdown pick, still too fast for a slow
-   typist). See CLAUDE.md's backlog item 16.6 for the decision this
-   codifies, including why a "smarter" per-path check was ruled out
-   rather than just not attempted.
-
-   Fast path added on top, 2026-08-16: the 500ms wait after every edit
-   was correct but felt slow for the ordinary two-digit case, where
-   there's actually no ambiguity left once the second digit lands - a
-   2-digit segment has no third digit coming. There's no direct API for
-   "how many digits have been typed" (no selectionStart/segment index
-   for a time input), but there's an indirect signal that works: compare
-   each "input" event's value against the value from THIS field's own
-   previous "input" event, and see which half (hour or minute) changed.
-   If the SAME half changes on two consecutive edits, that can only mean
-   its second digit just landed (typing a digit into a segment that's
-   already reporting a complete-looking value, per the debounce fix
-   above, changes THAT segment again, not some other one) - close
-   immediately, no need to wait. Anything else (the first edit since
-   focus, a different half changing, or both halves changing at once,
-   e.g. a fresh value written by anything other than typing) is still
-   genuinely ambiguous and falls through to the debounce exactly as
-   before. Known, accepted gap: if a keystroke doesn't actually change
-   .value (e.g. minutes already reads 00 and the first digit typed is
-   also 0), no "input" event fires for it at all, so it can't count
-   toward "two edits to the same half" - that specific case still takes
-   the full debounce, same as before this fast path existed, not a
-   regression.
-
-   The debounce is still the BACKSTOP for every ambiguous case, not
-   superseded by the fast path - same reasoning as the OAuth reconnect
-   flow's focus-fast-path/timeout-backstop split (see CLAUDE.md's hard
-   rule 9 addendum): do not delete TIME_INPUT_BLUR_DEBOUNCE_MS on the
-   theory that the fast path now handles everything. It doesn't - single-
-   digit entries and dropdown picks still depend on it entirely. */
-var TIME_INPUT_BLUR_DEBOUNCE_MS=TEST_MODE?100:500; /* shortened under TEST_MODE, same pattern as DRIVE_SYNC_DEBOUNCE_MS/GIS_RECONNECT_TIMEOUT_MS - a real 500ms would make every test wait for no reason. 100ms (not shorter) leaves comfortable margins for selftest.html's own reschedule-timing assertions */
+   user picked this from a dropdown" from "the user is mid-keystroke" -
+   checked, not assumed; unlike <input type=text>'s InputEvent.inputType,
+   time inputs don't expose that distinction in any standardized way.
+   What IS available: comparing each "input" event's value against the
+   value from THIS field's own previous "input" event tells you which
+   half (hour or minute) changed. If the SAME half changes on two
+   consecutive edits, that can only mean its second digit just landed - a
+   2-digit segment has no third digit coming - so it's safe to close
+   immediately: real, conclusive information, not a guess. Anything else
+   (the first edit since focus, a different half changing, or both
+   halves changing at once) stays genuinely ambiguous, and - per an
+   explicit decision, not an oversight - is left open rather than closed
+   on a timer. A single digit left mid-entry, or a native dropdown-style
+   whole-value pick some desktop browsers offer (if its edits don't
+   happen to land as two separate same-segment "input" events), both
+   fall into this bucket now: staying open until a manual dismissal
+   (click away, Tab, Enter - already wired to save/close the whole sheet)
+   is judged better than closing on a guess that might be wrong. There is
+   no timer fallback for the ambiguous case anymore - deliberately: a
+   500ms guess was the mechanism that caused the phone regression above,
+   and there's no correspondingly loose tolerance for it on desktop
+   either once the conclusive signal (two same-segment edits) is
+   available; see CLAUDE.md's backlog item 16.6 for the debounce this
+   replaces and why. */
 /* returns "hour", "minute", or null (both changed at once, or neither -
    not a normal single-digit edit) for which half differs between two
    "HH:MM" strings. null is deliberately treated as ambiguous by the
@@ -1768,24 +1740,24 @@ function changedTimeSegment(oldVal,newVal){
   if(o[1]!==n[1]&&o[0]===n[0]) return "minute";
   return null;
 }
-scrim.addEventListener("focus",function(ev){
-  if(!(ev.target.matches&&ev.target.matches('input[type="time"]'))) return;
-  /* starts a fresh edit session so a same-segment match can't carry over
-     from a much earlier edit across a blur-then-refocus gap */
-  ev.target._lastChangedSegment=null;
-  ev.target._lastTimeValue=ev.target.value;
-},true);
-scrim.addEventListener("input",function(ev){
-  if(!(ev.target.matches&&ev.target.matches('input[type="time"]'))) return;
-  clearTimeout(ev.target._blurTimer);
-  if(!ev.target.value) return;
-  var segment=changedTimeSegment(ev.target._lastTimeValue,ev.target.value);
-  var closeNow=segment&&segment===ev.target._lastChangedSegment;
-  ev.target._lastChangedSegment=segment;
-  ev.target._lastTimeValue=ev.target.value;
-  if(closeNow){ ev.target.blur(); return; }
-  ev.target._blurTimer=setTimeout(function(){ ev.target.blur(); },TIME_INPUT_BLUR_DEBOUNCE_MS);
-});
+if(window.matchMedia&&window.matchMedia("(hover: hover)").matches){
+  scrim.addEventListener("focus",function(ev){
+    if(!(ev.target.matches&&ev.target.matches('input[type="time"]'))) return;
+    /* starts a fresh edit session so a same-segment match can't carry over
+       from a much earlier edit across a blur-then-refocus gap */
+    ev.target._lastChangedSegment=null;
+    ev.target._lastTimeValue=ev.target.value;
+  },true);
+  scrim.addEventListener("input",function(ev){
+    if(!(ev.target.matches&&ev.target.matches('input[type="time"]'))) return;
+    if(!ev.target.value) return;
+    var segment=changedTimeSegment(ev.target._lastTimeValue,ev.target.value);
+    var closeNow=segment&&segment===ev.target._lastChangedSegment;
+    ev.target._lastChangedSegment=segment;
+    ev.target._lastTimeValue=ev.target.value;
+    if(closeNow) ev.target.blur();
+  });
+}
 
 document.getElementById("fChips").addEventListener("click",function(ev){
   var b=ev.target.closest(".chip"); if(!b) return;
