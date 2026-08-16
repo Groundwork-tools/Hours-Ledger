@@ -1616,15 +1616,51 @@ fLabel.addEventListener("input",function(){ labelTouched=true; });
 
 /* native <input type=time> doesn't self-close its picker/stepper once both
    segments are filled on some browsers - there's no custom picker in this
-   codebase to control, so the best available fix is handing focus away the
-   moment the value is actually complete, which closes the native UI in
-   most browsers. A time input's .value is only ever a full valid HH:MM or
-   "" - browsers never populate it with a partial value - so checking
-   ev.target.value on "input" is enough to know the value just became
-   complete. Delegated on scrim so this also covers the dynamically-added
-   break-row time inputs without touching makeBreakRow(). */
+   codebase to control, so the best available fix is handing focus away
+   once the value looks complete, which closes the native UI in most
+   browsers. Delegated on scrim so this also covers the dynamically-added
+   break-row time inputs without touching makeBreakRow().
+
+   Debounced, not immediate - the first version blurred on every "input"
+   event unconditionally, which also fires - already looking complete -
+   after a single digit typed into a two-digit segment (e.g. typing "1"
+   into minutes when the field reads 13:00 can commit to "13:01" before a
+   second digit arrives, on an ordinary typing cadence, not just a fast
+   one - confirmed against the real handler, not assumed: dispatching one
+   synthetic "input" event with a single-keystroke-shaped value made it
+   blur before a second keystroke could ever land). That stole focus
+   mid-type and dropped the rest of the keystroke.
+
+   No property on a native time input's "input" event distinguishes "the
+   user picked this from the dropdown" from "the user is mid-keystroke" -
+   checked before reaching for a debounce, not defaulted to one; unlike
+   <input type=text>'s InputEvent.inputType, time inputs don't expose
+   that distinction in any standardized, cross-browser way. So: wait
+   TIME_INPUT_BLUR_DEBOUNCE_MS with no further "input" event on THIS
+   field before actually blurring; another edit within that window
+   (a second digit, a corrected first digit) cancels and reschedules it.
+   A completed dropdown pick still closes itself, just slightly after
+   instead of instantly - the tradeoff this makes on purpose. The timer
+   lives on the element itself (not one shared variable) since fStart,
+   fEnd, and break-row times can all be mid-edit independently - a
+   shared timer would let editing one field cancel another's pending
+   close. Tabbing between a field's own hour/minute segments doesn't
+   fire "input" at all (the value doesn't change), so it never disturbs
+   a pending timer either way - confirmed, not assumed.
+
+   500ms is a guess about typing speed, not a measured constant - it's
+   named specifically so it's one number to tune, not a value to go
+   hunting for across the file if it ever feels wrong in either
+   direction (too slow after a dropdown pick, still too fast for a slow
+   typist). See CLAUDE.md's backlog item 16.6 for the decision this
+   codifies, including why a "smarter" per-path check was ruled out
+   rather than just not attempted. */
+var TIME_INPUT_BLUR_DEBOUNCE_MS=TEST_MODE?100:500; /* shortened under TEST_MODE, same pattern as DRIVE_SYNC_DEBOUNCE_MS/GIS_RECONNECT_TIMEOUT_MS - a real 500ms would make every test wait for no reason. 100ms (not shorter) leaves comfortable margins for selftest.html's own reschedule-timing assertions */
 scrim.addEventListener("input",function(ev){
-  if(ev.target.matches&&ev.target.matches('input[type="time"]')&&ev.target.value) ev.target.blur();
+  if(!(ev.target.matches&&ev.target.matches('input[type="time"]'))) return;
+  clearTimeout(ev.target._blurTimer);
+  if(!ev.target.value) return;
+  ev.target._blurTimer=setTimeout(function(){ ev.target.blur(); },TIME_INPUT_BLUR_DEBOUNCE_MS);
 });
 
 document.getElementById("fChips").addEventListener("click",function(ev){

@@ -1402,7 +1402,62 @@ function runAsyncTests(H,d){
   H.setState(s);
   H.fakeDriveReset();
 
-  return new Promise(function(resolve){ H.getAccessToken(function(err,token){ resolve({err:err,token:token}); }); })
+  function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); }
+
+  /* document.activeElement is meaningless inside this harness's sandbox
+     iframe (display:none - see the CSS at the top of this file), which
+     can never hold real browser focus, structurally, regardless of
+     whether .blur() is correct - exactly the trap SYNC-LESSONS.md
+     already documents. Spying on the .blur() method call itself instead
+     tests what this fix's logic actually controls (does it decide to
+     call blur, and when) without depending on real focus state this
+     environment can't provide. */
+  var fStart=d.getElementById("fStart"), blurCalls=0, origBlur=fStart.blur;
+  fStart.blur=function(){ blurCalls++; };
+
+  return new Promise(function(resolve){
+    d.getElementById("addBtn").click();
+    fStart.value="13:00";
+    resolve();
+  })
+    .then(function(){
+      /* simulates the value after ONE keystroke that the browser already
+         treats as complete-looking - exactly what the real report
+         described (typing "1" into minutes committing to "13:01" before
+         a second digit arrives, on an ordinary typing cadence). The
+         debounce constant is TEST_MODE-scaled (see app.js); margins
+         below are chosen relative to it, not hardcoded milliseconds. */
+      fStart.value="13:01";
+      fStart.dispatchEvent(new Event("input",{bubbles:true}));
+      return delay(20);
+    })
+    .then(function(){
+      assert("a single-keystroke-shaped time value doesn't call blur() immediately - regression for stealing focus mid-type",
+        blurCalls===0);
+      /* the second digit, arriving well inside the debounce window, must
+         cancel and reschedule rather than let the first digit's own
+         timer fire on schedule */
+      fStart.value="13:10";
+      fStart.dispatchEvent(new Event("input",{bubbles:true}));
+      return delay(90);
+    })
+    .then(function(){
+      /* this check lands at 20+90=110ms absolute - after the FIRST
+         digit's own timer would have fired (100ms, TEST_MODE's debounce)
+         but before the SECOND digit's rescheduled one (20+100=120ms) -
+         zero calls here specifically proves the reschedule happened, not
+         just that blur is generally slow */
+      assert("a second digit arriving within the debounce window resets it, rather than the first digit's timer firing anyway",
+        blurCalls===0);
+      return waitFor(function(){ return blurCalls>0; },2000);
+    })
+    .then(function(calledEventually){
+      assert("blur() still gets called on its own once editing genuinely stops - covers a completed dropdown pick, same mechanism",
+        calledEventually);
+      fStart.blur=origBlur;
+      d.getElementById("fCancel").click();
+    })
+    .then(function(){ return new Promise(function(resolve){ H.getAccessToken(function(err,token){ resolve({err:err,token:token}); }); }); })
     .then(function(res){
       assert("getAccessToken() under TEST_MODE resolves without error",!res.err);
       assert("getAccessToken() under TEST_MODE returns a token with no real Google account or script involved",

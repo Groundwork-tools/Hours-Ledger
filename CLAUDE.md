@@ -702,16 +702,60 @@ dashboard styling.
       the press and the release did. New `selftest.html` case simulates
       the browser's actual click-target resolution for a drag-out gesture
       without needing a real drag.
-    - **(6) Native time picker doesn't self-close on laptop — best
-      available fix shipped.** No custom picker exists in this codebase to
-      control. Once a time field's value becomes a complete valid `HH:MM`
-      (a time input's `.value` is only ever a full valid value or empty,
-      never partial), `.blur()` hands focus away, which closes the native
-      popup in most browsers. Not testable in `selftest.html` — no native
-      picker UI exists in that hidden-iframe harness, and asserting on
-      focus/blur there can't distinguish a real pass from an environment
-      limitation (see `SYNC-LESSONS.md`'s own warning about exactly this
-      trap). Needs a manual check in the actual laptop browser involved.
+    - **(6) Native time picker doesn't self-close on laptop — fixed, then
+      found to have a real regression, then fixed again with a debounce.**
+      No custom picker exists in this codebase to control. First version:
+      once a time field's value becomes a complete valid `HH:MM`, `.blur()`
+      hands focus away, closing the native popup in most browsers.
+      **Real regression found afterward, on the same laptop**: clicking
+      directly into a two-digit segment (no dropdown involved at all) and
+      typing normally — e.g. minutes reads `00`, click it, type `1` then
+      `0` for `:10` — lost the second keystroke. Cause, confirmed against
+      the real handler rather than assumed: a native time input's `.value`
+      can become a complete-looking `HH:MM` after a *single* keystroke on
+      an ordinary typing cadence (typing `1` into a two-digit minute
+      segment can commit to `:01` before a second digit arrives, not just
+      on a fast type) — dispatching one synthetic `input` event shaped
+      like that single keystroke made the old handler blur immediately,
+      reproducing the exact symptom before touching any code. **Checked
+      whether the two cases (dropdown pick vs. mid-keystroke) could be
+      told apart directly before reaching for a debounce, not defaulted
+      to one**: no property on a time input's `input` event distinguishes
+      them — unlike `<input type=text>`'s `InputEvent.inputType`, time
+      inputs expose no equivalent. If this is ever revisited, re-confirm
+      that gap still holds before trying to build a "smarter" per-path
+      check; it was a real dead end once already, not an oversight.
+      Fix: debounce instead of blur-immediately —
+      `TIME_INPUT_BLUR_DEBOUNCE_MS` (a single named constant, 500ms,
+      chosen as a guess about typing speed and expected to need tuning
+      either direction) — wait that long with no further `input` event on
+      *that specific field* before blurring; another edit within the
+      window cancels and reschedules. The debounce id lives on the
+      element itself, not one shared timer, since `fStart`/`fEnd`/break
+      rows can all be mid-edit independently. Tabbing between a field's
+      own hour/minute segments fires no `input` event at all (confirmed,
+      not assumed), so it never disturbs a pending timer either way — one
+      of the four paths this had to keep working (single-digit minute,
+      two-digit minute, tabbing between segments, a completed dropdown
+      pick) turned out to need no special handling because the debounce's
+      own trigger condition (an `input` event) never fires for it.
+      **Testable this time, differently than the first version**:
+      `document.activeElement` is meaningless inside `selftest.html`'s
+      `display:none` sandbox iframe (the exact trap flagged in the first
+      version of this entry, and documented in `SYNC-LESSONS.md`) — so
+      the regression test spies on the `.blur()` *method call* itself
+      instead of real focus state, which tests exactly what this fix's
+      logic controls without needing real browser focus this environment
+      structurally can't provide. Fail-first confirmed both ways: the new
+      assertions fail against the pre-debounce code (2/234), and the
+      original item 6 case — a completed value with no further edit —
+      still resolves via the same debounce, one dropdown-shaped `input`
+      event followed by silence. What's still not covered by the suite,
+      same as the first version: whether a real native picker's own
+      keystroke-by-keystroke internals actually behave the way this
+      fix assumes on a real device — synthetic events can't drive that,
+      only trusted OS-level input can, which needs a human typing at a
+      real keyboard.
     - **(7) No floating "Log now" button on laptop — fixed.** `.fab` was
       `display:none` by default, only `display:block` under
       `@media(max-width:820px)`. Now always `display:block`, same fixed
