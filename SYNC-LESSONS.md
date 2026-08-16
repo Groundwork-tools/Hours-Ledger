@@ -428,6 +428,36 @@ changed the *real* behavior it's supposedly guarding, would this specific
 assertion actually flip? If you can't answer that confidently, it isn't
 testing what you think it's testing.
 
+**A structurally untestable path needs real-device verification before
+it counts as done, not after — and "the suite passed" is not evidence
+either way for that path specifically.** Hours Ledger's interactive
+OAuth flow (`getAccessToken`'s `interactive` branch, `withGisTimeout`,
+the focus fast path, `handleTokenSuccess`) is deliberately never
+reachable under `TEST_MODE` — the same discipline that keeps a test run
+from ever touching a real Google account (see this document's test-
+isolation section) also means the suite is structurally incapable of
+proving that path correct, by design, not by oversight. Real-device
+testing of that one flow (2026-08-15) went three rounds, and every
+round found something a passing suite had no way to catch: a stuck
+`driveSyncInFlight` flag when the picker was dismissed by closing it
+rather than denying; a technically-correct-but-25-seconds-of-silence
+fix that read as broken to an actual person; and a late-arriving
+success that cached its token correctly but left the button lying
+about it indefinitely. `selftest.html` stayed green (0 failing)
+through every one of those three bugs, because the parts it *can*
+reach (the guard-flag logic, the timing constants, the button-state
+transitions) were each individually fine — the bugs only existed in
+how those parts behaved against the one thing nothing in the harness
+can simulate: a real popup, opened and dismissed by a real person, on
+a real device. The lesson isn't "the suite is bad" — it caught
+everything it was built to catch, including regressions in the exact
+code these bugs lived in, immediately once each fix landed. The lesson
+is narrower and easy to lose: for this one code path specifically, a
+green suite answers "did I break anything the suite can see," not "is
+this actually correct" — treat any change that touches it as unverified
+until a real device says otherwise, regardless of how many tests pass
+around it.
+
 **Confirm the code under test is actually the code that's deployed — this
 one bit the same project twice, in two different sessions, in two
 different disguises.** First, 2026-08-10 (`ae4b2c0`'s commit message notes
