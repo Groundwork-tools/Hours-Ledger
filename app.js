@@ -611,8 +611,20 @@ var TEST_MODE_HANG_TOKEN=false;
    inside the Google page - means that callback can simply never come. See
    CLAUDE.md's guard-flag rule: this wraps cb so it is GUARANTEED to fire
    exactly once, regardless of whether the thing it's guarding ever finishes
-   on its own - the reset path can't depend on the async call completing. */
-var GIS_RECONNECT_TIMEOUT_MS=TEST_MODE?80:25000;
+   on its own - the reset path can't depend on the async call completing.
+
+   10s, not the first version's 25s: a too-short timeout is safe here in a
+   way it usually isn't, because a genuine-but-late success still gets
+   cached by the real GIS callback regardless of whether this timeout beat
+   it there (see the callback below) - so shortening this never loses a
+   real sign-in, it only risks the rare case of needing one extra tap if a
+   real flow is unusually slow. This is the GUARANTEED backstop; the focus
+   fast path below is what makes the common case fast, not this number. */
+var GIS_RECONNECT_TIMEOUT_MS=TEST_MODE?150:10000;
+/* how long to wait after the window regains focus before treating that as
+   a likely dismiss - long enough that a real callback arriving at nearly
+   the same moment still wins the race and is used instead. */
+var FOCUS_FASTPATH_GRACE_MS=TEST_MODE?20:500;
 /* guarantees cb(err,token) fires exactly once, whichever comes first: the
    real callback, or this timeout. Only decides WHETHER cb gets called -
    callers still do their own caching etc. before calling the returned
@@ -621,27 +633,76 @@ var GIS_RECONNECT_TIMEOUT_MS=TEST_MODE?80:25000;
    time - the next attempt just works instead of prompting again. */
 function withGisTimeout(cb){
   var settled=false;
-  console.log("[drive] withGisTimeout: armed, "+GIS_RECONNECT_TIMEOUT_MS+"ms");
+  console.log("[drive] withGisTimeout: armed, "+GIS_RECONNECT_TIMEOUT_MS+"ms backstop");
   var timeoutId=setTimeout(function(){
     if(settled){ console.log("[drive] withGisTimeout: timer fired but already settled - no-op"); return; }
     settled=true;
-    console.log("[drive] withGisTimeout: TIMEOUT FIRED - real callback never came, calling back with a dismissed error");
+    console.log("[drive] withGisTimeout: BACKSTOP TIMEOUT FIRED - real callback never came, calling back with a dismissed error");
     var e=new Error("Drive sign-in didn't complete - closed or timed out");
     e.dismissed=true;
     cb(e);
   },GIS_RECONNECT_TIMEOUT_MS);
   return function(err,token){
-    if(settled){ console.log("[drive] withGisTimeout: real callback arrived but timeout already settled it - discarding cb call (token, if any, was still cached by the caller)"); return; }
+    if(settled){ console.log("[drive] withGisTimeout: real callback arrived but this was already settled - discarding cb call (token, if any, was still cached by the caller)"); return; }
     settled=true;
     clearTimeout(timeoutId);
-    console.log("[drive] withGisTimeout: real callback arrived first, "+(err?"with an error: "+err.message:"with a token")+" - calling back now");
+    console.log("[drive] withGisTimeout: settled by "+(err?"an error: "+err.message:"a real token")+" - calling back now");
     cb(err,token);
   };
+}
+function markSigningIn(){
+  document.getElementById("connectDrive").disabled=true;
+  document.getElementById("connectDrive").textContent="Drive: signing in…";
+}
+/* wraps an already-armed settle (from withGisTimeout) with the focus-
+   regained fast path, and flips the button to "signing in" state.
+   Shared by both TEST_MODE's hang simulation and the real branch below
+   so a test genuinely exercises this exact code, not a re-implementation
+   of it (see SYNC-LESSONS.md's test-isolation notes) - the first version
+   of this had the fast path wired only into the real branch, so
+   selftest.html's synthetic focus event had nothing listening for it and
+   silently fell through to the backstop timeout instead, which would
+   have hidden a real bug in the fast path if there ever was one.
+
+   Fast path reasoning: the parent tab regaining focus normally means the
+   popup just closed, since a real OAuth popup steals focus while it's
+   open. This is a HINT, not the mechanism - the timeout inside
+   withGisTimeout() is the actual guarantee. Two known ways this signal
+   can mislead, both handled safely rather than avoided: (1) false
+   positive - alt-tabbing away and back while the picker is still
+   genuinely open looks identical to a close; harmless here because a
+   genuine-but-late success still gets cached regardless of which path
+   "gave up" first (see withGisTimeout's own doc comment), so a wrongly-
+   early resolution never loses real sign-in work, it just means the
+   button re-offers a tap that turns out to be unnecessary once the
+   still-open flow finishes on its own. (2) doesn't fire at all if GIS
+   ever uses FedCM instead of a real popup window in this browser - no
+   separate window, no focus signal, no fast path - which is exactly why
+   the timeout backstop has to stay regardless of how reliable this
+   feels in testing. Do not delete the timeout on the theory that this
+   makes it redundant. */
+function armFocusFastPath(rawSettle){
+  markSigningIn();
+  var focusHandler=null;
+  function clearFocusListener(){ if(focusHandler){ window.removeEventListener("focus",focusHandler); focusHandler=null; } }
+  function settle(err,token){ clearFocusListener(); rawSettle(err,token); }
+  focusHandler=function(){
+    clearFocusListener();
+    setTimeout(function(){
+      console.log("[drive] focus fast path: window regained focus - treating as a likely dismiss (no-op if something else already resolved this first)");
+      var e=new Error("Drive sign-in didn't complete - closed or timed out");
+      e.dismissed=true;
+      e.viaFocus=true; /* distinguishes "the fast path resolved this" from "the backstop timeout resolved this" - both look like an ordinary dismissed error otherwise, and selftest.html needs to tell them apart rather than infer it from timing, which virtual-time test runs can't measure reliably */
+      settle(e);
+    },FOCUS_FASTPATH_GRACE_MS);
+  };
+  window.addEventListener("focus",focusHandler);
+  return settle;
 }
 function getAccessToken(cb,interactive){
   console.log("[drive] getAccessToken called: interactive="+interactive+" TEST_MODE="+TEST_MODE);
   if(TEST_MODE){
-    if(interactive&&TEST_MODE_HANG_TOKEN){ withGisTimeout(cb); return; } /* never resolves on its own - only the timeout above ever calls back, exercising the same safety net the real branch below relies on */
+    if(interactive&&TEST_MODE_HANG_TOKEN){ armFocusFastPath(withGisTimeout(cb)); return; } /* never resolves on its own - only the timeout (or a synthetic focus event, in tests) ever calls back */
     cb(null,"fake-token-"+getDeviceId());
     return;
   }
@@ -656,11 +717,10 @@ function getAccessToken(cb,interactive){
     return;
   }
   console.log("[drive] getAccessToken: interactive, no cached token - proceeding to loadGisScript/requestAccessToken");
-  var settle=withGisTimeout(cb);
+  var settle=armFocusFastPath(withGisTimeout(cb));
   loadGisScript(function(err){
     if(err){ console.log("[drive] getAccessToken: loadGisScript failed: "+err.message); settle(err); return; }
     try{
-      console.log("[drive] getAccessToken: calling client.requestAccessToken() now - the picker should appear");
       var client=google.accounts.oauth2.initTokenClient({
         client_id:GOOGLE_CLIENT_ID,
         scope:DRIVE_SCOPE,
@@ -671,6 +731,7 @@ function getAccessToken(cb,interactive){
           settle(null,resp.access_token);
         }
       });
+      console.log("[drive] getAccessToken: calling client.requestAccessToken() now - the picker should appear");
       client.requestAccessToken();
     }catch(e){ console.log("[drive] getAccessToken: requestAccessToken() threw synchronously: "+e.message); settle(e); }
   });
@@ -840,7 +901,7 @@ var driveSyncTimer=null,driveSyncInFlight=false,driveSyncApplyingRemote=false;
    token is actually obtained (auto or manual), so a *later*, separate
    expiry can still resolve itself smoothly instead of requiring the button
    forever after the first time it was ever dismissed. */
-var driveNeedsReconnect=false, driveReconnectAttemptedThisSession=false;
+var driveNeedsReconnect=false, driveReconnectAttemptedThisSession=false, lastDriveSyncErr=null;
 
 function connectDrive(){
   console.log("[drive] connectDrive() click handler ran. driveConnected="+state.driveConnected+" driveSyncInFlight="+driveSyncInFlight+" driveNeedsReconnect="+driveNeedsReconnect);
@@ -883,6 +944,7 @@ function connectDrive(){
 }
 function driveConnectFailed(e){
   document.getElementById("connectDrive").disabled=false;
+  document.getElementById("connectDrive").textContent="Connect Drive"; /* markSigningIn() may have left "Drive: signing in…" behind - revert to the real pre-attempt default so a retry click looks right */
   setStatus("Couldn't connect to Drive",true);
   showToast("Couldn't connect to Google Drive: "+e.message,false);
 }
@@ -909,7 +971,8 @@ function runDriveSync(manual){
      below), false for the automatic page-load/post-edit debounce, which
      must never be allowed to open the account picker on its own. */
   getAccessToken(function(err,token){
-    console.log("[drive] runDriveSync: getAccessToken callback fired. err="+(err?err.message+" (needsReconnect="+!!err.needsReconnect+", dismissed="+!!err.dismissed+")":"none"));
+    console.log("[drive] runDriveSync: getAccessToken callback fired. err="+(err?err.message+" (needsReconnect="+!!err.needsReconnect+", dismissed="+!!err.dismissed+", viaFocus="+!!err.viaFocus+")":"none"));
+    lastDriveSyncErr=err||null; /* exposed via __HL_TEST__ for tests that need to confirm WHICH mechanism resolved an attempt (focus fast path vs. backstop timeout), not just that something did */
     if(err){
       driveSyncInFlight=false;
       driveNeedsReconnect=true;
@@ -919,6 +982,7 @@ function runDriveSync(manual){
          manual===false) never even tried, so it shouldn't block the next
          real tap from trying */
       if(manual) driveReconnectAttemptedThisSession=true;
+      document.getElementById("connectDrive").disabled=false; /* markSigningIn() may have disabled it - always reset here regardless of whether this particular attempt was interactive */
       document.getElementById("connectDrive").textContent="Drive: tap to resume syncing";
       setStatus(err.needsReconnect?"Drive: tap anywhere in the app to resume syncing":"Drive sync needs reconnecting",true);
       return;
@@ -933,7 +997,13 @@ function runDriveSync(manual){
     }).then(function(res){
       var syncResult;
       try{ syncResult=syncEngine(state,res.remoteData,getDeviceId()); }
-      catch(e){ driveSyncInFlight=false; setStatus("Drive sync failed, will retry",true); return; }
+      catch(e){
+        driveSyncInFlight=false;
+        document.getElementById("connectDrive").disabled=false;
+        document.getElementById("connectDrive").textContent="Drive: sync failed";
+        setStatus("Drive sync failed, will retry",true);
+        return;
+      }
       state=syncResult.newLocalState;
       state.driveConnected=true;
       driveSyncApplyingRemote=true;
@@ -942,10 +1012,13 @@ function runDriveSync(manual){
       return driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts}).then(function(){
         driveSyncInFlight=false;
         setStatus("Synced with Drive");
+        document.getElementById("connectDrive").disabled=false;
         document.getElementById("connectDrive").textContent="Drive: synced";
       });
     }).catch(function(){
       driveSyncInFlight=false;
+      document.getElementById("connectDrive").disabled=false;
+      document.getElementById("connectDrive").textContent="Drive: sync failed";
       setStatus("Drive sync failed, will retry",true);
     });
   },manual);
@@ -2395,6 +2468,7 @@ if(TEST_MODE){
     getDriveNeedsReconnect:function(){ return driveNeedsReconnect; },
     setDriveReconnectAttempted:function(v){ driveReconnectAttemptedThisSession=v; },
     setTestHangToken:function(v){ TEST_MODE_HANG_TOKEN=v; },
+    getLastDriveSyncErr:function(){ return lastDriveSyncErr?{message:lastDriveSyncErr.message,needsReconnect:!!lastDriveSyncErr.needsReconnect,dismissed:!!lastDriveSyncErr.dismissed,viaFocus:!!lastDriveSyncErr.viaFocus}:null; },
     getDriveReconnectAttempted:function(){ return driveReconnectAttemptedThisSession; },
     clearLocalStateForTest:function(){
       try{ localStorage.removeItem(KEY); }catch(e){}

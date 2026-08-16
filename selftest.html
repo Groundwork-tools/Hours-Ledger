@@ -1598,16 +1598,76 @@ function runAsyncTests(H,d){
         })
         .then(function(armed){
           assert("driveSyncInFlight fix, setup: the simulated hang actually armed (flight flag went true)",armed);
+          /* while a real sign-in attempt is in flight, the button must say
+             so and refuse taps, rather than silently doing nothing if
+             tapped - the button lying about its own state (looking
+             tappable while actually blocked) is what made this look
+             broken on a real device, twice, even after the underlying
+             stuck-flag bug was genuinely fixed */
+          assert("connectDrive is disabled while a sign-in attempt is in flight",
+            dd.getElementById("connectDrive").disabled===true);
+          assert("connectDrive reads 'Drive: signing in…' while a sign-in attempt is in flight",
+            dd.getElementById("connectDrive").textContent==="Drive: signing in…");
           return waitFor(function(){ return h.isDriveSyncInFlight()===false; },3000);
         })
         .then(function(recovered){
-          assert("driveSyncInFlight resets on its own even when the interactive callback never fires - it cannot get stuck forever",recovered);
+          assert("driveSyncInFlight resets on its own even when the interactive callback never fires (via the backstop timeout) - it cannot get stuck forever",recovered);
+          assert("connectDrive is re-enabled once the backstop timeout resolves it",
+            dd.getElementById("connectDrive").disabled===false);
           h.setTestHangToken(false);
           dd.getElementById("connectDrive").click();
           return waitFor(function(){ return dd.getElementById("connectDrive").textContent==="Drive: synced"; },4000);
         })
         .then(function(recoveredClick){
           assert("the connectDrive button itself is usable again after the stuck flag clears - not permanently dead until a reload",recoveredClick);
+        });
+    })
+    .then(function(){
+      /* ---- the focus-regained fast path: resolves an in-flight sign-in
+         attempt much sooner than the backstop timeout once the window
+         regains focus (a real popup closing normally does this). This
+         only tests that the LISTENER and grace-period logic fire
+         correctly via a synthetic focus event - it can't prove a real
+         popup closing actually triggers a real focus event in a live
+         browser, which is exactly the part CLAUDE.md's reasoning for
+         keeping the backstop timeout is about; that half needs a real
+         device, deliberately, alt-tabbing away and back. Fresh sandbox,
+         same reason as the block above. */
+      return freshSandbox();
+    })
+    .then(function(fresh){
+      var h=fresh.H,dd=fresh.d,win=fresh.el.contentWindow;
+      h.fakeDriveReset(); h.clearLocalStateForTest();
+      dd.getElementById("connectDrive").click();
+      return waitFor(function(){ return dd.getElementById("connectDrive").textContent==="Drive: synced"; },4000)
+        .then(function(ok){
+          assert("focus fast path, setup: baseline device connects normally",ok);
+          return waitFor(function(){ return h.isDriveSyncInFlight()===false; },2000);
+        })
+        .then(function(clear){
+          assert("focus fast path, setup: no unrelated sync still in flight before arming",clear);
+          h.setTestHangToken(true);
+          h.runDriveSync(true);
+          return waitFor(function(){ return h.isDriveSyncInFlight()===true; },1000);
+        })
+        .then(function(armed){
+          assert("focus fast path, setup: the simulated hang armed",armed);
+          win.dispatchEvent(new Event("focus"));
+          return waitFor(function(){ return h.isDriveSyncInFlight()===false; },2000);
+        })
+        .then(function(recovered){
+          assert("a synthetic focus event resolves the in-flight attempt",recovered);
+          /* checking WHICH mechanism resolved it, not just that something
+             did, and not by measuring elapsed time - virtual-time headless
+             runs can't measure wall-clock timing reliably (this is exactly
+             what produced the first, spuriously-failing version of this
+             test). err.viaFocus is only ever set by the focus handler
+             itself, never by the backstop timeout, so this proves the
+             fast path's own code actually ran rather than the test
+             coincidentally passing because the backstop fired around the
+             same moment. */
+          assert("the focus fast path - not the backstop timeout - is what actually resolved it",
+            h.getLastDriveSyncErr()&&h.getLastDriveSyncErr().viaFocus===true);
         });
     })
     .then(function(){

@@ -80,6 +80,36 @@ Teaching matters here as much as shipping.
    found: exactly these two existed, both now safe. Check this rule
    before adding any new one.
 
+   **A fast path is not a substitute for the guaranteed reset, even a
+   good one.** `withGisTimeout`'s 25s original backstop made the flag
+   technically unstuck, but a real person watching a dead-looking button
+   for 25 silent seconds reasonably concludes it's broken — which is
+   exactly what happened, twice, on a real device, even after the stuck-
+   flag bug itself was genuinely fixed. The fix for *that* isn't a
+   shorter number alone: `getAccessToken`'s `armFocusFastPath` listens
+   for the parent tab regaining focus (a real OAuth popup closing
+   normally hands focus back) and resolves in under a second in the
+   common case — but this is a **hint, not the mechanism**. It has two
+   known ways to mislead: a false positive (alt-tabbing away and back
+   while the picker is still genuinely open looks identical to a close)
+   and a total miss (no separate popup window, hence no focus signal at
+   all, if this browser ever routes GIS through FedCM instead). Both are
+   harmless *specifically because* the timeout backstop's own
+   "genuine-but-late success still gets cached" behavior means an
+   over-eager fast-path resolution never loses real sign-in work — it
+   just means the button re-offers a tap that turns out to be
+   unnecessary once the still-open flow finishes on its own a moment
+   later. **Do not remove the backstop timeout on the theory that the
+   focus fast path already handles this** — the fast path's own
+   reliability depends on the backstop catching every case it misses,
+   not the other way around. If the backstop is ever removed, the FedCM
+   case (no popup, no focus signal) reintroduces the original stuck-
+   forever bug from a different angle. The button also now visibly
+   reflects the in-flight state itself (`disabled`, "Drive: signing
+   in…") rather than looking tappable while silently doing nothing if
+   pressed — the same "state lied about itself" shape as `driveConnected`
+   /`driveNeedsReconnect` above, just for a shorter-lived state.
+
 ## Testing before you claim it works
 
 `selftest.html` runs the app's real logic in isolation (see "How the code is
@@ -581,8 +611,45 @@ dashboard styling.
       a "Cancel" or "Deny" link if Google's own screen offers one, since
       that path *does* fire the callback (with `access_denied`) and
       doesn't reproduce this. Pre-fix, the button goes permanently dead.
-      Post-fix, it recovers on its own within `GIS_RECONNECT_TIMEOUT_MS`
-      (25 seconds) even with no further action.
+      **Confirmed working by Sebastian on a real device**, but the 25s
+      wait itself was reported as broken, twice — silence for 25 seconds
+      after a tap is indistinguishable from dead, so the fix wasn't
+      "correct" until it was also fast and honest about its own state.
+      Landed together, not separately (see hard rule 9's own addendum
+      for the full reasoning): the backstop dropped to 10s (safe to
+      shorten because a genuine-but-late success still gets cached
+      regardless of the timeout — see `withGisTimeout`'s doc comment);
+      `armFocusFastPath` resolves the common explicit-dismiss case in
+      under a second via the parent tab regaining focus, as a hint
+      layered in front of the backstop, not a replacement for it; and
+      the button itself now shows `disabled`, "Drive: signing in…" for
+      the duration of a live attempt, so a tap during that window simply
+      can't happen rather than silently doing nothing — no toast needed,
+      since a real `disabled` button never dispatches `click` at all.
+      **What's automated vs. what needs a real device**: the guard-flag
+      fix, the shortened backstop, the button's disabled/text state
+      during an attempt, and the focus listener's own wiring (via a
+      synthetic `focus` event dispatched at the real registered
+      listener, distinguished from the backstop by a `viaFocus` flag on
+      the resulting error rather than by timing, since headless virtual-
+      time runs can't measure wall-clock elapsed time reliably) are all
+      covered by `selftest.html`. What can't be: whether a *real* popup
+      closing in a *real* browser actually fires a real `focus` event
+      reliably enough to matter, which only a real device can confirm.
+      Manual check: reach "Drive: signing in…" (expire the cached token,
+      trigger a reconnect attempt), close the picker with the window's
+      own X, and confirm the button flips to "Drive: tap to resume
+      syncing" in well under a second rather than the old 10s wait.
+      Deliberate false-positive check for the backstop specifically:
+      reach "Drive: signing in…" again, but this time **don't close the
+      picker** — alt-tab/Cmd-tab away to a different application entirely
+      and back. The fast path should fire from the refocus alone (the
+      button flips to "tap to resume" almost immediately) even though
+      the real picker is still genuinely open in the background; then
+      actually complete the sign-in in that still-open picker and confirm
+      it still works — the token gets cached silently, and the next tap
+      (or the automatic background sync) picks it up cleanly, proving the
+      early, technically-wrong resolution never actually lost anything.
     - **(5) Drag-selecting text in the entry sheet closed the sheet —
       fixed.** `scrim`'s `click` listener checked `ev.target===scrim`, but
       a `click` event's target resolves to the nearest common ancestor of
