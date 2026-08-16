@@ -110,6 +110,23 @@ Teaching matters here as much as shipping.
    pressed — the same "state lied about itself" shape as `driveConnected`
    /`driveNeedsReconnect` above, just for a shorter-lived state.
 
+   **One more instance of the identical shape, found by real-device
+   testing of the fast path itself**: a genuine sign-in completing
+   *after* the fast path or backstop had already given up left the
+   button reading "Drive: tap to resume syncing" — false — for an
+   indefinite window, until an unrelated future tap or a reload
+   happened to notice the token `withGisTimeout` had already cached.
+   Caching alone isn't the same promise as the UI being honest about
+   what just happened. `handleTokenSuccess` closes this: `settle()`'s
+   return value distinguishes "this call actually won" from "this
+   arrived after something else already resolved it," and on a late
+   arrival — with no `cb` left to call, the original caller already
+   moved on — it runs `runDriveSync(false)` directly so the button
+   catches up immediately instead of waiting for whatever happens to
+   trigger the next sync. Every new async resolution path added to this
+   flow needs this same question asked of it: not just "does the data
+   end up correct" but "does anything visible ever go stale in between."
+
 ## Testing before you claim it works
 
 `selftest.html` runs the app's real logic in isolation (see "How the code is
@@ -646,10 +663,21 @@ dashboard styling.
       and back. The fast path should fire from the refocus alone (the
       button flips to "tap to resume" almost immediately) even though
       the real picker is still genuinely open in the background; then
-      actually complete the sign-in in that still-open picker and confirm
-      it still works — the token gets cached silently, and the next tap
-      (or the automatic background sync) picks it up cleanly, proving the
-      early, technically-wrong resolution never actually lost anything.
+      actually complete the sign-in in that still-open picker.
+      **Confirmed by Sebastian, twice, real device**: no data was lost —
+      the token really was cached — but the button stayed on "tap to
+      resume syncing" indefinitely afterward, only updating once he
+      tapped again or reloaded. `handleTokenSuccess` (added 2026-08-15)
+      closes this: a late-arriving real success now runs
+      `runDriveSync(false)` itself when nothing else is left to call it
+      forward, so the button catches up to "Drive: synced" on its own
+      within moments of the sign-in actually completing, not on the next
+      unrelated trigger. Automated this time (`selftest.html`'s
+      `setTestLateSuccessMs`, exercising the real `handleTokenSuccess`),
+      fail-first confirmed (2/231 failing with the catch-up call
+      disabled, 0/231 with it restored) — the false-positive repro above
+      still needs a real device to confirm the button visibly catches up
+      in practice, not just that the test suite is satisfied.
     - **(5) Drag-selecting text in the entry sheet closed the sheet —
       fixed.** `scrim`'s `click` listener checked `ev.target===scrim`, but
       a `click` event's target resolves to the nearest common ancestor of

@@ -1671,6 +1671,46 @@ function runAsyncTests(H,d){
         });
     })
     .then(function(){
+      /* ---- real-device testing found: a genuine sign-in completed AFTER
+         the fast path or backstop had already given up and shown "tap to
+         resume syncing" left the button stuck on that false text
+         indefinitely - the token was cached (nothing lost), but nothing
+         updated the UI to match, until an unrelated future tap or a
+         reload happened to notice. handleTokenSuccess's catch-up sync is
+         the fix; this proves it end to end using the real function, not
+         a re-implementation - setTestLateSuccessMs schedules a simulated
+         "real GIS callback" to arrive after the backstop has already
+         resolved this attempt as dismissed. */
+      return freshSandbox();
+    })
+    .then(function(fresh){
+      var h=fresh.H,dd=fresh.d;
+      h.fakeDriveReset(); h.clearLocalStateForTest();
+      dd.getElementById("connectDrive").click();
+      return waitFor(function(){ return dd.getElementById("connectDrive").textContent==="Drive: synced"; },4000)
+        .then(function(ok){
+          assert("late-success catch-up, setup: baseline device connects normally",ok);
+          return waitFor(function(){ return h.isDriveSyncInFlight()===false; },2000);
+        })
+        .then(function(clear){
+          assert("late-success catch-up, setup: no unrelated sync still in flight before arming",clear);
+          h.setTestHangToken(true);
+          h.setTestLateSuccessMs(250); /* after the 150ms TEST_MODE backstop has already given up */
+          h.runDriveSync(true);
+          return waitFor(function(){ return dd.getElementById("connectDrive").textContent==="Drive: tap to resume syncing"; },1000);
+        })
+        .then(function(gaveUp){
+          assert("late-success catch-up, setup: the backstop resolved this as dismissed first, same as the real report",gaveUp);
+          h.setTestLateSuccessMs(null);
+          return waitFor(function(){ return dd.getElementById("connectDrive").textContent==="Drive: synced"; },2000);
+        })
+        .then(function(caughtUp){
+          assert("the button updates to 'Drive: synced' on its own once the late token arrives, with no further tap",caughtUp);
+          assert("driveNeedsReconnect clears too, not just the button text",
+            h.getDriveNeedsReconnect()===false);
+        });
+    })
+    .then(function(){
       /* ---- BUG 1 repro: two devices that have never synced before share
          the same 8 real default categories in name only - DEFAULTS calls
          uid() fresh on every load, so each device invents its own random

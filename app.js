@@ -603,7 +603,7 @@ function loadGisScript(cb){
    close. A non-interactive caller with no valid cached token gets back an
    error flagged needsReconnect instead of ever reaching
    requestAccessToken(). */
-var TEST_MODE_HANG_TOKEN=false;
+var TEST_MODE_HANG_TOKEN=false, TEST_MODE_LATE_SUCCESS_MS=null;
 /* GIS has no dedicated "the user closed the picker" signal - requestAccessToken's
    own callback only fires on an actual completion (a token, or an explicit
    access_denied from clicking something inside Google's own flow). Closing
@@ -630,7 +630,17 @@ var FOCUS_FASTPATH_GRACE_MS=TEST_MODE?20:500;
    callers still do their own caching etc. before calling the returned
    function, so a genuine-but-late success (arriving after the timeout
    already gave up) still gets cached even though cb won't fire a second
-   time - the next attempt just works instead of prompting again. */
+   time - the next attempt just works instead of prompting again.
+
+   The returned function reports back whether THIS call was the one that
+   actually won (true) or was discarded as a late/duplicate arrival
+   (false) - callers that only cache on a late success and stop there
+   leave the rest of the app's state (the button, driveNeedsReconnect,
+   whether a sync actually ran) frozen at whatever it was when the early
+   resolution fired, silently wrong until some unrelated future trigger
+   happens to notice the cached token. See handleTokenSuccess below,
+   which uses this to close that gap - caching alone isn't the same
+   promise as the UI being honest about what just happened. */
 function withGisTimeout(cb){
   var settled=false;
   console.log("[drive] withGisTimeout: armed, "+GIS_RECONNECT_TIMEOUT_MS+"ms backstop");
@@ -643,11 +653,12 @@ function withGisTimeout(cb){
     cb(e);
   },GIS_RECONNECT_TIMEOUT_MS);
   return function(err,token){
-    if(settled){ console.log("[drive] withGisTimeout: real callback arrived but this was already settled - discarding cb call (token, if any, was still cached by the caller)"); return; }
+    if(settled){ console.log("[drive] withGisTimeout: real callback arrived but this was already settled - discarding cb call (token, if any, was still cached by the caller)"); return false; }
     settled=true;
     clearTimeout(timeoutId);
     console.log("[drive] withGisTimeout: settled by "+(err?"an error: "+err.message:"a real token")+" - calling back now");
     cb(err,token);
+    return true;
   };
 }
 function markSigningIn(){
@@ -685,7 +696,7 @@ function armFocusFastPath(rawSettle){
   markSigningIn();
   var focusHandler=null;
   function clearFocusListener(){ if(focusHandler){ window.removeEventListener("focus",focusHandler); focusHandler=null; } }
-  function settle(err,token){ clearFocusListener(); rawSettle(err,token); }
+  function settle(err,token){ clearFocusListener(); return rawSettle(err,token); }
   focusHandler=function(){
     clearFocusListener();
     setTimeout(function(){
@@ -699,10 +710,45 @@ function armFocusFastPath(rawSettle){
   window.addEventListener("focus",focusHandler);
   return settle;
 }
+/* handles an arriving real token, whether it's the attempt's actual
+   resolution or a genuine success that shows up after the fast path or
+   backstop already gave up on it. Real-device testing found: caching the
+   late token alone (the previous version of this) left the button
+   reading "Drive: tap to resume syncing" - false - for an indefinite
+   window after the user had actually finished signing in, until some
+   unrelated future tap or a reload happened to notice the cached token.
+   Same shape as the bug this whole flow exists to fix, just narrower:
+   the app's own state lying about itself. settle()'s return value (true
+   only for whichever call actually won) is what tells the two cases
+   apart; on a late arrival, there's no cb left to call (the caller
+   already moved on), so the only way to make the button honest again is
+   to actually run a sync - runDriveSync(false) rather than
+   scheduleDriveSync(), so it happens immediately instead of behind
+   another debounce on top of however late this already was. Safe to
+   call directly: driveSyncInFlight was already reset to false when the
+   early resolution ran its own err branch. */
+function handleTokenSuccess(settle,token,expiresInSec){
+  cacheToken(token,expiresInSec);
+  var wasFirst=settle(null,token);
+  if(!wasFirst){
+    console.log("[drive] handleTokenSuccess: a real token arrived after this attempt was already resolved (fast path or backstop) - cached, but the button was left showing the old state. Running a catch-up sync now instead of waiting for an unrelated future trigger to notice.");
+    runDriveSync(false);
+  }
+}
 function getAccessToken(cb,interactive){
   console.log("[drive] getAccessToken called: interactive="+interactive+" TEST_MODE="+TEST_MODE);
   if(TEST_MODE){
-    if(interactive&&TEST_MODE_HANG_TOKEN){ armFocusFastPath(withGisTimeout(cb)); return; } /* never resolves on its own - only the timeout (or a synthetic focus event, in tests) ever calls back */
+    if(interactive&&TEST_MODE_HANG_TOKEN){
+      var settle0=armFocusFastPath(withGisTimeout(cb));
+      /* simulates a real GIS callback that eventually arrives on its own,
+         after the fast path or backstop has already resolved this attempt
+         one way - exercises handleTokenSuccess's own late-arrival catch-up
+         path with the real function, not a re-implementation of it */
+      if(TEST_MODE_LATE_SUCCESS_MS!=null){
+        setTimeout(function(){ handleTokenSuccess(settle0,"fake-late-token-"+getDeviceId(),3600); },TEST_MODE_LATE_SUCCESS_MS);
+      }
+      return; /* otherwise never resolves on its own - only the timeout (or a synthetic focus event, in tests) ever calls back */
+    }
     cb(null,"fake-token-"+getDeviceId());
     return;
   }
@@ -727,8 +773,7 @@ function getAccessToken(cb,interactive){
         callback:function(resp){
           if(resp.error){ console.log("[drive] getAccessToken: GIS callback fired with an error: "+resp.error); settle(new Error(resp.error)); return; }
           console.log("[drive] getAccessToken: GIS callback fired with a real token");
-          cacheToken(resp.access_token,resp.expires_in);
-          settle(null,resp.access_token);
+          handleTokenSuccess(settle,resp.access_token,resp.expires_in);
         }
       });
       console.log("[drive] getAccessToken: calling client.requestAccessToken() now - the picker should appear");
@@ -2468,6 +2513,7 @@ if(TEST_MODE){
     getDriveNeedsReconnect:function(){ return driveNeedsReconnect; },
     setDriveReconnectAttempted:function(v){ driveReconnectAttemptedThisSession=v; },
     setTestHangToken:function(v){ TEST_MODE_HANG_TOKEN=v; },
+    setTestLateSuccessMs:function(v){ TEST_MODE_LATE_SUCCESS_MS=v; },
     getLastDriveSyncErr:function(){ return lastDriveSyncErr?{message:lastDriveSyncErr.message,needsReconnect:!!lastDriveSyncErr.needsReconnect,dismissed:!!lastDriveSyncErr.dismissed,viaFocus:!!lastDriveSyncErr.viaFocus}:null; },
     getDriveReconnectAttempted:function(){ return driveReconnectAttemptedThisSession; },
     clearLocalStateForTest:function(){
