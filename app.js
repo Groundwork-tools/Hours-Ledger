@@ -1654,12 +1654,64 @@ fLabel.addEventListener("input",function(){ labelTouched=true; });
    direction (too slow after a dropdown pick, still too fast for a slow
    typist). See CLAUDE.md's backlog item 16.6 for the decision this
    codifies, including why a "smarter" per-path check was ruled out
-   rather than just not attempted. */
+   rather than just not attempted.
+
+   Fast path added on top, 2026-08-16: the 500ms wait after every edit
+   was correct but felt slow for the ordinary two-digit case, where
+   there's actually no ambiguity left once the second digit lands - a
+   2-digit segment has no third digit coming. There's no direct API for
+   "how many digits have been typed" (no selectionStart/segment index
+   for a time input), but there's an indirect signal that works: compare
+   each "input" event's value against the value from THIS field's own
+   previous "input" event, and see which half (hour or minute) changed.
+   If the SAME half changes on two consecutive edits, that can only mean
+   its second digit just landed (typing a digit into a segment that's
+   already reporting a complete-looking value, per the debounce fix
+   above, changes THAT segment again, not some other one) - close
+   immediately, no need to wait. Anything else (the first edit since
+   focus, a different half changing, or both halves changing at once,
+   e.g. a fresh value written by anything other than typing) is still
+   genuinely ambiguous and falls through to the debounce exactly as
+   before. Known, accepted gap: if a keystroke doesn't actually change
+   .value (e.g. minutes already reads 00 and the first digit typed is
+   also 0), no "input" event fires for it at all, so it can't count
+   toward "two edits to the same half" - that specific case still takes
+   the full debounce, same as before this fast path existed, not a
+   regression.
+
+   The debounce is still the BACKSTOP for every ambiguous case, not
+   superseded by the fast path - same reasoning as the OAuth reconnect
+   flow's focus-fast-path/timeout-backstop split (see CLAUDE.md's hard
+   rule 9 addendum): do not delete TIME_INPUT_BLUR_DEBOUNCE_MS on the
+   theory that the fast path now handles everything. It doesn't - single-
+   digit entries and dropdown picks still depend on it entirely. */
 var TIME_INPUT_BLUR_DEBOUNCE_MS=TEST_MODE?100:500; /* shortened under TEST_MODE, same pattern as DRIVE_SYNC_DEBOUNCE_MS/GIS_RECONNECT_TIMEOUT_MS - a real 500ms would make every test wait for no reason. 100ms (not shorter) leaves comfortable margins for selftest.html's own reschedule-timing assertions */
+/* returns "hour", "minute", or null (both changed at once, or neither -
+   not a normal single-digit edit) for which half differs between two
+   "HH:MM" strings. null is deliberately treated as ambiguous by the
+   caller, not as a third distinct case to fast-path on. */
+function changedTimeSegment(oldVal,newVal){
+  var o=(oldVal||"").split(":"),n=(newVal||"").split(":");
+  if(o[0]!==n[0]&&o[1]===n[1]) return "hour";
+  if(o[1]!==n[1]&&o[0]===n[0]) return "minute";
+  return null;
+}
+scrim.addEventListener("focus",function(ev){
+  if(!(ev.target.matches&&ev.target.matches('input[type="time"]'))) return;
+  /* starts a fresh edit session so a same-segment match can't carry over
+     from a much earlier edit across a blur-then-refocus gap */
+  ev.target._lastChangedSegment=null;
+  ev.target._lastTimeValue=ev.target.value;
+},true);
 scrim.addEventListener("input",function(ev){
   if(!(ev.target.matches&&ev.target.matches('input[type="time"]'))) return;
   clearTimeout(ev.target._blurTimer);
   if(!ev.target.value) return;
+  var segment=changedTimeSegment(ev.target._lastTimeValue,ev.target.value);
+  var closeNow=segment&&segment===ev.target._lastChangedSegment;
+  ev.target._lastChangedSegment=segment;
+  ev.target._lastTimeValue=ev.target.value;
+  if(closeNow){ ev.target.blur(); return; }
   ev.target._blurTimer=setTimeout(function(){ ev.target.blur(); },TIME_INPUT_BLUR_DEBOUNCE_MS);
 });
 

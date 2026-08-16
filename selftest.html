@@ -1414,19 +1414,21 @@ function runAsyncTests(H,d){
      environment can't provide. */
   var fStart=d.getElementById("fStart"), blurCalls=0, origBlur=fStart.blur;
   fStart.blur=function(){ blurCalls++; };
-
-  return new Promise(function(resolve){
+  function openFreshTimeField(){
     d.getElementById("addBtn").click();
     fStart.value="13:00";
-    resolve();
-  })
+    fStart.dispatchEvent(new Event("focus",{bubbles:true})); /* starts a fresh edit session, same as a real focus would - resets _lastChangedSegment */
+    blurCalls=0;
+  }
+
+  return new Promise(function(resolve){ openFreshTimeField(); resolve(); })
     .then(function(){
       /* simulates the value after ONE keystroke that the browser already
          treats as complete-looking - exactly what the real report
          described (typing "1" into minutes committing to "13:01" before
-         a second digit arrives, on an ordinary typing cadence). The
-         debounce constant is TEST_MODE-scaled (see app.js); margins
-         below are chosen relative to it, not hardcoded milliseconds. */
+         a second digit arrives, on an ordinary typing cadence). Still
+         ambiguous on its own - first edit this session - so it must
+         still wait for the debounce, not close immediately. */
       fStart.value="13:01";
       fStart.dispatchEvent(new Event("input",{bubbles:true}));
       return delay(20);
@@ -1434,25 +1436,55 @@ function runAsyncTests(H,d){
     .then(function(){
       assert("a single-keystroke-shaped time value doesn't call blur() immediately - regression for stealing focus mid-type",
         blurCalls===0);
-      /* the second digit, arriving well inside the debounce window, must
-         cancel and reschedule rather than let the first digit's own
-         timer fire on schedule */
-      fStart.value="13:10";
-      fStart.dispatchEvent(new Event("input",{bubbles:true}));
-      return delay(90);
+      return waitFor(function(){ return blurCalls>0; },2000);
+    })
+    .then(function(calledEventually){
+      assert("a single, unfollowed edit still closes via the debounce backstop - covers a completed dropdown pick and a genuinely single-digit entry, same mechanism as before the fast path existed",
+        calledEventually);
     })
     .then(function(){
-      /* this check lands at 20+90=110ms absolute - after the FIRST
-         digit's own timer would have fired (100ms, TEST_MODE's debounce)
-         but before the SECOND digit's rescheduled one (20+100=120ms) -
-         zero calls here specifically proves the reschedule happened, not
-         just that blur is generally slow */
-      assert("a second digit arriving within the debounce window resets it, rather than the first digit's timer firing anyway",
+      /* ---- the fast path: two consecutive edits to the SAME half
+         (minute, here) can only mean its second digit just landed - no
+         third digit is coming for a 2-digit segment - so this should
+         close immediately, not wait out the debounce at all. */
+      openFreshTimeField();
+      fStart.value="13:01";
+      fStart.dispatchEvent(new Event("input",{bubbles:true}));
+      return delay(15); // well inside the debounce window - this edit alone must not have closed it yet
+    })
+    .then(function(){
+      assert("fast path, setup: the first digit alone hasn't closed the field yet",blurCalls===0);
+      fStart.value="13:10"; // minute changes again - same half as the previous edit
+      fStart.dispatchEvent(new Event("input",{bubbles:true}));
+      return delay(15); // deliberately shorter than the debounce (100ms under TEST_MODE) - only the fast path could close it this quickly
+    })
+    .then(function(){
+      assert("a second digit completing the same segment closes immediately, well before the debounce would have fired on its own",
+        blurCalls===1);
+    })
+    .then(function(){
+      /* ---- editing a DIFFERENT half right after the first must NOT
+         fast-close - that's still someone actively moving through the
+         field (e.g. tabbing from hours into minutes), not a segment
+         getting its second digit. Falls through to the ordinary
+         debounce, same as any other ambiguous edit. */
+      openFreshTimeField();
+      fStart.value="09:00"; // hour changes
+      fStart.dispatchEvent(new Event("input",{bubbles:true}));
+      return delay(15);
+    })
+    .then(function(){
+      fStart.value="09:45"; // minute changes THIS time - different half than the previous edit
+      fStart.dispatchEvent(new Event("input",{bubbles:true}));
+      return delay(15);
+    })
+    .then(function(){
+      assert("editing a different segment right after the first doesn't fast-close - only a repeated edit to the SAME segment does",
         blurCalls===0);
       return waitFor(function(){ return blurCalls>0; },2000);
     })
     .then(function(calledEventually){
-      assert("blur() still gets called on its own once editing genuinely stops - covers a completed dropdown pick, same mechanism",
+      assert("...but it still closes via the debounce backstop once editing genuinely stops, same as any other ambiguous case",
         calledEventually);
       fStart.blur=origBlur;
       d.getElementById("fCancel").click();

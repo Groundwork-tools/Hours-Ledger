@@ -756,6 +756,47 @@ dashboard styling.
       fix assumes on a real device — synthetic events can't drive that,
       only trusted OS-level input can, which needs a human typing at a
       real keyboard.
+
+      **Fast path added on top (2026-08-16), after Sebastian confirmed
+      the debounce worked but felt slow for ordinary two-digit entry.**
+      No direct API exists for "how many digits have been typed" (no
+      `selectionStart`/segment index for a time input), but there's an
+      indirect signal that works: `changedTimeSegment()` compares each
+      `input` event's value against that field's own previous value and
+      reports which half — hour or minute — actually changed. If the
+      *same* half changes on two consecutive edits, that can only mean
+      its second digit just landed (a 2-digit segment has no third digit
+      coming) — close immediately, no need to wait. Anything else (first
+      edit since focus, a different half changing, or both changing at
+      once) stays genuinely ambiguous and falls through to the debounce
+      exactly as before. Known, accepted gap: a keystroke that doesn't
+      actually change `.value` (e.g. minutes already reads `00` and the
+      first digit typed is also `0`) fires no `input` event, so it can't
+      count toward "two edits to the same half" — that case still takes
+      the full debounce, same as before the fast path existed, not a
+      new regression, just not improved by this either.
+
+      **The debounce is the backstop, not superseded by the fast path —
+      same reasoning as the OAuth reconnect flow's focus-fast-path/
+      timeout-backstop split (see hard rule 9's addendum), recorded here
+      for the same reason: so `TIME_INPUT_BLUR_DEBOUNCE_MS` isn't deleted
+      later on the theory that the fast path now covers everything.** It
+      doesn't — a genuinely single-digit entry and a dropdown pick both
+      depend on the debounce entirely; the fast path only ever fires for
+      the specific case of two consecutive same-segment edits.
+      Fail-first confirmed the same way as the debounce itself: disabled
+      `closeNow`'s condition, watched the new fast-path assertion fail
+      (1/237) while everything else stayed green, restored it (0/237).
+
+      **What changes by feel vs. what stays the same, for Sebastian's
+      own manual check**: typing a full two-digit value into either
+      segment (e.g. `00`→`10`) should now close *immediately* on the
+      second digit — a felt difference from before. A genuinely
+      single-digit entry, tabbing between segments, and a completed
+      dropdown pick should all feel *exactly as they did* right after
+      the debounce fix landed — same ~500ms wait, nothing sped up for
+      those three, because none of them ever produces two consecutive
+      edits to the same half.
     - **(7) No floating "Log now" button on laptop — fixed.** `.fab` was
       `display:none` by default, only `display:block` under
       `@media(max-width:820px)`. Now always `display:block`, same fixed
