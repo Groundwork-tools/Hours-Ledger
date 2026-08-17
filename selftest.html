@@ -597,6 +597,93 @@ function runTests(H,d){
   assert("a genuine press-and-release on the scrim itself still closes the sheet",
     !d.getElementById("scrim").classList.contains("on"));
 
+  /* 26d. Enter-to-log shortcut - opens a fresh sheet from a cold start when
+     nothing else is on screen, saves/closes the sheet when it's open (as
+     before), and - the one real hazard here - the same keypress that saves
+     and closes the sheet must never also reopen a fresh one. A plain Event
+     has no .key, so these use a real KeyboardEvent built off the sandbox
+     iframe's own window, same reasoning as the MouseEvent used for the bar
+     tooltip test above. */
+  function pressEnter(target){
+    target.dispatchEvent(new (d.defaultView.KeyboardEvent)("keydown",{key:"Enter",bubbles:true,cancelable:true}));
+  }
+  if(d.getElementById("scrim").classList.contains("on")) d.getElementById("fCancel").click();
+  H.getState().entries={};
+  H.setWeekStart(weekStart);
+
+  pressEnter(d.body);
+  assert("Enter on the main grid with no sheet open opens a fresh entry sheet, cold start",
+    d.getElementById("scrim").classList.contains("on"));
+  assert("the sheet Enter opens is a genuinely new entry, not editing one",
+    d.getElementById("fDelete").hidden);
+  d.getElementById("fCancel").click();
+
+  /* one press, one action. Pressing on the scrim itself (not a field) is
+     deliberate: it's the case that would slip through if the two
+     behaviours were ever split into separate listeners, since focus isn't
+     sitting inside an excluded field. The reopen check below is a spy on
+     scrim.classList.add itself - the same call openSheet() makes to show
+     the sheet - not a second read of scrim's final state: checking
+     "!scrim.classList.contains('on')" twice would only prove the same
+     thing twice, since a double-fire reopen and an unrelated "save never
+     closed the sheet" bug both leave scrim "on" identically, so neither
+     assertion could tell those two failures apart. Counting whether
+     openSheet's own "add('on')" call fires again during this one keydown
+     event is a genuinely different signal from "did the save work". */
+  d.getElementById("addBtn").click();
+  var targetIso=d.getElementById("fDay").value;
+  d.getElementById("fStart").value="09:00";
+  d.getElementById("fEnd").value="10:00";
+  var entriesBefore=H.entriesFor(targetIso).length;
+  var scrimEl=d.getElementById("scrim");
+  var reopenCalls=0, origAdd=scrimEl.classList.add;
+  scrimEl.classList.add=function(){
+    if(arguments[0]==="on") reopenCalls++;
+    return origAdd.apply(scrimEl.classList,arguments);
+  };
+  pressEnter(scrimEl);
+  scrimEl.classList.add=origAdd;
+  assert("Enter saves the entry and closes the sheet even when focus isn't inside a field",
+    !scrimEl.classList.contains("on")&&H.entriesFor(targetIso).length===entriesBefore+1);
+  assert("that same keypress does not also reopen a fresh sheet - openSheet's own scrim.classList.add(\"on\") never fires a second time in this event",
+    reopenCalls===0);
+
+  /* typing in a field on the main grid (no sheet open) must not open one */
+  pressEnter(d.getElementById("anchor"));
+  assert("Enter while focused in the week-jump date field does nothing",
+    !d.getElementById("scrim").classList.contains("on"));
+
+  /* Review open */
+  d.getElementById("reviewToggle").click();
+  pressEnter(d.body);
+  assert("Enter while Review is open does nothing",
+    !d.getElementById("scrim").classList.contains("on"));
+  d.getElementById("reviewClose").click();
+
+  /* close-out sheet open */
+  H.openCloseout(H.lastCompleteWeekStart());
+  pressEnter(d.body);
+  assert("Enter while the close-out sheet is open does nothing",
+    !d.getElementById("scrim").classList.contains("on"));
+  d.getElementById("closeoutScrim").dispatchEvent(new Event("mousedown",{bubbles:true}));
+  d.getElementById("closeoutScrim").dispatchEvent(new Event("click",{bubbles:true}));
+
+  /* category colour picker open */
+  var sw=d.querySelector(".cat .sw");
+  sw.click();
+  pressEnter(d.body);
+  assert("Enter while a category's colour picker is open does nothing",
+    !d.getElementById("scrim").classList.contains("on"));
+  sw.click();
+
+  /* category delete-with-reassignment chooser open */
+  var chooser=d.querySelector(".cat .catdelete");
+  chooser.hidden=false;
+  pressEnter(d.body);
+  assert("Enter while a category's delete chooser is open does nothing",
+    !d.getElementById("scrim").classList.contains("on"));
+  chooser.hidden=true;
+
   /* 27. manually toggling "Also put it on" for extra days still works and
      isn't fought by the Day-dropdown sync once the user is driving it directly */
   H.getState().entries={};

@@ -1938,10 +1938,48 @@ function wireOutsideClose(scrimEl,closeFn){
   });
 }
 wireOutsideClose(scrim,closeSheet);
+/* Enter does two jobs, gated so they can never both fire from one keypress:
+   with the sheet open it saves and closes (unchanged from before); with
+   nothing open at all it opens a fresh entry sheet from the main grid,
+   reusing the exact same defaultAddDay()/defaultEntryTimes()/openSheet()
+   path "Add entry" already uses below. Both live in this ONE handler with
+   an early return after the "sheet is open" branch, rather than as two
+   separate listeners - two listeners would each read scrim's state
+   independently, so the save-branch closing the sheet mid-event could let
+   a later listener see it as already closed and reopen one, the same
+   keypress firing both actions. One handler with an early return rules
+   that out structurally instead of by convention.
+
+   Desktop only (matchMedia("hover: hover"), same signal as the bar tooltip
+   and the time-input fast path above), and only when nothing else on
+   screen could plausibly want that Enter instead: not while focused on any
+   field/button/link (which either has its own native Enter behaviour to
+   preserve, or - for a focused field - a native picker/dropdown that only
+   ever shows for the currently-focused element, so excluding that
+   element's own tag covers "typing" and "native picker open" as the same
+   check), and not while Review, the close-out sheet, the intro modal, or a
+   category colour/delete panel is open. Every check here reads live DOM
+   state at the moment of the keypress, not a flag left over from a
+   previous save - so this works from a cold start exactly as it does after
+   ten saves in a row. */
 document.addEventListener("keydown",function(ev){
-  if(!scrim.classList.contains("on")) return;
-  if(ev.key==="Escape") closeSheet();
-  if(ev.key==="Enter"&&ev.target.tagName!=="BUTTON"){ ev.preventDefault(); saveSheet(); }
+  if(scrim.classList.contains("on")){
+    if(ev.key==="Escape") closeSheet();
+    else if(ev.key==="Enter"&&ev.target.tagName!=="BUTTON"){ ev.preventDefault(); saveSheet(); }
+    return;
+  }
+  if(ev.key!=="Enter") return;
+  if(!(window.matchMedia&&window.matchMedia("(hover: hover)").matches)) return;
+  var tag=ev.target.tagName;
+  if(tag==="INPUT"||tag==="TEXTAREA"||tag==="SELECT"||tag==="BUTTON"||tag==="A"||ev.target.isContentEditable) return;
+  if(document.getElementById("closeoutScrim").classList.contains("on")) return;
+  if(introEl.classList.contains("on")) return;
+  if(!document.getElementById("reviewSection").hidden) return;
+  if(cats.querySelector(".picker:not([hidden])")||cats.querySelector(".catdelete:not([hidden])")) return;
+  ev.preventDefault();
+  var dayIdx=defaultAddDay();
+  var times=defaultEntryTimes(iso(weekDates()[dayIdx]));
+  openSheet(dayIdx,times.start,times.end,null);
 });
 
 /* ---------------- grid interaction ---------------- */
