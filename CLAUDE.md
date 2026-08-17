@@ -147,6 +147,19 @@ afterward as cleanup — this is the specific discipline that was missing for th
 first ~24 hours of Money Ledger's sync existing, and it's why both of that
 incident's data-loss bugs shipped before any test could have caught them.
 
+For anything touching touch behavior or mobile layout specifically: verify on
+a real device via a branch preview *before* merging, not after. Both the
+grid's scroll trap and the time input's auto-close were shipped once already
+as phone fixes verified only on a laptop — `selftest.html` and a desktop
+browser can exercise the JS logic and the DOM, but neither can reproduce real
+touch dispatch or a real device's rendering engine (a headless Chromium
+sandbox is a different engine from mobile Safari's WebKit, and doesn't
+promote layers or dispatch touch the same way — see the item 10 saga in the
+backlog for exactly what that gap let through twice). `raw.githack.com` off
+a feature branch serves the real files uncached, so a fresh push is testable
+within moments — use it for this category of change specifically, not just
+whenever convenient.
+
 ## Deploy
 
 Push to `main`. GitHub Pages redeploys automatically, usually within a minute or
@@ -208,10 +221,41 @@ on purpose.
   (`touch-action:pan-x` on `.gridscroll`) merged unverified, by explicit
   decision** — Sebastian judged waiting on his friend's schedule wasn't
   worth blocking eleven already-verified fixes for a single, isolated
-  CSS property whose failure mode is "no change," not breakage. Update
-  this entry once the friend actually confirms the scroll trap is gone
-  on his device — until then, item 10 is live but not yet in the
-  "verified" sense every other line on this list means.
+  CSS property whose failure mode is "no change," not breakage. **Update,
+  2026-08-17: the friend's device confirmation did land, and it found a
+  real regression, not a confirmation** — see the backlog's item 10
+  continuation below for the full story (the fix's own `touch-action`
+  property was blocking a fresh touch from scrolling the page at all when
+  it started inside the grid). Now properly fixed and verified on both
+  Sebastian's device and his friend's — see the entry below.
+- **Six-item real-user batch — close-out button visibility, Review's FAB,
+  close-out sheet outside-click, verdict scale rename, bar hover tooltip,
+  weekday ticks removed** (2026-08-16): merged to `main` and live. All
+  six confirmed by Sebastian directly on the branch before merge: the
+  close-out button correctly disappears once last week is closed; Log
+  now hides in Review and returns via Back to log; the close-out sheet
+  closes on an outside click while a drag-select-release-outside still
+  leaves it open; Increase/Keep/Cut renders in the right order including
+  in Review's own tally; the bar's hover tooltip is smooth and positioned
+  correctly; the weekday labels/ticks are gone. `selftest.html`:
+  259/259, including fail-first-confirmed coverage for the close-out
+  button fix and the verdict-scale sync self-heal (a stale un-updated
+  device pushing a fresh "compress" now clears within the same sync
+  exchange it arrives in, not on a later reload — see the data model's
+  verdict-fields entry).
+- **Phone scroll trap + time-input auto-close, two regressions from
+  earlier fixes** (2026-08-17): merged to `main` and live. Both were
+  phone bugs that had only been verified on a laptop the first time
+  around — see the process note in "Testing before you claim it works"
+  above, added because of exactly this. Verified on **two** real
+  devices (Sebastian's and his friend's), via a `raw.githack.com`
+  preview off the feature branch before merging: the grid no longer
+  traps vertical scroll starting from inside it, stop-and-resume works,
+  the original item 10 symptom hasn't returned, horizontal scroll is
+  intact at both a 6–24 and a full 24h day range, and the native time
+  picker no longer auto-closes on phone at all (desktop keeps closing
+  only on the conclusive two-same-segment-digits signal, no timer).
+  `selftest.html`: 259/259.
 
 ---
 
@@ -842,6 +886,58 @@ dashboard styling.
       friend's own device, after this branch is verified and merged, is
       the actual test. See the message Sebastian is sending them for
       exactly what to try and what they should see.
+    - **(10) continued, 2026-08-17 — the friend's device confirmation
+      surfaced a real regression from the fix above, not just a
+      confirmation of it: fixed properly this time, verified on both his
+      device and Sebastian's.** `touch-action:pan-x` stopped the original
+      WebKit layer-capture bug, but it did it by disabling the browser's
+      default vertical-pan behavior for any touch *starting* on
+      `.gridscroll` at all — not just locally, but for the whole gesture,
+      including chaining a scroll up to the page. Symptom: a finger
+      landing outside the grid scrolled fine and could continue scrolling
+      through the grid once already in motion, but a fresh touch starting
+      *inside* the grid didn't move the page at all; stopping mid-scroll
+      with a finger still down inside it re-triggered the same dead
+      state. **Real root cause, found via `getComputedStyle` rather than
+      the stylesheet** (Sebastian's own instruction, since the stylesheet
+      alone had already misled the first pass at this bug): `.gridscroll`
+      set `overflow-x:auto` with no `overflow-y` declared, and CSS
+      silently computes `overflow-y` as `auto` too whenever the other
+      axis is a scrolling value and this one is left at its default
+      `visible` — confirmed directly (`overflow-y` read back as `"auto"`
+      despite never being set), not inferred from the spec alone.
+      `.gridscroll` had been an accidental *vertical* scroll container
+      this entire time, and that's almost certainly what the *original*
+      item 10 report was really seeing too — an element WebKit will
+      promote to its own independently-scrolling compositing layer under
+      certain zoom/content conditions is exactly an `overflow:auto`
+      element, needing no separate explanation once this was found.
+      **Fix:** `overflow-y:hidden` (an explicit non-`visible` value isn't
+      subject to the auto-coercion, so this genuinely removes the
+      scroll-container status rather than hiding its effects) and
+      `touch-action:pan-x` removed outright — with the real cause gone,
+      there's nothing left for it to guard against, and its own side
+      effect was the regression. The grid's existing JS drag-select logic
+      (a 350ms hold-then-commit, `passive:true` on `touchstart`, only
+      calling `preventDefault()` once a drag has actually committed)
+      already resolves the scroll-vs-drag-select ambiguity correctly on
+      its own and needed no changes. **Verified for real this time**: a
+      preview branch (`raw.githack.com` off the feature branch, confirmed
+      to reflect a fresh push immediately, not cached) let Sebastian
+      reproduce the *original* live-site bug first (finger inside the
+      grid, doesn't move at all) as a baseline, then confirm the fix
+      resolves it — identical feel starting inside or outside the grid,
+      stop-and-resume works, the original item 10 symptom (hours
+      disappearing off the top) hasn't returned, horizontal scroll intact
+      at both a 6–24 and a full 24h day range — and his friend confirmed
+      the same independently on his own device. **CSS gotcha worth
+      remembering on its own**: this is the second time in two batches a
+      computed style diverged from what the stylesheet appeared to say,
+      after `.breaktoggle`'s `display:flex`-on-a-label specificity bug
+      earlier in the same real-user batch. When a CSS-driven bug doesn't
+      make sense from the stylesheet alone, check the *computed* style in
+      a real browser before theorizing further — the stylesheet is what
+      was written, not what the browser actually did with it.
     - **Split out separately, not fixed in this batch**: the grid's 350ms
       drag-select-commit timer really is ambiguous on its own terms — a
       finger resting motionless on a slot for over ~350ms before it starts

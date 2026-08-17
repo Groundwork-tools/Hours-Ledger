@@ -78,14 +78,28 @@ button{cursor:pointer}
 .reviewtable .closeout-mark{color:var(--muted)}
 .reviewtable tbody tr:last-child td{border-bottom:1px solid var(--ink)}
 
-/* touch-action:pan-x tells the browser this element only ever handles
-   horizontal panning via touch - without it, an overflow-x:auto element can
-   still get promoted to its own scrolling/compositing layer under certain
-   content-size/zoom conditions (a known WebKit behavior), which can then
-   capture a vertical swipe that starts over it instead of letting it chain
-   through to the page. Horizontal scroll for the seven day columns is
-   unaffected; this only removes the ambiguity on the vertical axis. */
-.gridscroll{overflow-x:auto;touch-action:pan-x}
+/* CSS forces overflow-y to compute as auto whenever overflow-x is a
+   scrolling value and overflow-y is left as its default (visible) - you
+   cannot have one axis scrollable and the other genuinely visible. So
+   .gridscroll was an accidental VERTICAL scroll container this whole
+   time, confirmed via computed style (not just the stylesheet): overflow-y
+   read back as "auto" despite never being set. That's what actually
+   caused item 10's original WebKit bug (an overflow:auto element being
+   independently promoted to its own scrolling/compositing layer, capable
+   of capturing a vertical swipe on its own, regardless of whether it has
+   any real overflow content to scroll). overflow-y:hidden is the real
+   fix: an explicit non-visible value doesn't get coerced, so this is no
+   longer a scroll container on the y-axis at all - nothing for WebKit to
+   promote a layer for. touch-action:pan-x, item 10's original fix, is
+   removed here rather than kept alongside this - it doesn't just stop a
+   scroll gesture from being captured LOCALLY, it disables the browser's
+   default vertical-pan behavior outright for any touch sequence that
+   starts inside this element, so it also blocks that touch from ever
+   chaining a scroll up to the page - which is the exact regression this
+   comment replaces the old one to fix. With the true cause (the
+   accidental scroll container) fixed at the root, there should be
+   nothing left for touch-action to guard against. */
+.gridscroll{overflow-x:auto;overflow-y:hidden}
 .grid{min-width:720px;border:1px solid var(--ink);background:var(--paper)}
 .dayhead{display:grid;grid-template-columns:56px repeat(7,1fr);border-bottom:1px solid var(--ink)}
 .dayhead div{padding:8px 7px;border-left:1px solid var(--rule);font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase}
