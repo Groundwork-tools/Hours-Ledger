@@ -256,6 +256,16 @@ on purpose.
   picker no longer auto-closes on phone at all (desktop keeps closing
   only on the conclusive two-same-segment-digits signal, no timer).
   `selftest.html`: 259/259.
+- **Modal scroll lock (iOS Safari)** (2026-08-18): merged to `main` and
+  live. See backlog item 17 for the full diagnosis and the design
+  decisions (counter-based lock, `overscroll-behavior:contain`,
+  `scrollTop` reset on open, the `.scrim`-as-terminator fallback on
+  record). Verified via a `raw.githack.com` preview before merging, on a
+  real iPhone (Chrome/WebKit) and a laptop: all three original leak
+  symptoms fixed, outside-tap-to-close still works, the on-screen
+  keyboard doesn't interfere, repeated open/close is stable, the grid's
+  drag-to-log is unaffected, and the close-out sheet's nested scroll
+  behaves correctly. `selftest.html`: 292/292.
 
 ---
 
@@ -994,8 +1004,8 @@ dashboard styling.
       this item exists to close; flagged there too so whoever builds
       offline support hits this as a known interaction, not a surprise
       mid-build.
-17. **Modal scroll lock (iOS Safari) — built on `fix/modal-scroll-lock`,
-    not yet merged, pending real-device verification.** Reported bug: with
+17. **Modal scroll lock (iOS Safari) — merged to `main` and live, verified
+    on a real device.** Reported bug: with
     any of the three scrims open (entry sheet, close-out sheet, intro),
     touch scrolling on an iPhone (Chrome, i.e. WebKit) often scrolled the
     page underneath instead of the modal's own content — a touch on the
@@ -1133,16 +1143,18 @@ dashboard styling.
     `hours-ledger-seen`), which cost nothing observable before this work
     since nothing tracked intro's open state — now fixed by dismissing it
     once, right after the suite's own state reset, before any other test
-    runs. Still needed before this merges to `main`: real-device
-    verification via a `raw.githack.com` preview off `fix/modal-scroll-
-    lock`, per the project's standing rule for anything touching touch or
-    mobile layout — not DevTools emulation. Re-verify specifically: all
-    three original symptoms actually stop; the grid's own drag-to-log
-    behaviour is unaffected (it lives behind the scrim and shares no code
-    with this fix, but re-verify anyway per the same discipline item 10
-    required); the page holds still visually at modal open and restores
-    cleanly at close, including across an address-bar collapse/expand;
-    and the desktop background-scroll change (accepted as intended, not a
-    regression) feels right in practice on a laptop.
+    runs. **Real-device verification (2026-08-18), confirmed by Sebastian
+    on an actual iPhone (Chrome/WebKit) and a laptop, via a
+    `raw.githack.com` preview off `fix/modal-scroll-lock`, before
+    merging** — per the project's standing rule for anything touching
+    touch or mobile layout, not DevTools emulation: all three original
+    symptoms fixed; outside-tap-to-close still works on all three scrims;
+    the on-screen keyboard doesn't interfere; repeated open/close is
+    stable (no stuck lock, matching the counter design's own goal); the
+    grid's drag-to-log is unaffected (it lives behind the scrim and
+    shares no code with this fix, but was re-verified anyway, same
+    discipline item 10 required); and the close-out sheet's own nested
+    scroll (`.closeout-gaps`) behaves correctly. Merged to `main`
+    2026-08-18.
 
 Feature creep is the known failure mode of this project.
