@@ -95,6 +95,19 @@ function runTests(H,d){
   H.setState(fresh);
   H.fakeDriveReset();
 
+  /* on a genuinely fresh profile (no persisted hours-ledger-seen key -
+     which most real local test runs never hit, since a browser profile
+     reused across runs already has it set from the first one) the intro
+     modal auto-opens on load, same as a real first-time visitor would see.
+     Nothing below this point was ever written expecting it open - dismiss
+     it here, once, so every test after this starts from the same baseline
+     a returning visitor's browser would already be in. This was invisible
+     before the body-scroll-lock work below: nothing previously tracked
+     intro's open/closed state, so leaving it open all suite long cost
+     nothing observable. Now it would leak its own lock into every other
+     test's baseline if left alone. */
+  if(d.getElementById("intro").classList.contains("on")) d.getElementById("introGo").click();
+
   /* 1. an entry crossing midnight splits into two, one per day */
   H.putEntry("2026-01-05","Sleep",null,23*60+30,7*60,null);
   var d1=H.entriesFor("2026-01-05"), d2=H.entriesFor("2026-01-06");
@@ -596,6 +609,121 @@ function runTests(H,d){
   d.getElementById("scrim").dispatchEvent(new Event("click",{bubbles:true}));
   assert("a genuine press-and-release on the scrim itself still closes the sheet",
     !d.getElementById("scrim").classList.contains("on"));
+
+  /* 26e. Modal body scroll lock - fixes iOS Safari's touch scroll leaking to
+     the page behind an open modal (see CLAUDE.md's modal-scroll-lock entry
+     for the full diagnosis). Everything below is a MECHANISM check, not a
+     behaviour check: it confirms the lock/unlock code ran and the
+     counter's edge cases are handled correctly, not that scrolling actually
+     stayed contained - this sandbox iframe is display:none with no real
+     touch dispatch or scroll physics, the same limitation already true of
+     every touch-handling test in this file. Only a real iPhone confirms
+     the actual behaviour; these checks are not that gate. */
+  assert("starts unlocked",H.getBodyScrollLockCount()===0);
+
+  /* real open/close through the UI, not calling lockBodyScroll directly -
+     proves the wiring is actually connected, not just that the functions
+     work in isolation */
+  d.getElementById("addBtn").click();
+  assert("opening the entry sheet locks body scroll (count 1)",H.getBodyScrollLockCount()===1);
+  assert("opening the entry sheet sets position:fixed on body",d.body.style.position==="fixed");
+  assert("opening the entry sheet sets a numeric top offset on body",/^-?\d+px$/.test(d.body.style.top));
+  assert("opening the entry sheet sets width:100% on body - fixed positioning otherwise collapses it to content width, reflowing whatever's underneath",
+    d.body.style.width==="100%");
+  d.getElementById("fCancel").click();
+  assert("closing the entry sheet unlocks body scroll (count back to 0)",H.getBodyScrollLockCount()===0);
+  assert("closing the entry sheet clears position:fixed from body",d.body.style.position==="");
+
+  /* double-lock and unlock-when-never-locked - the two failure modes a
+     plain boolean pair (instead of a counter) would get wrong. Spy on
+     scrollTo the same way d.defaultView.JSON.stringify is spied on
+     elsewhere in this file (patch, assert, restore). */
+  var scrollToCalls=0,origScrollTo=d.defaultView.scrollTo;
+  d.defaultView.scrollTo=function(){ scrollToCalls++; return origScrollTo.apply(d.defaultView,arguments); };
+  H.lockBodyScroll();
+  H.lockBodyScroll();
+  assert("locking twice without an intervening unlock only increments the counter (2)",H.getBodyScrollLockCount()===2);
+  H.unlockBodyScroll();
+  assert("unlocking once while still double-locked (2->1) leaves the page still locked",
+    H.getBodyScrollLockCount()===1&&d.body.style.position==="fixed");
+  assert("an intermediate unlock that doesn't reach count 0 must not call scrollTo yet",scrollToCalls===0);
+  H.unlockBodyScroll();
+  assert("the unlock that actually reaches count 0 releases the lock",
+    H.getBodyScrollLockCount()===0&&d.body.style.position==="");
+  assert("that same unlock calls scrollTo exactly once to restore position",scrollToCalls===1);
+  scrollToCalls=0;
+  H.unlockBodyScroll();
+  assert("unlocking when the count is already 0 is a safe no-op, not an error",H.getBodyScrollLockCount()===0);
+  assert("an unlock with nothing locked never calls scrollTo with a stale/default value",scrollToCalls===0);
+  d.defaultView.scrollTo=origScrollTo;
+
+  /* all three scrims wire the lock into their own open/close, not just the
+     entry sheet spot-checked above */
+  H.openCloseout(H.lastCompleteWeekStart());
+  assert("opening the close-out sheet locks body scroll",H.getBodyScrollLockCount()===1&&d.body.style.position==="fixed");
+  d.getElementById("closeoutCancel").click();
+  assert("closing the close-out sheet unlocks body scroll",H.getBodyScrollLockCount()===0&&d.body.style.position==="");
+
+  d.getElementById("howto").click();
+  assert("opening the intro modal locks body scroll",H.getBodyScrollLockCount()===1&&d.body.style.position==="fixed");
+  d.getElementById("introGo").click();
+  assert("closing the intro modal unlocks body scroll",H.getBodyScrollLockCount()===0&&d.body.style.position==="");
+
+  /* scrollTop reset on open - nothing else resets a sheet's own scroll
+     position (a display:none/flex toggle doesn't), so left alone a sheet
+     closed mid-scroll reopens wherever it was left. This is also what the
+     boundary-direction investigation surfaced as a real cause of the
+     scroll-leak bug's intermittency: leftover scrollTop made whether the
+     first gesture starts at a boundary depend on session history instead
+     of being predictable. */
+  d.getElementById("addBtn").click();
+  d.querySelector("#scrim .sheet").scrollTop=40;
+  d.getElementById("fCancel").click();
+  d.getElementById("addBtn").click();
+  assert("reopening the entry sheet resets its scroll position to the top",
+    d.querySelector("#scrim .sheet").scrollTop===0);
+  d.getElementById("fCancel").click();
+
+  H.openCloseout(H.lastCompleteWeekStart());
+  d.querySelector("#closeoutScrim .sheet").scrollTop=40;
+  d.getElementById("closeoutCancel").click();
+  H.openCloseout(H.lastCompleteWeekStart());
+  assert("reopening the close-out sheet resets its scroll position to the top",
+    d.querySelector("#closeoutScrim .sheet").scrollTop===0);
+  d.getElementById("closeoutCancel").click();
+
+  /* overscroll-behavior:contain on both nested scroll containers - a
+     stylesheet/computed-style presence check, not proof scrolling actually
+     stays contained (that needs a real device) */
+  d.getElementById("addBtn").click();
+  assert(".sheet has overscroll-behavior:contain, so a scroll at its own limit stops/rubber-bands there instead of chaining to the page",
+    d.defaultView.getComputedStyle(d.querySelector("#scrim .sheet")).overscrollBehaviorY==="contain");
+  d.getElementById("fCancel").click();
+  H.openCloseout(H.lastCompleteWeekStart());
+  assert(".closeout-gaps (nested inside .sheet) also has overscroll-behavior:contain - otherwise a scroll exhausted there chains straight past .sheet to the page",
+    d.defaultView.getComputedStyle(d.getElementById("closeoutGaps")).overscrollBehaviorY==="contain");
+  d.getElementById("closeoutCancel").click();
+
+  /* defensive scrim touchmove block, gated on ev.target===scrimEl (the same
+     check wireOutsideClose already uses) so it can never intercept a touch
+     meant for the sheet's own intentionally-scrollable content. Dispatched
+     directly on scrimEl vs. on a descendant with bubbles:true to get a real
+     ev.target for each case - same technique the outside-click drag test
+     above already relies on, no real touch support needed since this is
+     the target-matching logic being checked, not real touch physics. */
+  d.getElementById("addBtn").click();
+  var touchScrimEl=d.getElementById("scrim"),touchSheetEl=d.querySelector("#scrim .sheet");
+  var blocked=false;
+  var evOnScrim=new Event("touchmove",{bubbles:true,cancelable:true});
+  evOnScrim.preventDefault=function(){ blocked=true; };
+  touchScrimEl.dispatchEvent(evOnScrim);
+  assert("a touchmove landing directly on the scrim background is blocked",blocked);
+  blocked=false;
+  var evOnSheet=new Event("touchmove",{bubbles:true,cancelable:true});
+  evOnSheet.preventDefault=function(){ blocked=true; };
+  touchSheetEl.dispatchEvent(evOnSheet);
+  assert("a touchmove landing on the sheet itself (bubbling through scrim) is not blocked - it must reach the sheet's own scroll",!blocked);
+  d.getElementById("fCancel").click();
 
   /* 26d. Enter-to-log shortcut - opens a fresh sheet from a cold start when
      nothing else is on screen, saves/closes the sheet when it's open (as

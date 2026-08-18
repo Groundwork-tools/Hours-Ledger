@@ -1676,13 +1676,27 @@ function openSheet(dayIdx,start,end,entryId){
     return '<button data-label="'+escapeHtml(r.label)+'" data-cat="'+(r.cat||"")+'">'+escapeHtml(r.label)+"</button>";
   }).join("");
 
+  /* always reset to the top, not just on a fresh page load - nothing else
+     in this function resets .sheet's own scroll position, and unlike every
+     other field here it isn't naturally reset by a display:none/flex
+     toggle (the browser preserves an element's scrollTop across that).
+     Left alone, a sheet closed mid-scroll and reopened later in the same
+     session opens wherever it was last scrolled to - surprising on its
+     own (this is a new entry, not the one you scrolled), and it's also
+     exactly the state that made the intermittent scroll-leak bug hard to
+     pin down: whether the first touch starts at a genuine scroll boundary
+     or mid-content became leftover-state-dependent instead of predictable.
+     Resetting here makes "opens at the top" the one guaranteed starting
+     condition, same as every other field this function already resets. */
+  scrim.querySelector(".sheet").scrollTop=0;
   scrim.classList.add("on");
+  lockBodyScroll();
   /* autofocus only where there's no on-screen keyboard to fight - on a phone
      it used to cover the category chips and time fields the instant the
      sheet opened, before the user got a chance to see them */
   if(window.innerWidth>=820) fLabel.focus();
 }
-function closeSheet(){ scrim.classList.remove("on"); editing=null; }
+function closeSheet(){ scrim.classList.remove("on"); editing=null; unlockBodyScroll(); }
 
 fLabel.addEventListener("input",function(){ labelTouched=true; });
 
@@ -1919,6 +1933,68 @@ document.getElementById("fDelete").addEventListener("click",function(){
   }
   closeSheet();
 });
+/* Body scroll lock, shared by every scrim/sheet pair - fixes touch
+   scrolling behind an open modal leaking to the page underneath on iOS
+   Safari (see CLAUDE.md's modal-scroll-lock entry for the full
+   diagnosis). overflow:hidden on <body> is a well-known no-op for touch
+   scroll on iOS Safari; position:fixed is the technique that actually
+   works there, because it removes body from the scrollable flow entirely
+   rather than asking WebKit to honour a property it doesn't for this
+   purpose. width:100% is required alongside it - a fixed-position body
+   otherwise collapses to its content's natural width, not the viewport's,
+   which would visibly reflow whatever's underneath.
+
+   A counter, not a plain boolean pair. Nothing today can open two scrims
+   at once - every scrim is a full-viewport, pointer-events:auto overlay
+   at the highest z-index in the app, so opening one physically blocks
+   every tap that could open another (the Enter-to-log handler above even
+   checks this explicitly before opening a fresh sheet). But a counter
+   costs nothing extra over a boolean, and it means that invariant never
+   has to be proven perfect for this code to stay safe. Two failure modes
+   a plain boolean would have: locking twice would re-capture scrollY on
+   the second call - and by then the page's real scrollY reads back as
+   whatever a locked, position:fixed body reports (effectively 0), so a
+   naive re-lock would silently overwrite the real saved position with
+   0, and the eventual unlock would snap to the top instead of restoring
+   it. Unlocking when never locked would call scrollTo with a stale or
+   default saved value, jumping the page somewhere it was never at. The
+   counter's guards below rule out both: only the 0->1 transition
+   captures scrollY, and only the 1->0 transition restores it. */
+var bodyScrollLockCount=0, bodyScrollLockY=0;
+function lockBodyScroll(){
+  bodyScrollLockCount++;
+  if(bodyScrollLockCount>1) return;
+  bodyScrollLockY=window.scrollY||window.pageYOffset||0;
+  document.body.style.position="fixed";
+  document.body.style.top=(-bodyScrollLockY)+"px";
+  document.body.style.left="0";
+  document.body.style.right="0";
+  document.body.style.width="100%";
+}
+function unlockBodyScroll(){
+  if(bodyScrollLockCount===0) return;
+  bodyScrollLockCount--;
+  if(bodyScrollLockCount>0) return;
+  document.body.style.position="";
+  document.body.style.top="";
+  document.body.style.left="";
+  document.body.style.right="";
+  document.body.style.width="";
+  window.scrollTo(0,bodyScrollLockY);
+}
+/* Defensive second line of defense, not the primary mechanism: with body
+   genuinely locked above, a touch landing on the scrim's own bare
+   background (not the sheet inside it) should already have nothing to
+   scroll. This exists in case any WebKit quirk (e.g. address-bar
+   collapse) lets a touch through the lock regardless. Gated on
+   ev.target===scrimEl - the same check wireOutsideClose already uses
+   just below - so it can never intercept a touch meant for the sheet's
+   own internal, intentionally-scrollable content. */
+function wireScrimTouchBlock(scrimEl){
+  scrimEl.addEventListener("touchmove",function(ev){
+    if(ev.target===scrimEl) ev.preventDefault();
+  },{passive:false});
+}
 /* closing on a click outside a sheet needs to be a genuine click there,
    not just a click event that happens to resolve to the scrim - dragging to
    select text inside the sheet (e.g. the Activity field) and releasing the
@@ -1938,6 +2014,7 @@ function wireOutsideClose(scrimEl,closeFn){
   });
 }
 wireOutsideClose(scrim,closeSheet);
+wireScrimTouchBlock(scrim);
 /* Enter does two jobs, gated so they can never both fire from one keypress:
    with the sheet open it saves and closes (unchanged from before); with
    nothing open at all it opens a fresh entry sheet from the main grid,
@@ -2312,10 +2389,17 @@ function openCloseout(ws){
   renderCloseoutGaps();
   var existing=state.weekCloseouts[iso(ws)];
   document.getElementById("closeoutNote").value=existing?existing.note:"";
+  /* same reasoning as openSheet()'s identical reset above - content length
+     varies by week (totals rows, unlogged-gap rows), and nothing else here
+     resets this sheet's leftover scroll position from whichever week was
+     open last. */
+  document.getElementById("closeoutScrim").querySelector(".sheet").scrollTop=0;
   document.getElementById("closeoutScrim").classList.add("on");
+  lockBodyScroll();
 }
-function closeCloseoutSheet(){ document.getElementById("closeoutScrim").classList.remove("on"); closeoutWeek=null; }
+function closeCloseoutSheet(){ document.getElementById("closeoutScrim").classList.remove("on"); closeoutWeek=null; unlockBodyScroll(); }
 wireOutsideClose(document.getElementById("closeoutScrim"),closeCloseoutSheet);
+wireScrimTouchBlock(document.getElementById("closeoutScrim"));
 
 function renderCloseoutTotals(){
   var wk=iso(closeoutWeek);
@@ -2600,11 +2684,21 @@ document.getElementById("fab").addEventListener("click",function(){
 
 var SEEN="hours-ledger-seen";
 var introEl=document.getElementById("intro");
-function openIntro(){ hideToast(); introEl.classList.add("on"); }
-function closeIntro(){ introEl.classList.remove("on"); writeStore(SEEN,"1"); }
+/* intro's own content is fixed and short (a 3-item list, one paragraph, one
+   button) - it never overflows .sheet's max-height in practice, so unlike
+   openSheet()/openCloseout() there's no leftover-scrollTop state worth
+   resetting here. It still gets the body scroll lock and the defensive
+   touchmove block below: the scrim-background-leaks-to-the-page symptom
+   doesn't depend on the sheet's content height, so it applies here too. */
+function openIntro(){ hideToast(); introEl.classList.add("on"); lockBodyScroll(); }
+function closeIntro(){ introEl.classList.remove("on"); writeStore(SEEN,"1"); unlockBodyScroll(); }
 document.getElementById("introGo").addEventListener("click",closeIntro);
 document.getElementById("howto").addEventListener("click",openIntro);
+/* NOT wireOutsideClose - this is the pre-existing asymmetry recorded in
+   CLAUDE.md as a deferred known gap (item 13's neighbour), not something
+   this batch fixes. Left exactly as it was. */
 introEl.addEventListener("click",function(ev){ if(ev.target===introEl) closeIntro(); });
+wireScrimTouchBlock(introEl);
 document.addEventListener("keydown",function(ev){ if(ev.key==="Escape"&&introEl.classList.contains("on")) closeIntro(); });
 if(!readStore(SEEN)) openIntro();
 
@@ -2714,7 +2808,11 @@ if(TEST_MODE){
     doDeleteCategory:doDeleteCategory,
     countCategoryEntries:countCategoryEntries,
     render:render,
-    importBackupJson:importBackupJson
+    importBackupJson:importBackupJson,
+    lockBodyScroll:lockBodyScroll,
+    unlockBodyScroll:unlockBodyScroll,
+    getBodyScrollLockCount:function(){ return bodyScrollLockCount; },
+    getBodyScrollLockY:function(){ return bodyScrollLockY; }
   };
 }
 })();
