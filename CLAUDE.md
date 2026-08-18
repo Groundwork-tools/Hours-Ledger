@@ -1157,4 +1157,179 @@ dashboard styling.
     scroll (`.closeout-gaps`) behaves correctly. Merged to `main`
     2026-08-18.
 
+18. **Weekly verdicts silently reverting — staged on
+    `fix/verdict-compress-sweep-toast-and-undo`, not yet merged, pending
+    Sebastian's own before/after Drive-file check and real-device
+    verification.** Reported bug: setting a verdict appeared to work,
+    stayed selected for roughly 4-5 seconds, then deselected on its own -
+    affecting a different set of categories week to week, only on weeks
+    with pre-existing data, always a full deselect rather than a switch
+    to a different verdict.
+
+    **Root cause, confirmed by real-device testing, not just code
+    reading**: `sweepCompressVerdicts()` (the continuous half of the
+    Keep/Compress/Cut -> Increase/Keep/Cut cleanup - see hard rule 8's
+    neighbour and the data model's verdict-fields entry) runs on every
+    Drive sync, converts any surviving `"compress"` string in the merged
+    verdict set into a tombstone, and pushes that tombstone straight back
+    to Drive in the same round. It's a real, working self-heal - but it
+    was entirely silent. A batch of pre-existing stale `"compress"`
+    records already sitting in the real Drive file (most likely pushed
+    during this app's own Drive-sync development, before the
+    Increase/Keep/Cut rename existed) meant that the first time *any*
+    device touched a given week+category since that rename, its freshly
+    set verdict lost to the stale remote value in `mergeRecords()`'s
+    last-write-wins case, then got swept to a tombstone by the very same
+    sync - visually indistinguishable from "I set it and it silently
+    cleared itself." Each affected key only ever misfires once (the
+    tombstone that sync produces protects all of that key's *future*
+    edits via `mergeRecords()`'s case 3, "remote is my own echo, trust
+    local") - which is exactly why the affected set kept changing rather
+    than repeating: it wasn't the same categories failing over and over,
+    it was different pre-existing leftovers each getting hit for the
+    first time as Sebastian happened to touch them.
+
+    **A separate, confirmed-real risk, investigated because it was a
+    plausible source of the stale batch: opening `index.html` from
+    `localhost:8000` with no query parameter runs against real data, not
+    test data.** `TEST_MODE` (`app.js`'s very first meaningful line) is
+    gated purely on the literal `?hltest=1` query string - there is no
+    hostname check anywhere in the file. A local dev checkout that ever
+    had "Connect Drive" clicked becomes a permanent, independent sync
+    participant against the real Drive file (Drive finds the sync file by
+    name, not by web origin - any origin, any account session, the same
+    account, finds the same file), running whatever code happened to be
+    checked out at the time, on every load, indefinitely, until
+    disconnected. Confirmed as a real standing risk from reading the code;
+    **ruled out as the ONGOING source of this specific recurrence** by
+    Sebastian closing that tab entirely and reproducing the bug again
+    anyway - consistent with the leftover-batch explanation above (closing
+    a tab can't retroactively un-push what it already wrote), not with an
+    actively-reintroducing source. Whether it ever *was* connected, and
+    therefore whether this habit was unsafe in the past, is a fact only
+    checkable in that origin's own localStorage - not resolved here either
+    way.
+
+    **Fix, three parts:**
+    - **A stale `"compress"` sweep now surfaces to the user, not just
+      `console.log`** (which is all it ever did before, exactly why this
+      went unnoticed for weeks). `sweepCompressVerdicts()` now returns
+      `{records, swept}` instead of a bare array; `syncEngine()` threads
+      `swept` through as a new `sweptCompress` field on its return value
+      (additive - `newLocalState`/`toPush`, everything every existing
+      caller already depended on, are unchanged). The actual `showToast()`
+      call lives in the caller, not inside the engine - `syncEngine()` and
+      its helpers are deliberately kept side-effect-free and independently
+      testable (see `sync-dryrun.html`, and every synchronous test in
+      `selftest.html` that calls `syncEngine()` directly), and a toast
+      needs real DOM the engine has no business assuming exists.
+      **Discovered while wiring this in, not anticipated up front:
+      `connectDrive()` has its own separate, undocumented first-connect
+      implementation that doesn't call `runDriveSync()` at all** - so the
+      toast had to be added to two call sites, not one, or a stale
+      `"compress"` swept on a device's very first connect (exactly the
+      scenario a genuinely fresh device is most likely to hit) would have
+      shipped with the fix silently not covering it. That duplication
+      between `connectDrive()`'s first-connect path and `runDriveSync()`'s
+      ongoing-sync path is a real, separate piece of debt this fix did
+      not take on unifying - flagged here rather than fixed, since
+      unifying it wasn't what was asked and is exactly the kind of
+      broadening hard rule 6 exists to stop. `connectDrive()` already
+      shows its own toast on success/failure ("Connected - your weeks are
+      syncing." / "...first push to Drive failed...") - a second,
+      independent `showToast()` call right after would just silently
+      clobber it a moment later (`showToast()` replaces its text, it
+      doesn't queue), so the sweep summary is *appended* to whichever of
+      those two messages fires, not shown standalone there. On an
+      ordinary background sync (`runDriveSync()`), which shows no toast
+      of its own, it's a standalone toast. Every swept record still gets
+      its own `console.log` line inside `sweepCompressVerdicts()` itself
+      regardless - the toast is a user-facing summary layered on top, not
+      a replacement for the existing trace.
+    - **One-time cleanup of the real Drive file is Sebastian's own
+      before/after check, not assumed here.** `sweepCompressVerdicts()`
+      already self-heals idempotently on every sync (same always-on shape
+      `dedupeCategoriesByName()` uses), so no separate cleanup *code* was
+      needed - but confirming it actually converged required seeing the
+      real file, not trusting the mechanism. Before-state and after-state
+      (download `hours-ledger-sync.json` from Drive, search its raw text
+      for `"compress"`) are both real-data checks outside what a
+      TEST_MODE suite can do or should ever touch, and are Sebastian's to
+      run and report, not something this session had any way to verify
+      itself - no Google account access exists here.
+    - **`snapshot()` now precedes both `setVerdict()` call sites** (the
+      week rail and the close-out sheet's own verdict buttons) - a real,
+      separate gap against hard rule 5 found during this investigation,
+      not a side effect of the sync bug: neither handler ever snapshotted
+      before this fix, so `Ctrl+Z` could never recover a verdict change,
+      going back to before verdicts synced at all. Matches the existing
+      description-string convention exactly (`c.name+" verdict"`, same
+      style as `"delete "+nm` / `"edit entry"`).
+
+    **Test coverage, fail-first confirmed against the true pre-fix
+    baseline (`git stash` on `app.js` alone, both before this batch and
+    isolated per-fix) - `selftest.html`: 302/302 with the fix, 4/302
+    failing without it.** Two of those four are a synchronous
+    `syncEngine()` check (does it report the right week/category swept -
+    extends the existing item-D compress test rather than duplicating its
+    setup); one is a full async connect-through-fakeDrive test confirming
+    the actual toast text; one drives the real rail click handler through
+    to `undo()` confirming a verdict change now actually reverts.
+
+    **Two more bugs found by the testing process itself, not anticipated
+    up front - exactly the value fail-first discipline is supposed to
+    provide.** First found narrow, then found to be systemic on being
+    asked to confirm it wasn't just worked around - recorded as it
+    actually happened, not cleaned up to look like it was caught in one
+    pass:
+    - The Drive-toast test's fresh sandbox iframe loaded with
+      `driveConnected=true` already inherited from an earlier test's
+      *shared, same-origin* `TEST_MODE` localStorage, firing that
+      device's own automatic page-load catch-up sync (`scheduleDriveSync()`
+      at `app.js`'s own bottom) before the test's own seeded fake-Drive
+      data had a chance to matter - the test's `waitFor("Drive: synced")`
+      was satisfied by that unrelated race, not by the sync under test.
+      The undo/snapshot test failed the identical way, for the identical
+      reason, on the undo stack (`UKEY`) instead of `driveConnected`: a
+      fresh sandbox could inherit an unrelated leftover snapshot and have
+      `undo()` pop *that* instead of the test's own click, landing on
+      "verdict reads null afterward" for the wrong reason entirely - it
+      passed even with the real `snapshot()` fix reverted.
+    - **First fix, and its own gap**: both were patched at their own call
+      site only - clearing storage via the *outer*, already-loaded sandbox
+      (or, for the undo stack, `localStorage` directly, deliberately not
+      through `clearLocalStateForTest()` - that hook lives in `app.js`,
+      and stashing `app.js` to fail-first-isolate the `snapshot()` fix
+      would have silently reverted the hook's own fix for this too,
+      contaminating the very check meant to isolate it) *before* creating
+      the fresh sandbox, not after - clearing after only touches
+      localStorage, not the fresh iframe's in-memory `state`/`undoStack`,
+      both already parsed at load time. That fixed both tests. **It did
+      not fix the bug** - asked directly whether this was fixed in the
+      harness itself or worked around, checking honestly turned up four
+      *pre-existing* `freshSandbox()` call sites (the
+      `driveSyncApplyingRemote`, `driveSyncInFlight`, focus-fast-path, and
+      late-success-catch-up tests) using the exact same "clear after"
+      pattern, equally exposed, not fixed by patching only the two new
+      tests that happened to surface it.
+    - **Real fix**: `freshSandbox()` itself now takes a `clean` argument -
+      `true` wipes every `TEST_MODE` storage key *before* the iframe is
+      created, using this test file's own top-level `localStorage`
+      directly (same origin as every sandbox) rather than any app.js hook,
+      for the same stash-isolation reason as above. All five
+      "connect from a blank slate" call sites now pass `clean:true` and
+      dropped their now-redundant post-load `fakeDriveReset()`/
+      `clearLocalStateForTest()` calls. `clean` defaults to `false`,
+      deliberately, not `true`: `killSandboxAndOpenFresh()` (the
+      close-tab/reopen simulation covering BUG 2's real fix - an entry
+      saved right before a reload reaching Drive on the next load's
+      catch-up sync) exists specifically to verify state *survives* a
+      simulated reload; wiping storage there would break the exact thing
+      that test checks. Re-ran the full suite (not just the previously-
+      failing tests) three times after this fix, consistently 302/302 -
+      and re-confirmed fail-first against the true pre-fix `app.js`
+      (checked out from its parent commit, not stashed, since `app.js`
+      was already committed by this point) with the *corrected* harness:
+      still exactly the same 4/302 failing, now for real.
+
 Feature creep is the known failure mode of this project.
