@@ -318,14 +318,28 @@ var VERDICT_FIELDS=["verdict","deleted","deletedAt"];
    newLocalState and toPush from the same array - so a stray "compress"
    self-heals within one sync round trip, the same always-on shape
    dedupeCategoriesByName already uses for its own self-heal, not a
-   one-time fix that needs remembering to re-run. */
+   one-time fix that needs remembering to re-run.
+
+   Reported via BOTH console.log (matching dedupeCategoriesByName's own
+   precedent below, logged from inside this otherwise-pure function
+   exactly the same way) AND a returned `swept` list, which the caller
+   (runDriveSync - the only place with real UI access, since this whole
+   engine is deliberately kept side-effect-free and independently
+   testable, see syncEngine's own comment) turns into a toast. Console-only
+   is what this app's own real-world use already proved insufficient: this
+   exact mechanism silently cleared real verdicts for weeks before anyone
+   noticed, because nothing surfaced outside DevTools. */
 function sweepCompressVerdicts(flat,deviceId){
-  var now=nowIso();
-  return flat.map(function(r){
+  var now=nowIso(),swept=[];
+  var records=flat.map(function(r){
     if(r.deleted||r.verdict!=="compress") return r;
+    swept.push({weekIso:r.weekIso,catId:r.catId});
+    console.log('Hours Ledger sync: cleared a stale "compress" verdict (pre-rename Keep/Compress/Cut scale) - week '+
+      r.weekIso+", category "+r.catId+".");
     return {id:r.id,weekIso:r.weekIso,catId:r.catId,verdict:null,
       updatedAt:now,updatedBy:deviceId,deleted:true,deletedAt:now};
   });
+  return {records:records,swept:swept};
 }
 function flattenVerdicts(s){
   var out=[];
@@ -560,7 +574,8 @@ function syncEngine(localStateIn,remoteFile,deviceId){
   mergedCatsFlat=deduped.categories;
   mergedEntriesFlat=deduped.entries;
   mergedVerdictsFlat=deduped.verdicts;
-  mergedVerdictsFlat=sweepCompressVerdicts(mergedVerdictsFlat,deviceId);
+  var sweepResult=sweepCompressVerdicts(mergedVerdictsFlat,deviceId);
+  mergedVerdictsFlat=sweepResult.records;
 
   var catsResult=unflattenCategories(mergedCatsFlat);
   var entriesResult=unflattenEntries(mergedEntriesFlat);
@@ -574,7 +589,12 @@ function syncEngine(localStateIn,remoteFile,deviceId){
       weeklyVerdicts:verdictsResult.weeklyVerdicts,verdictMeta:verdictsResult.verdictMeta,deletedVerdicts:verdictsResult.deletedVerdicts,
       weekCloseouts:closeoutsResult.weekCloseouts
     }),
-    toPush:{categories:mergedCatsFlat,entries:mergedEntriesFlat,verdicts:mergedVerdictsFlat,closeouts:mergedCloseoutsFlat}
+    toPush:{categories:mergedCatsFlat,entries:mergedEntriesFlat,verdicts:mergedVerdictsFlat,closeouts:mergedCloseoutsFlat},
+    /* surfaced separately from newLocalState/toPush - this is the ONE thing
+       this otherwise-pure engine hands back specifically so its caller can
+       tell the user something happened, not data the caller needs to apply.
+       See sweepCompressVerdicts' own comment for why this exists at all. */
+    sweptCompress:sweepResult.swept
   };
 }
 
@@ -1021,14 +1041,22 @@ function connectDrive(){
       render(); refreshHint(); updateColophon();
       document.getElementById("connectDrive").disabled=false;
       document.getElementById("connectDrive").textContent="Drive: syncing…";
+      /* appended to THIS toast, not a second showToast() call right after it -
+         see describeCompressSweep's own comment for why a standalone second
+         toast here would just silently clobber this one a moment later. The
+         local sweep already happened (it's part of syncResult.newLocalState,
+         already persisted above) regardless of whether the push below
+         succeeds, so both branches mention it if it happened. */
+      var sweptNote=(syncResult.sweptCompress&&syncResult.sweptCompress.length)?
+        " "+describeCompressSweep(syncResult.sweptCompress):"";
       driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts}).then(function(){
         setStatus("Synced with Drive");
         document.getElementById("connectDrive").textContent="Drive: synced";
-        showToast("Connected — your weeks are syncing.",false);
+        showToast("Connected — your weeks are syncing."+sweptNote,false);
       }).catch(function(){
         setStatus("Connected, first push failed",true);
         document.getElementById("connectDrive").textContent="Drive: sync failed";
-        showToast("Connected, but the first push to Drive failed — it'll retry on the next change.",false);
+        showToast("Connected, but the first push to Drive failed — it'll retry on the next change."+sweptNote,false);
       });
     }).catch(function(e){ driveConnectFailed(e); });
   },true);
@@ -1040,6 +1068,27 @@ function driveConnectFailed(e){
   showToast("Couldn't connect to Google Drive: "+e.message,false);
 }
 
+/* returns just the text fragment, not a shown toast - connectDrive() and
+   runDriveSync() each have their OWN existing toast at this exact point
+   (or none at all, for an ordinary background sync), and showToast()
+   replaces its own text rather than queuing, so firing a second,
+   independent toast right after "Connected - your weeks are syncing."
+   would just silently clobber it a moment later. Each caller decides
+   whether to show this standalone or appended to a toast it's already
+   showing. One toast per swept BATCH, not one per record, for the same
+   reason - a real cleanup sync can sweep several at once. Every swept
+   record still gets its own line in sweepCompressVerdicts' own
+   console.log regardless of how many there are; this is a summary. */
+function describeCompressSweep(swept){
+  var names=swept.map(function(s){
+    var cat=catById(s.catId),wk=parseIso(s.weekIso);
+    return (cat?cat.name:"a deleted category")+" ("+fmtShort(wk)+"–"+fmtShort(addDays(wk,6))+")";
+  });
+  return names.length===1?
+    names[0]+": verdict reset — it was stored in an old format":
+    names.length+" old-format verdicts reset: "+names.slice(0,3).join(", ")+
+      (names.length>3?", +"+(names.length-3)+" more":"");
+}
 var DRIVE_SYNC_DEBOUNCE_MS=TEST_MODE?50:2000; /* real debounce would make every test wait 2s for no reason */
 function scheduleDriveSync(){
   clearTimeout(driveSyncTimer);
@@ -1100,6 +1149,12 @@ function runDriveSync(manual){
       driveSyncApplyingRemote=true;
       try{ persist(); } finally{ driveSyncApplyingRemote=false; }
       render();
+      /* user-facing, not just the console.log already inside
+         sweepCompressVerdicts itself - this exact self-heal ran silently
+         for weeks in real use before anyone noticed, because nothing
+         surfaced outside DevTools. state is already reassigned above, so
+         catById resolves against the just-merged categories. */
+      if(syncResult.sweptCompress&&syncResult.sweptCompress.length) showToast(describeCompressSweep(syncResult.sweptCompress),false);
       return driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts}).then(function(){
         driveSyncInFlight=false;
         setStatus("Synced with Drive");
@@ -2163,6 +2218,7 @@ document.getElementById("totals").addEventListener("click",function(ev){
   var b=ev.target.closest(".verdict button"); if(!b) return;
   var c=catById(b.parentNode.dataset.cat); if(!c) return;
   var thisWeek=iso(weekStart);
+  snapshot(c.name+" verdict");
   setVerdict(c.id,thisWeek,getVerdict(c.id,thisWeek)===b.dataset.v?null:b.dataset.v);
   persist(); renderTotals();
 });
@@ -2421,6 +2477,8 @@ document.getElementById("closeoutTotals").addEventListener("click",function(ev){
   var b=ev.target.closest(".verdict button"); if(!b||!closeoutWeek) return;
   var catId=b.closest(".verdict").dataset.cat, wk=iso(closeoutWeek);
   var cur=getVerdict(catId,wk), v=b.dataset.v;
+  var cat=catById(catId);
+  snapshot((cat?cat.name:"category")+" verdict");
   setVerdict(catId,wk,cur===v?null:v);
   persist();
   renderCloseoutTotals();
@@ -2803,6 +2861,7 @@ if(TEST_MODE){
     clearLocalStateForTest:function(){
       try{ localStorage.removeItem(KEY); }catch(e){}
       try{ localStorage.removeItem(DEVICE_KEY); }catch(e){}
+      try{ localStorage.removeItem(UKEY); }catch(e){}
     },
     persist:persist,
     doDeleteCategory:doDeleteCategory,

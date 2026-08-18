@@ -1559,6 +1559,24 @@ function runTests(H,d){
     var pushedTombstone=pullA.toPush.verdicts.filter(function(v){ return v.id==="2026-06-01|studies"; })[0];
     assert("the cleanup writes a real tombstone (not a silent local-only drop), and it's already part of THIS SAME call's toPush - it doesn't wait for some later trigger to reach Drive",
       pushedTombstone&&pushedTombstone.deleted===true);
+    /* this silently dropped real verdicts for weeks in real use before
+       anyone noticed, because nothing surfaced outside DevTools -
+       syncEngine() now reports what it swept so the caller (runDriveSync)
+       can tell the user, not just log it. Mechanism check here: does the
+       pure engine report the right week/category. The actual toast
+       appearing is a separate, async test below - this one can't see it,
+       syncEngine has no DOM access by design. */
+    assert("syncEngine() reports which week/category had a stale 'compress' swept, not just the console log inside sweepCompressVerdicts",
+      pullA.sweptCompress&&pullA.sweptCompress.length===1&&
+      pullA.sweptCompress[0].weekIso==="2026-06-01"&&pullA.sweptCompress[0].catId==="studies");
+  })();
+  /* a sync with nothing stale to sweep reports an empty list, not a missing
+     field or a false positive - the caller's "if(...sweptCompress.length)"
+     check depends on this always being a real array */
+  (function(){
+    var clean=H.syncEngine(freshState([{id:"c1",name:"Work",color:"#27864F"}],{}),null,"sim-device-clean");
+    assert("a sync with no stale 'compress' anywhere reports an empty sweptCompress list",
+      Array.isArray(clean.sweptCompress)&&clean.sweptCompress.length===0);
   })();
   (function(){ // close-outs resolve last-write-wins too, same as verdicts and everything else
     var deviceA="sim-device-coA",deviceB="sim-device-coB";
@@ -2316,6 +2334,93 @@ function runAsyncTests(H,d){
       assert("once an attempt has been made and not resolved this session, the next tap doesn't reprompt",
         H.getDriveNeedsReconnect()===true);
       H.setDriveReconnectAttempted(false);
+    })
+    .then(function(){
+      /* the toast half of the compress-sweep fix - syncEngine() reporting
+         sweptCompress (tested synchronously above) is only half the fix;
+         this drives an actual connect+sync through the real async path
+         (fakeDrive standing in for the network, same as every other Drive
+         test in this file) and checks the toast a real user would see.
+         Seeded BEFORE connecting, on a fresh sandbox, so this device's
+         very first sync is the one that encounters the stale record -
+         the same shape as a real leftover already sitting in a real
+         Drive file when a device connects or does its next ordinary sync.
+
+         Cleared via the OUTER (still-live) H, BEFORE the fresh iframe is
+         created - not after, via the fresh iframe's own hook. All sandboxes
+         share one origin's localStorage, so if an earlier test in this
+         suite left driveConnected=true behind, a freshSandbox() call
+         loads with that already true and fires its own automatic
+         page-load catch-up sync (scheduleDriveSync() at app.js's own
+         bottom) within milliseconds - racing ahead of this test's own
+         setup and seeded fakeDrive data, and satisfying this test's own
+         waitFor("Drive: synced") from THAT unrelated sync instead of the
+         one this test actually triggers. Caught for real, not reasoned
+         about: this exact race produced two failing assertions the first
+         time this test ran, traced via console logging to a sync that had
+         already completed before this test's own click ever fired. */
+      H.fakeDriveReset(); H.clearLocalStateForTest();
+      return freshSandbox();
+    })
+    .then(function(fresh){
+      var h=fresh.H,dd=fresh.d;
+      h.fakeDriveWrite({
+        categories:[{id:"seed-studies",name:"Studies",color:"#2B52A1",
+          updatedAt:"2026-01-01T00:00:00.000Z",updatedBy:"sim-stale-device",deleted:false,deletedAt:null}],
+        entries:[],closeouts:[],
+        verdicts:[{id:"2026-06-01|seed-studies",weekIso:"2026-06-01",catId:"seed-studies",verdict:"compress",
+          updatedAt:"2026-01-01T00:00:00.000Z",updatedBy:"sim-stale-device",deleted:false,deletedAt:null}]
+      });
+      dd.getElementById("connectDrive").click();
+      return waitFor(function(){ return dd.getElementById("connectDrive").textContent==="Drive: synced"; },4000)
+        .then(function(ok){
+          assert("compress-sweep toast test, setup: connect+first sync completed",ok);
+          assert("a stale 'compress' swept during a real sync shows a user-facing toast, not just a console log",
+            dd.getElementById("toast").classList.contains("on"));
+          assert("the toast names the actual category that was affected",
+            /Studies/.test(dd.getElementById("toastText").textContent));
+          assert("the swept verdict is actually gone from local state, not just the toast claiming so",
+            !(h.getState().weeklyVerdicts["2026-06-01"]&&("seed-studies" in h.getState().weeklyVerdicts["2026-06-01"])));
+        });
+    })
+    .then(function(){
+      /* the snapshot() gap - neither verdict handler called it before this
+         fix, so Ctrl+Z could never recover a verdict change. Exercises the
+         real click handler (not setVerdict()+snapshot() called directly),
+         since the bug was specifically that the HANDLER never snapshotted,
+         not that snapshot()/setVerdict() themselves were broken.
+
+         The undo stack (UKEY, "hours-ledger-selftest-undo-v1" under
+         TEST_MODE) persists in the SAME shared, same-origin localStorage
+         every sandbox reads on load - without clearing it first, a fresh
+         sandbox can inherit a leftover snapshot from an earlier test and
+         have h.undo() pop THAT instead of this test's own click,
+         producing a false pass with nothing to do with whether THIS click
+         was actually snapshotted. Cleared directly here via this page's
+         own localStorage (same origin as every sandbox, no iframe needed)
+         rather than through H.clearLocalStateForTest() - that hook lives
+         IN app.js, so stashing app.js to fail-first this exact test would
+         silently also revert the hook's own fix for this, contaminating
+         the very check meant to isolate the snapshot() fix. Caught for
+         real, not reasoned about: the first version of this test used the
+         hook and passed even with app.js's snapshot() fix reverted, for
+         exactly this entangled reason. */
+      try{ localStorage.removeItem("hours-ledger-selftest-undo-v1"); }catch(e){}
+      return freshSandbox();
+    })
+    .then(function(fresh){
+      var h=fresh.H,dd=fresh.d;
+      var cat=h.getState().categories[0];
+      var thisWeek=h.iso(h.mondayOf(new Date()));
+      assert("undo test setup: category starts with no verdict set this week",
+        h.getVerdict(cat.id,thisWeek)===null);
+      var b=dd.querySelector('#totals .verdict[data-cat="'+cat.id+'"] button[data-v="keep"]');
+      assert("undo test setup: found the Keep button for this category in the rendered rail",!!b);
+      b.click();
+      assert("clicking Keep actually sets the verdict",h.getVerdict(cat.id,thisWeek)==="keep");
+      h.undo();
+      assert("undoing a verdict click reverts it - this never worked before the snapshot() fix, since the click handler never called snapshot()",
+        h.getVerdict(cat.id,thisWeek)===null);
     })
     .then(function(){ return results; });
 }
