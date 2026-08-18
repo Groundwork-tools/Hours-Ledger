@@ -266,6 +266,17 @@ on purpose.
   keyboard doesn't interfere, repeated open/close is stable, the grid's
   drag-to-log is unaffected, and the close-out sheet's nested scroll
   behaves correctly. `selftest.html`: 292/292.
+- **Weekly verdicts silently reverting, compress-sweep toast, undo
+  coverage** (2026-08-18): merged to `main` and live. See backlog item 18
+  for the full diagnosis, including a real fix that only turned out to
+  be a partial one on first pass (a test-harness race patched at two
+  call sites, then found to affect four more and fixed at its actual
+  source). Verified before merge: the real Drive file and both real
+  devices' local storage checked directly and found clean of the stale
+  `"compress"` records that caused this; undo confirmed on a real device
+  across every category in a real week, all deselecting correctly with
+  no reappearance. `selftest.html`: 302/302, re-run three times for
+  flakiness and fail-first re-confirmed with the corrected test harness.
 
 ---
 
@@ -1157,10 +1168,8 @@ dashboard styling.
     scroll (`.closeout-gaps`) behaves correctly. Merged to `main`
     2026-08-18.
 
-18. **Weekly verdicts silently reverting — staged on
-    `fix/verdict-compress-sweep-toast-and-undo`, not yet merged, pending
-    Sebastian's own before/after Drive-file check and real-device
-    verification.** Reported bug: setting a verdict appeared to work,
+18. **Weekly verdicts silently reverting — merged to `main` and live,
+    verified before merge.** Reported bug: setting a verdict appeared to work,
     stayed selected for roughly 4-5 seconds, then deselected on its own -
     affecting a different set of categories week to week, only on weeks
     with pre-existing data, always a full deselect rather than a switch
@@ -1246,17 +1255,19 @@ dashboard styling.
       its own `console.log` line inside `sweepCompressVerdicts()` itself
       regardless - the toast is a user-facing summary layered on top, not
       a replacement for the existing trace.
-    - **One-time cleanup of the real Drive file is Sebastian's own
-      before/after check, not assumed here.** `sweepCompressVerdicts()`
-      already self-heals idempotently on every sync (same always-on shape
+    - **One-time cleanup of the real Drive file - confirmed clean,
+      before this fix even merged.** `sweepCompressVerdicts()` already
+      self-heals idempotently on every sync (same always-on shape
       `dedupeCategoriesByName()` uses), so no separate cleanup *code* was
-      needed - but confirming it actually converged required seeing the
-      real file, not trusting the mechanism. Before-state and after-state
-      (download `hours-ledger-sync.json` from Drive, search its raw text
-      for `"compress"`) are both real-data checks outside what a
-      TEST_MODE suite can do or should ever touch, and are Sebastian's to
-      run and report, not something this session had any way to verify
-      itself - no Google account access exists here.
+      needed. Sebastian downloaded `hours-ledger-sync.json` directly from
+      Drive and searched its raw text for `"compress"` - zero matches -
+      and separately checked `localStorage.getItem('hours-ledger-v2')`'s
+      `weeklyVerdicts` on both real devices (laptop and a separate Chrome
+      window) for the same string, also zero. All three real-data checks
+      were already clean before this branch merged, meaning the specific
+      leftover batch behind the original report had already fully
+      self-healed by the time of this check - not something this session
+      could verify itself, no Google account access exists here.
     - **`snapshot()` now precedes both `setVerdict()` call sites** (the
       week rail and the close-out sheet's own verdict buttons) - a real,
       separate gap against hard rule 5 found during this investigation,
@@ -1331,5 +1342,16 @@ dashboard styling.
       (checked out from its parent commit, not stashed, since `app.js`
       was already committed by this point) with the *corrected* harness:
       still exactly the same 4/302 failing, now for real.
+
+    **Real-device verification, confirmed by Sebastian on the branch
+    preview before merging**: set a verdict on every category in a real
+    week deliberately (not a random subset), pressed Ctrl+Z - all
+    deselected correctly and stayed deselected, none reappeared. The
+    toast itself couldn't be field-tested against genuine stale data,
+    since the real Drive file and both real devices were already clean by
+    the time of this check (see the cleanup entry above) - covered
+    instead by `selftest.html`'s fake-stale-record test, walked through
+    line by line and re-run live on request before merge. Merged to
+    `main` 2026-08-18.
 
 Feature creep is the known failure mode of this project.
