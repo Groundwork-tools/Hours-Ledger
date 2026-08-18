@@ -994,4 +994,155 @@ dashboard styling.
       this item exists to close; flagged there too so whoever builds
       offline support hits this as a known interaction, not a surprise
       mid-build.
+17. **Modal scroll lock (iOS Safari) — built on `fix/modal-scroll-lock`,
+    not yet merged, pending real-device verification.** Reported bug: with
+    any of the three scrims open (entry sheet, close-out sheet, intro),
+    touch scrolling on an iPhone (Chrome, i.e. WebKit) often scrolled the
+    page underneath instead of the modal's own content — a touch on the
+    bare scrim background, a touch inside the sheet when its content
+    genuinely didn't need to scroll, and a scroll that ran the sheet's own
+    content out and kept going, all leaked to the page. The page's scroll
+    position also stayed wherever it leaked to after the modal closed,
+    since nothing restored it.
+
+    **Root cause, diagnosed from code before any fix was written**: none
+    of `.scrim`/`.sheet`/`<body>` had `overscroll-behavior` set anywhere,
+    so a scroll that exhausted `.sheet`'s own limit chained straight to
+    the page by the browser's default behaviour; there was no body scroll
+    lock at all (`overflow:hidden` on `<body>` is a well-known no-op for
+    touch scroll on iOS Safari specifically, not attempted here); and
+    `openSheet()`/`openCloseout()` never reset `.sheet`'s own `scrollTop`,
+    so a sheet reopened later in the same session could start mid-content
+    instead of at a predictable boundary, making which direction leaked
+    depend on session history rather than being consistent.
+
+    **Fix**: `lockBodyScroll()`/`unlockBodyScroll()`, shared across all
+    three scrims (`app.js`, next to `wireOutsideClose`) — `position:fixed`
+    on `<body>` with the pre-open `scrollY` captured as a negative `top`
+    offset and `width:100%` (fixed positioning otherwise collapses body to
+    content width, reflowing whatever's underneath), removed and restored
+    via `scrollTo` on close. `overflow:hidden` on body was rejected as the
+    technique itself, not just skipped as redundant — it doesn't work on
+    iOS Safari, the exact browser this bug was reported on; general
+    WebKit knowledge, not something re-derived from this codebase.
+    **A counter, not a plain boolean pair**: nothing in the reachable UI
+    can open two scrims at once (every scrim is a full-viewport,
+    highest-z-index, `pointer-events:auto` overlay, so opening one
+    physically blocks every tap that could open another — the existing
+    Enter-to-log handler already checks this explicitly before opening a
+    fresh sheet), but proving that invariant perfectly was judged not
+    worth the risk: a failed unlock leaves the page permanently
+    unscrollable until reload, worse than the bug it fixes. The counter
+    costs nothing extra over a boolean and stays correct even if that
+    invariant is ever wrong. Two failure modes a boolean would have
+    gotten wrong, both closed by the counter's guards: locking twice
+    would re-capture `scrollY` on the second call — and a locked body
+    reports `scrollY` as 0 regardless of the real saved position, so a
+    naive re-lock would silently overwrite the real value with 0, and the
+    eventual unlock would snap to the top instead of restoring it;
+    unlocking when never locked would call `scrollTo` with a stale or
+    default value, jumping the page somewhere it was never at. (This was
+    caught for real, not just reasoned about: the self-test suite's
+    pre-existing setup left the intro modal open for its entire run on a
+    genuinely fresh profile — see below — which surfaced exactly the
+    "opened twice, closed once" shape the counter exists to survive.)
+
+    `overscroll-behavior:contain` added to `.sheet` and separately to
+    `.closeout-gaps` (a second, nested scroll container inside the
+    close-out sheet — its own chain link needs the same containment, or a
+    scroll exhausted there chains straight past `.sheet` to the page).
+    Real on desktop too, not iOS-specific: without it, a mouse wheel
+    scrolled past either container's own limit already scrolls the page
+    underneath on every platform, so this is a genuine (if smaller,
+    less-noticed) desktop fix as well as a phone one. A defensive
+    `touchmove` block on each scrim's own background, gated on
+    `ev.target===scrimEl` (the same check `wireOutsideClose` already
+    uses, so it can never intercept a touch meant for the sheet's own
+    scroll) — likely redundant once the body lock holds, kept as a cheap
+    second line of defense specifically against any WebKit quirk (e.g.
+    address-bar collapse) that might let a touch through the lock.
+
+    **`.sheet`'s `scrollTop` now resets to 0 on every open**
+    (`openSheet()`, `openCloseout()`) — a real decision this
+    investigation surfaced, not a given. Argued for: every other field
+    `openSheet()` touches is already reset to a known state on open
+    (`fDay`, `fStart`/`fEnd`, `fBreakToggle`, `breakRows`, `fLabel`,
+    `chosenCat`) — leftover scroll position was the one piece of UI state
+    that wasn't following that existing convention, not a deliberate
+    design choice. It also directly closes the leftover-scrollTop
+    ambiguity above: with every open starting at the same, predictable
+    position, "opens at a boundary" is a clean, singular starting
+    condition instead of depending on whatever a previous session left
+    behind. Argued against and rejected: preserving scroll position
+    across a close/reopen isn't a feature this app has ever had anywhere
+    else, and `openSheet()`/`openCloseout()` already represent fresh data
+    (a different entry, a different week) even when reopened quickly, so
+    there's nothing meaningful being "resumed" by keeping it. `#intro` was
+    deliberately left alone — its content is fixed and short, never
+    genuinely overflows `.sheet`'s `max-height`, so there's no leftover
+    state to reset there in the first place.
+
+    **`#intro`'s outside-click asymmetry — known gap, deferred, not fixed
+    in this batch.** `#intro`'s outside-click-to-close is a plain
+    `if(ev.target===introEl) closeIntro()` listener, not
+    `wireOutsideClose()` — meaning it doesn't have the entry/close-out
+    sheets' fix for a drag that starts inside the sheet and releases on
+    the scrim (see the real-user bug batch's item 5 above), which would
+    read as a false outside-click on `#intro` the same way it once did on
+    the other two. Left as-is deliberately: testing it properly needs
+    dismissing the intro modal on a real phone, which means clearing
+    `hours-ledger-seen` on that device first — a real step, not a
+    trivial one to fold into this batch's already-planned device-testing
+    pass. Revisit together with a real-device round, not as a silent
+    side effect of this fix.
+
+    **Alternative considered and rejected as the primary mechanism,
+    recorded as the fallback**: making `.scrim` itself the scroll-chain
+    terminator (`overflow:hidden` plus `overscroll-behavior:contain` on
+    `.scrim`, no body lock at all). Simpler in one real way — it never
+    touches `<body>`'s own position or layout, so there's no `scrollY`
+    save/restore to get wrong and no interaction with Safari's
+    address-bar collapse/expand to worry about. Not used as the primary
+    fix because its reliability is less certain: `overscroll-behavior` is
+    specified to govern chaining out of a genuine scroll container, and
+    `.scrim` with `overflow:hidden` isn't one — it has no scrollable
+    content of its own, so a touch landing there likely still gets routed
+    past it to the next real scrollable ancestor by the browser's normal
+    hit-testing, the same as today. Making this reliable would likely
+    mean turning `.scrim` into an actual (even if invisible,
+    exactly-viewport-sized) scroll container purely to give it something
+    to contain — a hackier, less-precedented pattern than the
+    well-documented `position:fixed` body lock. Kept on record as the
+    fallback specifically for the risk named above: if the body lock
+    proves flaky under Safari's address-bar collapse on real-device
+    testing, try this next, not as a co-equal first option.
+
+    **Verification split, stated explicitly per the project's own
+    standing rule**: `selftest.html` (292/292 as of this entry) covers
+    mechanism only — the lock/unlock wiring fires on every one of the six
+    open/close paths, the counter's double-lock and unlock-when-never-
+    locked edge cases, `overscroll-behavior:contain`'s presence in
+    computed style, the touchmove block's target-gating logic, and the
+    `scrollTop` reset. None of that proves scrolling actually stays
+    contained on a real device — this sandbox iframe is `display:none`
+    with no real touch dispatch or scroll physics, the same limitation
+    already true of every other touch-handling test in this file. Adding
+    these tests surfaced a genuine, previously-invisible gap in the test
+    harness itself: the pre-existing suite never dismissed the intro
+    modal that auto-opens on a genuinely fresh profile (no persisted
+    `hours-ledger-seen`), which cost nothing observable before this work
+    since nothing tracked intro's open state — now fixed by dismissing it
+    once, right after the suite's own state reset, before any other test
+    runs. Still needed before this merges to `main`: real-device
+    verification via a `raw.githack.com` preview off `fix/modal-scroll-
+    lock`, per the project's standing rule for anything touching touch or
+    mobile layout — not DevTools emulation. Re-verify specifically: all
+    three original symptoms actually stop; the grid's own drag-to-log
+    behaviour is unaffected (it lives behind the scrim and shares no code
+    with this fix, but re-verify anyway per the same discipline item 10
+    required); the page holds still visually at modal open and restores
+    cleanly at close, including across an address-bar collapse/expand;
+    and the desktop background-scroll change (accepted as intended, not a
+    regression) feels right in practice on a laptop.
+
 Feature creep is the known failure mode of this project.

@@ -180,13 +180,23 @@ button{cursor:pointer}
 
 .scrim{position:fixed;inset:0;background:rgba(22,33,27,.5);display:none;align-items:center;justify-content:center;padding:20px;z-index:40}
 .scrim.on{display:flex}
-.sheet{background:var(--paper);border:1px solid var(--ink);width:100%;max-width:440px;padding:20px;max-height:92vh;overflow:auto}
+/* overscroll-behavior:contain stops a scroll that reaches this element's own
+   top/bottom from chaining on to whatever's behind it (the page, via the
+   body scroll lock in app.js) instead of just stopping/rubber-banding here -
+   see CLAUDE.md's modal-scroll-lock entry. Real on desktop too, not just
+   iOS: without it, a mouse wheel scrolled past this element's own limit
+   already scrolls the page underneath on every platform. */
+.sheet{background:var(--paper);border:1px solid var(--ink);width:100%;max-width:440px;padding:20px;max-height:92vh;overflow:auto;overscroll-behavior:contain}
 .sheet h2{font-size:14px;letter-spacing:.14em;text-transform:uppercase;margin:0 0 16px;font-weight:700}
 .field{margin-bottom:14px}
 .field label{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);margin-bottom:5px}
 .field input[type=text],.field select,.field input[type=time],.field input[type=date]{width:100%;padding:9px;border:1px solid var(--rule);background:transparent;font-size:14px;border-radius:0}
 .field input[type=time],.field input[type=date]{font-family:var(--mono)}
-.closeout-gaps{border:1px solid var(--rule);max-height:160px;overflow:auto}
+/* a second, nested scroll container inside .sheet - same overscroll-behavior
+   reasoning as .sheet above, its own chain link (closeout-gaps -> sheet ->
+   body) needs the same containment or a scroll exhausted here chains
+   straight past .sheet to the page, skipping .sheet's own containment. */
+.closeout-gaps{border:1px solid var(--rule);max-height:160px;overflow:auto;overscroll-behavior:contain}
 .gap-row{padding:7px 9px;font-family:var(--mono);font-size:11.5px;color:var(--muted);border-bottom:1px solid var(--rule-soft)}
 .gap-row:last-child{border-bottom:0}
 .gap-row b{font-family:var(--display);color:var(--ink);font-weight:600;margin-right:6px}
