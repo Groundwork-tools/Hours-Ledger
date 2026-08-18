@@ -1757,7 +1757,45 @@ function waitFor(predicate,timeoutMs){
    storage keys are fixed names, not per-iframe, so a brand new page
    genuinely reading what a previous session left behind is exactly what a
    real tab close/reopen or reload does. */
-function freshSandbox(){
+/* clean=true wipes every TEST_MODE storage key BEFORE the iframe is
+   created, not after. All sandboxes are same-origin and share ONE
+   localStorage - without this, a fresh iframe can inherit driveConnected
+   (or an undo-stack entry, or a fake-drive file) left behind by whatever
+   test ran immediately before it, and fire its OWN automatic page-load
+   sync (or have undo() pop an unrelated snapshot) before the calling
+   test's own setup has even run. Real, not hypothetical: this exact race
+   produced two false results while building the compress-sweep toast fix
+   (see CLAUDE.md's item 18) - traced via console logging to a sync/undo
+   that had already completed/fired before the test's own trigger did.
+
+   Clearing AFTER freshSandbox() resolves - the pattern most existing
+   callers below still use - only clears localStorage; it does nothing
+   about the fresh iframe's in-memory `state`/`undoStack`, both already
+   parsed at load time, before that later call can run. Clearing here,
+   before creation, is the only place it's actually safe.
+
+   The five key names below are hardcoded rather than read from any
+   app.js constant (KEY/DEVICE_KEY/UKEY/FAKE_DRIVE_KEY/ACCESS_TOKEN_KEY)
+   on purpose: this needs to keep working correctly even when app.js is
+   the thing under test and might be reverted (e.g. via `git stash`) to
+   confirm a fix fail-first - depending on a hook or constant FROM app.js
+   for test-harness correctness would silently break that exact use case,
+   which is exactly what happened once already (see CLAUDE.md's item 18
+   on why the undo test clears its own key directly rather than through
+   clearLocalStateForTest()).
+
+   clean defaults to false, not true: killSandboxAndOpenFresh() below
+   exists specifically to verify state SURVIVES a simulated reload (a
+   real regression test for data almost lost that way) - wiping storage
+   there would break the exact thing that test is checking. */
+function freshSandbox(clean){
+  if(clean){
+    ["hours-ledger-selftest-v2","hours-ledger-device-id-TESTMODE",
+     "hours-ledger-selftest-undo-v1","hours-ledger-fakedrive-TESTMODE",
+     "hours-ledger-access-token-TESTMODE"].forEach(function(k){
+      try{ localStorage.removeItem(k); }catch(e){}
+    });
+  }
   return new Promise(function(resolve){
     var iframeEl=document.createElement("iframe");
     iframeEl.style.display="none";
@@ -2004,12 +2042,16 @@ function runAsyncTests(H,d){
          further ever shown after the one triggering error - "sync just
          stops" for the rest of the page's life. A dedicated fresh sandbox
          so a broken JSON.stringify patch, if this goes wrong, can't leak
-         into any other test's shared fake-remote state. */
-      return freshSandbox();
+         into any other test's shared fake-remote state. clean:true - see
+         freshSandbox()'s own comment for why this must be requested
+         explicitly rather than assumed, and why clearing after load (the
+         old h.fakeDriveReset()/h.clearLocalStateForTest() pair this test
+         used to call here) doesn't actually protect against a leftover
+         driveConnected racing this test's own setup. */
+      return freshSandbox(true);
     })
     .then(function(fresh){
       var h=fresh.H,dd=fresh.d;
-      h.fakeDriveReset(); h.clearLocalStateForTest();
       dd.getElementById("connectDrive").click();
       return waitFor(function(){ return dd.getElementById("connectDrive").textContent==="Drive: synced"; },4000)
         .then(function(ok){
@@ -2060,12 +2102,11 @@ function runAsyncTests(H,d){
          TEST_MODE's getAccessToken simulate exactly that: never calling
          cb on its own, so only a real safety net can ever recover. Fresh
          sandbox so a stuck flag, if this regresses, can't leak into any
-         other test. */
-      return freshSandbox();
+         other test. clean:true - same reason as the block above. */
+      return freshSandbox(true);
     })
     .then(function(fresh){
       var h=fresh.H,dd=fresh.d;
-      h.fakeDriveReset(); h.clearLocalStateForTest();
       dd.getElementById("connectDrive").click();
       return waitFor(function(){ return dd.getElementById("connectDrive").textContent==="Drive: synced"; },4000)
         .then(function(ok){
@@ -2119,12 +2160,11 @@ function runAsyncTests(H,d){
          browser, which is exactly the part CLAUDE.md's reasoning for
          keeping the backstop timeout is about; that half needs a real
          device, deliberately, alt-tabbing away and back. Fresh sandbox,
-         same reason as the block above. */
-      return freshSandbox();
+         clean:true, same reason as the block above. */
+      return freshSandbox(true);
     })
     .then(function(fresh){
       var h=fresh.H,dd=fresh.d,win=fresh.el.contentWindow;
-      h.fakeDriveReset(); h.clearLocalStateForTest();
       dd.getElementById("connectDrive").click();
       return waitFor(function(){ return dd.getElementById("connectDrive").textContent==="Drive: synced"; },4000)
         .then(function(ok){
@@ -2167,12 +2207,12 @@ function runAsyncTests(H,d){
          the fix; this proves it end to end using the real function, not
          a re-implementation - setTestLateSuccessMs schedules a simulated
          "real GIS callback" to arrive after the backstop has already
-         resolved this attempt as dismissed. */
-      return freshSandbox();
+         resolved this attempt as dismissed. clean:true, same reason as
+         the blocks above. */
+      return freshSandbox(true);
     })
     .then(function(fresh){
       var h=fresh.H,dd=fresh.d;
-      h.fakeDriveReset(); h.clearLocalStateForTest();
       dd.getElementById("connectDrive").click();
       return waitFor(function(){ return dd.getElementById("connectDrive").textContent==="Drive: synced"; },4000)
         .then(function(ok){
@@ -2345,22 +2385,9 @@ function runAsyncTests(H,d){
          very first sync is the one that encounters the stale record -
          the same shape as a real leftover already sitting in a real
          Drive file when a device connects or does its next ordinary sync.
-
-         Cleared via the OUTER (still-live) H, BEFORE the fresh iframe is
-         created - not after, via the fresh iframe's own hook. All sandboxes
-         share one origin's localStorage, so if an earlier test in this
-         suite left driveConnected=true behind, a freshSandbox() call
-         loads with that already true and fires its own automatic
-         page-load catch-up sync (scheduleDriveSync() at app.js's own
-         bottom) within milliseconds - racing ahead of this test's own
-         setup and seeded fakeDrive data, and satisfying this test's own
-         waitFor("Drive: synced") from THAT unrelated sync instead of the
-         one this test actually triggers. Caught for real, not reasoned
-         about: this exact race produced two failing assertions the first
-         time this test ran, traced via console logging to a sync that had
-         already completed before this test's own click ever fired. */
-      H.fakeDriveReset(); H.clearLocalStateForTest();
-      return freshSandbox();
+         clean:true - see freshSandbox()'s own comment for the race this
+         guards against (this test is the one that originally found it). */
+      return freshSandbox(true);
     })
     .then(function(fresh){
       var h=fresh.H,dd=fresh.d;
@@ -2390,23 +2417,22 @@ function runAsyncTests(H,d){
          since the bug was specifically that the HANDLER never snapshotted,
          not that snapshot()/setVerdict() themselves were broken.
 
-         The undo stack (UKEY, "hours-ledger-selftest-undo-v1" under
-         TEST_MODE) persists in the SAME shared, same-origin localStorage
-         every sandbox reads on load - without clearing it first, a fresh
-         sandbox can inherit a leftover snapshot from an earlier test and
-         have h.undo() pop THAT instead of this test's own click,
-         producing a false pass with nothing to do with whether THIS click
-         was actually snapshotted. Cleared directly here via this page's
-         own localStorage (same origin as every sandbox, no iframe needed)
-         rather than through H.clearLocalStateForTest() - that hook lives
-         IN app.js, so stashing app.js to fail-first this exact test would
-         silently also revert the hook's own fix for this, contaminating
-         the very check meant to isolate the snapshot() fix. Caught for
-         real, not reasoned about: the first version of this test used the
-         hook and passed even with app.js's snapshot() fix reverted, for
-         exactly this entangled reason. */
-      try{ localStorage.removeItem("hours-ledger-selftest-undo-v1"); }catch(e){}
-      return freshSandbox();
+         clean:true - the undo stack persisting in shared localStorage is
+         exactly the same race freshSandbox()'s own comment describes:
+         without it, a fresh sandbox could inherit a leftover snapshot
+         from an earlier test and have h.undo() pop THAT instead of this
+         test's own click, producing a false pass with nothing to do with
+         whether THIS click was actually snapshotted. This is genuinely
+         the ORIGINAL instance of that bug, found first here, before
+         freshSandbox() itself was fixed to take a clean flag at all - it
+         used to call localStorage.removeItem() directly rather than
+         through H.clearLocalStateForTest(), specifically because that
+         hook lives in app.js, and stashing app.js to fail-first this
+         exact test would have silently reverted the hook's own fix for
+         this too, contaminating the very check meant to isolate the
+         snapshot() fix. freshSandbox(clean)'s own key list is hardcoded
+         for the identical reason - see its comment. */
+      return freshSandbox(true);
     })
     .then(function(fresh){
       var h=fresh.H,dd=fresh.d;

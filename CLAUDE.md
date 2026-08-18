@@ -1278,34 +1278,58 @@ dashboard styling.
 
     **Two more bugs found by the testing process itself, not anticipated
     up front - exactly the value fail-first discipline is supposed to
-    provide, recorded here because both would have silently produced
-    false-positive tests otherwise:**
+    provide.** First found narrow, then found to be systemic on being
+    asked to confirm it wasn't just worked around - recorded as it
+    actually happened, not cleaned up to look like it was caught in one
+    pass:
     - The Drive-toast test's fresh sandbox iframe loaded with
       `driveConnected=true` already inherited from an earlier test's
       *shared, same-origin* `TEST_MODE` localStorage, firing that
       device's own automatic page-load catch-up sync (`scheduleDriveSync()`
-      at this file's own bottom) before the test's own seeded fake-Drive
-      data or its explicit `driveConnected=false` reset had a chance to
-      matter - the test's `waitFor("Drive: synced")` was satisfied by that
-      unrelated race, not by the sync under test. Fixed by clearing
-      storage via the *outer*, already-loaded sandbox before creating the
-      fresh one, not after - clearing after only touches localStorage, not
-      the fresh iframe's in-memory `state`, which was already parsed at
-      load time.
-    - The undo/snapshot test passed even with the `snapshot()` fix
-      reverted, for the identical shape of reason: the undo stack
-      (`UKEY`) persists in that same shared storage, so a fresh sandbox
-      could inherit an unrelated leftover snapshot and have `undo()` pop
-      *that* instead of - or on top of - this test's own click, landing on
-      "verdict reads null afterward" for the wrong reason entirely.
-      Deliberately fixed by clearing that one `localStorage` key directly
-      from this test file's own top-level script, *not* through
-      `clearLocalStateForTest()` - that hook lives in `app.js`, so
-      stashing `app.js` alone to fail-first-isolate the `snapshot()` fix
-      would have silently reverted the hook's own fix for this at the same
-      time, contaminating the exact check meant to isolate it.
-      `clearLocalStateForTest()` was still extended to clear `UKEY` too
-      (a reasonable, permanent improvement to what the hook already claims
-      to do), just not relied on for this specific test's own isolation.
+      at `app.js`'s own bottom) before the test's own seeded fake-Drive
+      data had a chance to matter - the test's `waitFor("Drive: synced")`
+      was satisfied by that unrelated race, not by the sync under test.
+      The undo/snapshot test failed the identical way, for the identical
+      reason, on the undo stack (`UKEY`) instead of `driveConnected`: a
+      fresh sandbox could inherit an unrelated leftover snapshot and have
+      `undo()` pop *that* instead of the test's own click, landing on
+      "verdict reads null afterward" for the wrong reason entirely - it
+      passed even with the real `snapshot()` fix reverted.
+    - **First fix, and its own gap**: both were patched at their own call
+      site only - clearing storage via the *outer*, already-loaded sandbox
+      (or, for the undo stack, `localStorage` directly, deliberately not
+      through `clearLocalStateForTest()` - that hook lives in `app.js`,
+      and stashing `app.js` to fail-first-isolate the `snapshot()` fix
+      would have silently reverted the hook's own fix for this too,
+      contaminating the very check meant to isolate it) *before* creating
+      the fresh sandbox, not after - clearing after only touches
+      localStorage, not the fresh iframe's in-memory `state`/`undoStack`,
+      both already parsed at load time. That fixed both tests. **It did
+      not fix the bug** - asked directly whether this was fixed in the
+      harness itself or worked around, checking honestly turned up four
+      *pre-existing* `freshSandbox()` call sites (the
+      `driveSyncApplyingRemote`, `driveSyncInFlight`, focus-fast-path, and
+      late-success-catch-up tests) using the exact same "clear after"
+      pattern, equally exposed, not fixed by patching only the two new
+      tests that happened to surface it.
+    - **Real fix**: `freshSandbox()` itself now takes a `clean` argument -
+      `true` wipes every `TEST_MODE` storage key *before* the iframe is
+      created, using this test file's own top-level `localStorage`
+      directly (same origin as every sandbox) rather than any app.js hook,
+      for the same stash-isolation reason as above. All five
+      "connect from a blank slate" call sites now pass `clean:true` and
+      dropped their now-redundant post-load `fakeDriveReset()`/
+      `clearLocalStateForTest()` calls. `clean` defaults to `false`,
+      deliberately, not `true`: `killSandboxAndOpenFresh()` (the
+      close-tab/reopen simulation covering BUG 2's real fix - an entry
+      saved right before a reload reaching Drive on the next load's
+      catch-up sync) exists specifically to verify state *survives* a
+      simulated reload; wiping storage there would break the exact thing
+      that test checks. Re-ran the full suite (not just the previously-
+      failing tests) three times after this fix, consistently 302/302 -
+      and re-confirmed fail-first against the true pre-fix `app.js`
+      (checked out from its parent commit, not stashed, since `app.js`
+      was already committed by this point) with the *corrected* harness:
+      still exactly the same 4/302 failing, now for real.
 
 Feature creep is the known failure mode of this project.
