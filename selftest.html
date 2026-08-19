@@ -1589,6 +1589,138 @@ function runTests(H,d){
       pushB.newLocalState.weekCloseouts["2026-05-18"].note==="B's note");
   })();
 
+  /* ---- verdict tombstone collision: a real bug found via a real Drive
+     account trace (see CLAUDE.md's backlog for the full story), not
+     reasoned from code alone. setVerdict()'s live-set branch never cleared
+     a pre-existing tombstone for the same key, so a key could end up
+     sitting in BOTH weeklyVerdicts (live) AND deletedVerdicts (tombstone)
+     at once - most commonly seeded by sweepCompressVerdicts converting an
+     old "compress" leftover into a tombstone, then the user clicking a
+     fresh verdict for that same week/category later. flattenVerdicts then
+     emitted two flat records sharing one id, and mergeRecords' byId
+     construction silently kept whichever was pushed LAST on a duplicate id
+     (always the tombstone, since deletedVerdicts flattens after
+     weeklyVerdicts) - discarding the fresh edit before the six-case merge
+     logic ever ran. Symptom: a verdict click holds for a few seconds then
+     silently reverts. */
+  (function(){ // flattenVerdicts must never emit two records for one id - live newer than its tombstone
+    var collided=freshState([{id:"studies",name:"Studies",color:"#2B52A1"}],{});
+    collided.weeklyVerdicts={"2026-07-06":{studies:"keep"}};
+    collided.verdictMeta={"2026-07-06|studies":{updatedAt:T1,updatedBy:DEV_A}}; // newer
+    collided.deletedVerdicts={"2026-07-06|studies":{weekIso:"2026-07-06",catId:"studies",updatedAt:T0,updatedBy:DEV_B,deletedAt:T0}}; // older
+    var flat=H.flattenVerdicts(collided);
+    var matches=flat.filter(function(r){ return r.id==="2026-07-06|studies"; });
+    assert("flattenVerdicts never emits two records for one id, even when weeklyVerdicts and deletedVerdicts both hold the same key",
+      matches.length===1);
+    assert("when live is newer than the tombstone, flattenVerdicts' guard keeps the live record",
+      matches.length===1&&matches[0].deleted===false&&matches[0].verdict==="keep");
+  })();
+  (function(){ // same collision, opposite ages - the guard has to work in both directions, not just live-wins
+    var collided=freshState([{id:"studies",name:"Studies",color:"#2B52A1"}],{});
+    collided.weeklyVerdicts={"2026-07-06":{studies:"keep"}};
+    collided.verdictMeta={"2026-07-06|studies":{updatedAt:T0,updatedBy:DEV_A}}; // older
+    collided.deletedVerdicts={"2026-07-06|studies":{weekIso:"2026-07-06",catId:"studies",updatedAt:T1,updatedBy:DEV_B,deletedAt:T1}}; // newer
+    var flat=H.flattenVerdicts(collided);
+    var matches=flat.filter(function(r){ return r.id==="2026-07-06|studies"; });
+    assert("flattenVerdicts' guard still emits exactly one record when the tombstone is the newer side",
+      matches.length===1);
+    assert("when the tombstone is newer than live, the guard keeps the tombstone, not the stale live value",
+      matches.length===1&&matches[0].deleted===true);
+  })();
+  (function(){ // setVerdict's root fix: setting a fresh verdict must clear any existing tombstone for that key, so this collision can't be created again going forward
+    var stateBefore=H.getState();
+    var s=freshState([{id:"studies",name:"Studies",color:"#2B52A1"}],{});
+    H.setState(s);
+    H.migrateSyncFields(H.getState());
+    H.setVerdict("studies","2026-07-13",null); // creates a tombstone, as before
+    assert("setVerdict(null) still creates a tombstone the ordinary way",
+      !!H.getState().deletedVerdicts["2026-07-13|studies"]);
+    H.setVerdict("studies","2026-07-13","keep"); // re-set for the SAME key
+    assert("setVerdict's live-set branch clears a pre-existing tombstone for the same key - it can never again coexist with a fresh verdict",
+      !("2026-07-13|studies" in H.getState().deletedVerdicts));
+    assert("the fresh verdict itself is set correctly",
+      H.getState().weeklyVerdicts["2026-07-13"].studies==="keep");
+    H.setState(stateBefore);
+  })();
+  (function(){ // end-to-end through the real engine: a corrupted LOCAL state (both live and tombstoned for the same key, simulating real data corrupted before this fix existed) must not lose the fresh verdict on its next sync
+    var deviceA="sim-device-collision-A";
+    var corrupted=freshState([{id:"studies",name:"Studies",color:"#2B52A1"}],{});
+    corrupted.weeklyVerdicts={"2026-07-20":{studies:"keep"}};
+    corrupted.verdictMeta={"2026-07-20|studies":{updatedAt:T1,updatedBy:deviceA}}; // the fresh edit, newer
+    corrupted.deletedVerdicts={"2026-07-20|studies":{weekIso:"2026-07-20",catId:"studies",updatedAt:T0,updatedBy:"sim-device-old-sweep",deletedAt:T0}}; // stale zombie tombstone, older
+    var pushResult=H.syncEngine(corrupted,null,deviceA);
+    assert("syncEngine() preserves a fresh live verdict against a corrupted local state, instead of silently reverting it - this is the actual reported symptom, reproduced end to end",
+      pushResult.newLocalState.weeklyVerdicts["2026-07-20"]&&pushResult.newLocalState.weeklyVerdicts["2026-07-20"].studies==="keep");
+    assert("the corrupted state comes out clean on the other side too - no lingering tombstone for the same key once it's been through a sync",
+      !("2026-07-20|studies" in (pushResult.newLocalState.deletedVerdicts||{})));
+  })();
+  (function(){ // mechanism proof, not a regression test for the fix above (mergeRecords itself is unchanged and was never the source of the bug): confirms mergeRecords' own byId construction can only ever emit ONE record per id, even fed an already-corrupted local array with two entries sharing an id - so a duplicate can never leak into what gets pushed to Drive. What actually prevents this corrupted array from being built in the first place is flattenVerdicts' guard (tested above) and setVerdict's root fix (tested above); this test documents why, even if it wasn't, the remote file itself couldn't end up holding two records for one id - only the wrong single survivor, which is exactly what it demonstrates below.
+    var key="2026-07-27|studies";
+    var corruptedLocal=[
+      {id:key,weekIso:"2026-07-27",catId:"studies",verdict:"keep",updatedAt:"2026-01-01T00:00:20.000Z",updatedBy:DEV_A,deleted:false,deletedAt:null}, // the TRUE fresh edit, newest of all three timestamps here
+      {id:key,weekIso:"2026-07-27",catId:"studies",verdict:null,updatedAt:T0,updatedBy:"sim-device-old-sweep",deleted:true,deletedAt:T0} // stale zombie tombstone, oldest - pushed LAST, matching flattenVerdicts' real emission order (deletedVerdicts after weeklyVerdicts)
+    ];
+    var realRemote=[
+      {id:key,weekIso:"2026-07-27",catId:"studies",verdict:"cut",updatedAt:T1,updatedBy:DEV_B,deleted:false,deletedAt:null} // a genuinely different device's real edit - older than the true local edit, newer than the stale tombstone
+    ];
+    var merged=H.mergeRecords(corruptedLocal,realRemote,["verdict","deleted","deletedAt"],DEV_A);
+    var matches=merged.filter(function(r){ return r.id===key; });
+    assert("mergeRecords produces exactly one record per id even when fed a corrupted local array with two entries sharing that id",
+      matches.length===1);
+    assert("and it demonstrates the real mechanism: mergeRecords only ever sees whichever local entry was pushed LAST, so the true (newest) local edit loses to a remote edit that's actually older than it - it never gets a chance to compete",
+      matches.length===1&&matches[0].verdict==="cut");
+  })();
+  (function(){ // migrateVerdictTombstoneCollisions: one-time repair of real data already corrupted before the fix above existed. Fixture has several distinct collisions resolving in different directions, as CLAUDE.md's plan specifically asked for - not one case dressed up as several.
+    var stateBefore=H.getState();
+    var fixture=freshState([
+      {id:"studies",name:"Studies",color:"#2B52A1"},
+      {id:"gym",name:"Gym",color:"#27864F"},
+      {id:"reading",name:"Reading",color:"#8A5A2B"}
+    ],{});
+    fixture.weeklyVerdicts={
+      "2026-08-03":{studies:"keep",gym:"cut"},
+      "2026-08-10":{reading:"increase"}
+    };
+    fixture.verdictMeta={
+      "2026-08-03|studies":{updatedAt:T1,updatedBy:DEV_A}, // newer than its tombstone -> live should survive
+      "2026-08-03|gym":{updatedAt:T0,updatedBy:DEV_A}       // older than its tombstone -> tombstone should survive
+      // "2026-08-10|reading" deliberately has NO verdictMeta entry - simulates a verdict that predates this
+      // device's first sync and was never backfilled (migrateSyncFields doesn't run at these call sites -
+      // see its own comment) - nothing real to compare against, so the migration must keep live rather than
+      // delete on a guess.
+    };
+    fixture.deletedVerdicts={
+      "2026-08-03|studies":{weekIso:"2026-08-03",catId:"studies",updatedAt:T0,updatedBy:"sim-device-old",deletedAt:T0},
+      "2026-08-03|gym":{weekIso:"2026-08-03",catId:"gym",updatedAt:T1,updatedBy:"sim-device-old",deletedAt:T1},
+      "2026-08-10|reading":{weekIso:"2026-08-10",catId:"reading",updatedAt:T1,updatedBy:"sim-device-old",deletedAt:T1}
+    };
+    H.setState(fixture);
+    H.migrateVerdictTombstoneCollisions(H.getState());
+    var s=H.getState();
+    assert("migration: live newer than its tombstone - live survives with its own original timestamp, tombstone cleared",
+      s.weeklyVerdicts["2026-08-03"].studies==="keep"&&!("2026-08-03|studies" in s.deletedVerdicts)&&
+      s.verdictMeta["2026-08-03|studies"].updatedAt===T1);
+    assert("migration: tombstone newer than live - tombstone survives with its own original timestamp, live and its verdictMeta cleared",
+      !("gym" in s.weeklyVerdicts["2026-08-03"])&&!("2026-08-03|gym" in s.verdictMeta)&&
+      !!s.deletedVerdicts["2026-08-03|gym"]&&s.deletedVerdicts["2026-08-03|gym"].updatedAt===T1);
+    assert("migration: no verdictMeta timestamp to compare against - keeps live rather than deleting real data on a guess",
+      s.weeklyVerdicts["2026-08-10"].reading==="increase"&&!("2026-08-10|reading" in s.deletedVerdicts));
+    H.setState(stateBefore);
+  })();
+  (function(){ // migration is a no-op on already-clean data - a live verdict and an unrelated tombstone for a DIFFERENT key must both survive untouched
+    var stateBefore=H.getState();
+    var clean=freshState([{id:"studies",name:"Studies",color:"#2B52A1"}],{});
+    clean.weeklyVerdicts={"2026-08-17":{studies:"keep"}};
+    clean.verdictMeta={"2026-08-17|studies":{updatedAt:T0,updatedBy:DEV_A}};
+    clean.deletedVerdicts={"2026-08-24|studies":{weekIso:"2026-08-24",catId:"studies",updatedAt:T0,updatedBy:DEV_A,deletedAt:T0}}; // different week - no collision
+    H.setState(clean);
+    H.migrateVerdictTombstoneCollisions(H.getState());
+    var s=H.getState();
+    assert("migration leaves a genuinely non-colliding live verdict and tombstone alone",
+      s.weeklyVerdicts["2026-08-17"].studies==="keep"&&!!s.deletedVerdicts["2026-08-24|studies"]);
+    H.setState(stateBefore);
+  })();
+
   /* ---- FAKE_DRIVE: round-trips, and is structurally incapable of a real
      network call under TEST_MODE (checked statically, not just by convention -
      see SYNC-LESSONS.md's "structural, not tests behave politely") */
