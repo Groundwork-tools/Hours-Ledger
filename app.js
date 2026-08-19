@@ -114,6 +114,56 @@ function migrateVerdictScale(s){
   });
   return s;
 }
+/* one-time repair for real data corrupted by the gap setVerdict's live-set
+   branch had before its fix above: a key sitting live in weeklyVerdicts AND
+   tombstoned in deletedVerdicts at once - most likely seeded by
+   sweepCompressVerdicts converting an old "compress" leftover into a
+   tombstone, then a later click setting a fresh verdict for that same key
+   without clearing it (the exact gap the fix above closes going forward).
+   flattenVerdicts' own guard (see its comment) would keep this from
+   corrupting a live sync, but real stored data can already be sitting in
+   this state right now from before either fix existed - this cleans that up
+   directly, once, per device.
+
+   Resolves each collision by comparing timestamps via verdictCollisionWinner,
+   the same "newer wins, unknown stays live" principle mergeRecords uses -
+   never a blind "tombstone always wins" or "live always wins" rule. The
+   surviving record's own updatedAt/updatedBy is left exactly as it was; the
+   loser is deleted outright rather than run back through setVerdict, which
+   would fabricate a brand new timestamp/device for a fact that already has a
+   real one.
+
+   Called at the same three points migrateVerdicts()/migrateVerdictScale()
+   are (initial load, undo/redo, import), after migrateVerdictScale
+   specifically - a live "compress" value colliding with an old tombstone
+   gets cleared by that migration's own setVerdict(...,null) call regardless
+   of which side is newer, since compress has no honest value to keep either
+   way; this migration only ever sees whatever collisions are left after
+   that. Console-only, not a toast: unlike sweepCompressVerdicts (an ongoing
+   process someone could otherwise never notice), this is a one-time repair
+   that can't recur once every device is on the fix above. */
+function migrateVerdictTombstoneCollisions(s){
+  if(!s.deletedVerdicts) return s;
+  Object.keys(s.deletedVerdicts).forEach(function(key){
+    var sep=key.indexOf("|"),weekIso=key.slice(0,sep),catId=key.slice(sep+1);
+    var live=s.weeklyVerdicts[weekIso]&&(catId in s.weeklyVerdicts[weekIso]);
+    if(!live) return;
+    var liveMeta=s.verdictMeta&&s.verdictMeta[key];
+    var tombstone=s.deletedVerdicts[key];
+    var winner=verdictCollisionWinner(liveMeta&&liveMeta.updatedAt,tombstone.updatedAt);
+    if(winner==="tombstone"){
+      console.log('Hours Ledger: resolved a verdict stuck both live and deleted at once (week '+
+        weekIso+", category "+catId+') - the tombstone was newer, cleared the stale live value.');
+      delete s.weeklyVerdicts[weekIso][catId];
+      if(s.verdictMeta) delete s.verdictMeta[key];
+    }else{
+      console.log('Hours Ledger: resolved a verdict stuck both live and deleted at once (week '+
+        weekIso+", category "+catId+') - the live value was newer (or had no timestamp to compare), cleared the stale tombstone.');
+      delete s.deletedVerdicts[key];
+    }
+  });
+  return s;
+}
 function migrateFromOldKey(){
   if(TEST_MODE) return null; /* test mode never reads or touches real data */
   var raw=readStore(OLD_KEY);
@@ -341,19 +391,49 @@ function sweepCompressVerdicts(flat,deviceId){
   });
   return {records:records,swept:swept};
 }
+/* shared by flattenVerdicts' guard below and migrateVerdictTombstoneCollisions
+   further down - same "newer wins" principle mergeRecords itself already uses,
+   except when the live side's own timestamp is unknown (nothing has ever
+   backfilled verdictMeta for it - can happen ahead of migrateSyncFields, see
+   its own comment on why it isn't called at load/undo/import). There's
+   nothing real to compare in that case, so it keeps live rather than
+   deleting real data on a guess - this app's standing bias, same as
+   mergeRecords' own ambiguity window. */
+function verdictCollisionWinner(liveUpdatedAt,tombstoneUpdatedAt){
+  if(!liveUpdatedAt) return "live";
+  return Date.parse(tombstoneUpdatedAt)>Date.parse(liveUpdatedAt)?"tombstone":"live";
+}
+/* a key should never exist live in weeklyVerdicts AND tombstoned in
+   deletedVerdicts at once - setVerdict's live-set branch clears the matching
+   tombstone precisely so this can't happen (see its own comment) - but this
+   guard exists so flattenVerdicts itself can't be fooled into emitting two
+   records for one id even if some future path ever produces that state
+   anyway. Without it, mergeRecords' byId construction (a plain forEach
+   keyed by id) would silently keep whichever record got pushed here LAST -
+   always the tombstone, since deletedVerdicts is walked after
+   weeklyVerdicts - discarding a fresh live edit before the six-case merge
+   logic ever ran. That's exactly the bug real Drive-account tracing found;
+   see CLAUDE.md's backlog for the full trace. */
 function flattenVerdicts(s){
-  var out=[];
+  var out=[],indexById={};
   Object.keys(s.weeklyVerdicts).forEach(function(weekIso){
     Object.keys(s.weeklyVerdicts[weekIso]).forEach(function(catId){
       var key=weekIso+"|"+catId,meta=s.verdictMeta[key];
+      indexById[key]=out.length;
       out.push({id:key,weekIso:weekIso,catId:catId,verdict:s.weeklyVerdicts[weekIso][catId],
         updatedAt:meta.updatedAt,updatedBy:meta.updatedBy,deleted:false,deletedAt:null});
     });
   });
   Object.keys(s.deletedVerdicts||{}).forEach(function(key){
     var t=s.deletedVerdicts[key];
-    out.push({id:key,weekIso:t.weekIso,catId:t.catId,verdict:null,
-      updatedAt:t.updatedAt,updatedBy:t.updatedBy,deleted:true,deletedAt:t.deletedAt});
+    var tombstoneRec={id:key,weekIso:t.weekIso,catId:t.catId,verdict:null,
+      updatedAt:t.updatedAt,updatedBy:t.updatedBy,deleted:true,deletedAt:t.deletedAt};
+    if(key in indexById){
+      var liveRec=out[indexById[key]];
+      if(verdictCollisionWinner(liveRec.updatedAt,tombstoneRec.updatedAt)==="tombstone") out[indexById[key]]=tombstoneRec;
+      return; /* never push the loser - exactly one record per id, always */
+    }
+    out.push(tombstoneRec);
   });
   return out;
 }
@@ -910,6 +990,7 @@ if(!state.entries) state.entries={};
 if(!state.weekCloseouts) state.weekCloseouts={};
 migrateVerdicts(state);
 migrateVerdictScale(state);
+migrateVerdictTombstoneCollisions(state);
 
 /* ---------------- file linking (Chrome / Edge) ---------------- */
 var fileHandle=null, fileName="", writeTimer=null;
@@ -1200,6 +1281,7 @@ function applyState(json){
   if(!state.weekCloseouts) state.weekCloseouts={};
   migrateVerdicts(state);
   migrateVerdictScale(state);
+  migrateVerdictTombstoneCollisions(state);
   writeStore(KEY,JSON.stringify(state));
   if(fileHandle){ clearTimeout(writeTimer); writeTimer=setTimeout(writeLinkedFile,600); }
   render();
@@ -1308,6 +1390,12 @@ function setVerdict(catId,weekIso,v){
     if(state.deletedVerdicts){
       if(!state.verdictMeta) state.verdictMeta={};
       state.verdictMeta[key]={updatedAt:nowIso(),updatedBy:getDeviceId()};
+      /* root fix for the tombstone-collision bug (see flattenVerdicts'
+         comment): a fresh verdict must never be left coexisting with a
+         tombstone from an earlier clear/sweep for this same key - this is
+         a real, deliberate local edit, not an inference from absence, so
+         clearing it here doesn't conflict with hard rule 7. */
+      delete state.deletedVerdicts[key];
     }
   }else{
     delete state.weeklyVerdicts[weekIso][catId];
@@ -2675,6 +2763,7 @@ function importBackupJson(jsonText){
   if(!state.weekCloseouts) state.weekCloseouts={};
   migrateVerdicts(state);
   migrateVerdictScale(state);
+  migrateVerdictTombstoneCollisions(state);
   /* an imported file never carries sync connection forward, even if it
      says driveConnected:true - reconnecting is one click, but silently
      resuming a background network sync right after opening an arbitrary
@@ -2803,6 +2892,7 @@ if(TEST_MODE){
     setVerdict:setVerdict,
     migrateVerdicts:migrateVerdicts,
     migrateVerdictScale:migrateVerdictScale,
+    migrateVerdictTombstoneCollisions:migrateVerdictTombstoneCollisions,
     sweepCompressVerdicts:sweepCompressVerdicts,
     snapshot:snapshot,
     undo:undo,
