@@ -277,6 +277,18 @@ on purpose.
   across every category in a real week, all deselecting correctly with
   no reappearance. `selftest.html`: 302/302, re-run three times for
   flakiness and fail-first re-confirmed with the corrected test harness.
+- **Weekly verdicts silently reverting, take two — the real root cause**
+  (2026-08-19): merged to `main` and live. The fix directly above turned
+  out to be real but incomplete — see backlog item 18's continuation
+  below for the full trace (found via live instrumentation against a
+  real Drive account, not code reading) and the actual root cause (a
+  tombstone-collision bug in `setVerdict`/`flattenVerdicts`/
+  `mergeRecords`). Verified by Sebastian against his real account: all
+  three original symptoms fixed and holding, undo confirmed working, and
+  the new one-time migration caught and resolved real collisions live
+  against his actual Drive data (visible in the console log — category
+  ids `false2c`, `xpk30a7`, `nq4jy4v`, `9kp6uh7` all resolved correctly).
+  `selftest.html`: 317/317.
 
 ---
 
@@ -1168,8 +1180,11 @@ dashboard styling.
     scroll (`.closeout-gaps`) behaves correctly. Merged to `main`
     2026-08-18.
 
-18. **Weekly verdicts silently reverting — merged to `main` and live,
-    verified before merge.** Reported bug: setting a verdict appeared to work,
+18. **Weekly verdicts silently reverting — ~~merged to `main` and live,
+    verified before merge~~ turned out to be a real but incomplete fix;
+    the actual root cause is a separate bug, found via live tracing and
+    fixed in the "take two" continuation below (merged to `main`
+    2026-08-19).** Reported bug: setting a verdict appeared to work,
     stayed selected for roughly 4-5 seconds, then deselected on its own -
     affecting a different set of categories week to week, only on weeks
     with pre-existing data, always a full deselect rather than a switch
@@ -1353,5 +1368,218 @@ dashboard styling.
     instead by `selftest.html`'s fake-stale-record test, walked through
     line by line and re-run live on request before merge. Merged to
     `main` 2026-08-18.
+
+    **Take two, 2026-08-19 — the fix above was real but incomplete; the
+    actual root cause was a different bug entirely, merged to `main` and
+    live.** The compress-sweep-toast fix shipped, and the bug came back.
+    Confirmed in a fresh incognito window (ruling out any caching
+    explanation) with the exact same shape as before: specific
+    categories/weeks sitting empty on load, a verdict click holding for
+    ~4-5 seconds then silently deselecting. One fact anchored the whole
+    investigation from the start: **Sebastian had already searched the
+    real Drive file and both real devices' local storage for the literal
+    string `"compress"` and found zero matches, before the first fix was
+    even merged.** That ruled out the first fix's own mechanism as the
+    *ongoing* cause and was treated throughout as a constraint on any new
+    theory, not a detail to explain around — explicitly stated as the
+    ground rule for this round: no new theory gets to contradict a fact
+    already checked against real data.
+
+    **How this one was actually found — direct instrumentation against
+    the real account, not another pass of reading the code.** This was
+    the second attempt at this exact bug, and re-reading `app.js` was
+    explicitly ruled out as the method this time. Instead: temporary
+    `[SYNCDEBUG]` logging was added across the real sync/merge path
+    (`mergeRecords`, `syncEngine`, `sweepCompressVerdicts`, `connectDrive`,
+    `runDriveSync`) on its own throwaway branch
+    (`debug/verdict-sync-trace`, never merged, discarded after this fix
+    landed), logging every field of every verdict record touched at each
+    stage. Tested against Sebastian's real Drive account from
+    `localhost:8000`, deliberately **not** a `raw.githack.com` preview —
+    `raw.githack` isn't a registered authorized JavaScript origin for
+    this app's real Google OAuth client, so real Drive sign-in can't
+    complete from it at all; `localhost` was already Sebastian's own
+    habitual way of testing real Drive sync locally, and is registered.
+    (This surfaced a separate, real, standing risk while investigating it
+    as a possible cause here: a local checkout with no `TEST_MODE` query
+    param runs against *real* data — `TEST_MODE` is gated purely on the
+    literal `?hltest=1` string, no hostname check exists anywhere — so a
+    dev checkout that's ever had "Connect Drive" clicked becomes a
+    permanent, independent sync participant against the real file,
+    running whatever code happens to be checked out, indefinitely. Ruled
+    out as *this* bug's ongoing source — Sebastian closed that tab
+    entirely and reproduced the bug again anyway, and closing a tab can't
+    retroactively un-push what it already wrote — but real, and still
+    open as its own risk.)
+
+    First capture was unusable for a reason that was this session's own
+    fault, not the data's: `console.log(label, obj)` — logging an object
+    as a separate argument — renders as an expandable tree in a live
+    DevTools panel, but Chrome's "Save as..." export flattens that same
+    argument to an unexpandable `{...}` placeholder. Every logged record
+    in the first exported trace was unreadable. Fixed by concatenating
+    every log line into one string via `JSON.stringify()` before logging,
+    and the corrected capture was usable end to end.
+
+    Tracing a real key (`2026-08-10|xzizalk`, corroborated against 3-4
+    more) through the corrected log found: the local side flattened
+    correctly as a fresh, live "keep" record — then `mergeRecords` chose
+    the *remote* side, an old tombstone from a different device pushed
+    the day before. Hand-scanning a multi-thousand-line dump couldn't
+    reliably confirm *which* of `mergeRecords`' six cases had actually
+    fired for that key, and rather than guess, a further
+    `[SYNCDEBUG][WATCH-CASE]` tag was added specifically so this could be
+    confirmed by grep instead of by eye. **This is also where a
+    plausible-but-wrong hypothesis almost formed and didn't**: the
+    timestamps and device IDs available at that point were consistent
+    with a story about case 4 ("one deleted, one live", newer-wins) being
+    miscomparing something — but that theory was never asserted, because
+    the exact case label wasn't confirmed yet. Sebastian found it first,
+    in the *already-saved* log, no re-run needed: `case=2-sameContent`,
+    consistently, across every sync pass in the trace. That single data
+    point ruled out the case-4 theory outright and reframed the entire
+    question: `case=2-sameContent` means `mergeRecords` correctly did
+    nothing, because by the time it ran, the *local* side it was handed
+    already equalled the stale remote tombstone. The real bug wasn't in
+    the merge logic at all — it was upstream, in whatever silently
+    replaced the correct local value with the stale one before the merge
+    ever saw it.
+
+    **The actual root cause — a three-function chain, confirmed by
+    reading the real code once the trace had narrowed exactly where to
+    look, not by re-reading it broadly:**
+    1. `setVerdict()`'s live-set branch (`if(v){...}`) set
+       `state.weeklyVerdicts[weekIso][catId]` and stamped
+       `state.verdictMeta[key]`, but never cleared
+       `state.deletedVerdicts[key]` — so a key that had a tombstone from
+       an earlier clear (or sweep) could end up existing live *and*
+       tombstoned at the same time the moment a fresh verdict was set for
+       it again.
+    2. `flattenVerdicts()` walked `weeklyVerdicts` and `deletedVerdicts`
+       as two independent loops with no shared-id check, so a key in both
+       containers produced *two* flat records sharing one `id` — the
+       live one, then the tombstone.
+    3. `mergeRecords()`'s `byId` construction
+       (`localArr.forEach(function(r){ (byId[r.id]=byId[r.id]||{}).local=r; })`)
+       silently kept whichever record was pushed *last* on a duplicate
+       id — and since `flattenVerdicts` always emits `deletedVerdicts`
+       after `weeklyVerdicts`, that was always the tombstone. The fresh
+       local edit was discarded before any of the six merge cases ever
+       ran to compare timestamps.
+
+    **The causal link back to the first fix, confirmed consistent with
+    the evidence**: `sweepCompressVerdicts()` (the first fix's own
+    mechanism) is a real, correct self-heal that converts a stale
+    `"compress"` value into a tombstone — and `unflattenVerdicts()`
+    rebuilds `deletedVerdicts`/`weeklyVerdicts` fresh from the flat array
+    every time, so right after a sweep, a swept key exists *only* as a
+    tombstone — no corruption yet. The corruption was created the very
+    next time *any* device set a fresh verdict for that same key, via
+    `setVerdict`'s pre-existing gap (point 1 above). The first fix wasn't
+    the bug; it was what *seeded* a batch of tombstones — most of them
+    dated 2026-08-14 to 2026-08-18, right around when Drive sync was
+    built and the compress-sweep fix itself was merged — that a later,
+    unrelated bug in `setVerdict` then collided with the first time each
+    one got touched again. That's also why the affected set kept shifting
+    from report to report rather than repeating: it was never the same
+    categories failing twice, it was different pre-existing tombstones
+    each getting hit for the first time as Sebastian happened to click
+    them. The undo-gap half of the first fix — `snapshot()` now
+    preceding both verdict click handlers — was a real, separate,
+    correctly-diagnosed gap against hard rule 5, unrelated to this
+    recurrence, and remains permanently valid; it was re-confirmed
+    working in this round's real-device verification too, not just left
+    alone on faith.
+
+    **The fix, four parts, proposed in full before any code was written
+    and approved before building:**
+    - **Root fix**: `setVerdict`'s live-set branch now deletes
+      `state.deletedVerdicts[key]` when setting a live value — a real,
+      deliberate local edit responding to an explicit user action, not an
+      inference from absence, so this doesn't conflict with hard rule 7.
+    - **Defense in depth**: `flattenVerdicts` itself now guards against
+      ever emitting two records for one id, via a new
+      `verdictCollisionWinner()` helper — same "newer wins" principle
+      `mergeRecords` already uses, with one deliberate exception: if the
+      live side has no `verdictMeta` timestamp to compare (a verdict that
+      predates this device's first sync — `migrateSyncFields` isn't
+      called at load/undo/import, only lazily inside `syncEngine`, so
+      this is reachable), it keeps live rather than deleting real data on
+      a guess, matching this app's standing bias everywhere else. This
+      guard holds even if some future code path reintroduces the
+      corrupted state some other way — not solely relying on the root
+      fix above.
+    - **Historical cleanup**: `migrateVerdictTombstoneCollisions()`, a
+      new one-time migration wired at the same three call sites
+      `migrateVerdicts`/`migrateVerdictScale` already use (initial load,
+      undo/redo, import), resolving any collision already sitting in real
+      stored data by the same timestamp comparison — never a blind
+      "tombstone always wins" or "live always wins" rule. The surviving
+      record's own original `updatedAt`/`updatedBy` is left untouched;
+      the loser is deleted directly rather than routed back through
+      `setVerdict`, which would have fabricated a brand-new timestamp/
+      device for a fact that already had a real one. Console-only, not a
+      toast — unlike the compress sweep, this is a one-time repair that
+      can't recur once every device is on the fix, not an ongoing process
+      someone could otherwise never notice.
+    - **A mechanism proof, not just a regression test**: confirmed
+      directly, not just inferred, that `mergeRecords`' own `byId`
+      construction can never let a duplicate id leak into what gets
+      pushed to Drive — its output is built by iterating
+      `Object.keys(byId)`, so it's one-record-per-id by construction
+      regardless of whether its *input* was corrupted. A dedicated test
+      feeds `mergeRecords` a hand-built corrupted local array (two
+      records sharing one id) against a real, independent remote array
+      and asserts the output has exactly one record — and, separately,
+      that it's the *wrong* one (demonstrating the actual data loss),
+      since this specific test passes on both old and new code: it
+      proves an existing, unchanged property of `mergeRecords`, not a
+      regression the fix introduces. What actually prevents the
+      corrupted array from being built in the first place is the root
+      fix and the defense-in-depth guard above, tested separately.
+
+    **Fail-first, in two passes because the new tests split into two
+    groups with different failure modes.** The two migration tests
+    referenced a function (`migrateVerdictTombstoneCollisions`) that
+    didn't exist yet in unpatched code, and calling it would throw and
+    abort the whole synchronous test run (`selftest.html`'s runner
+    wraps the entire suite in one try/catch, so one uncaught throw hides
+    every result, not just the new ones) — so those two blocks were
+    temporarily commented out for one confirmatory run first: 7 clean
+    assertion failures against unpatched code (not crashes), covering the
+    `flattenVerdicts` guard, `setVerdict`'s root fix, and the end-to-end
+    `syncEngine` reproduction. Restored, run again unpatched: a clean
+    crash citing exactly the missing function, confirming the migration
+    genuinely didn't exist yet. Fix applied: **317/317, 0 failing.**
+
+    **Real-device and real-Drive verification, confirmed by Sebastian
+    against his actual account before this was merged**: all three
+    original symptoms fixed and holding, undo confirmed working (the
+    first fix's own coverage, re-checked), and — the one thing no
+    synthetic fixture could stand in for — the new migration ran against
+    his real, already-corrupted Drive data on load and resolved real
+    collisions live, visible in the console log by category id:
+    `false2c`, `xpk30a7`, `nq4jy4v`, `9kp6uh7`. Merged to `main`
+    2026-08-19.
+
+    **The general lesson, worth keeping on its own**: a fix that is
+    real, correctly targets a genuine problem, and is well-reasoned from
+    the code is still not evidence that it's *the* problem, if nothing
+    has actually confirmed the mechanism against live data. The first
+    fix here was exactly that — a real bug, a real gap, a plausible and
+    well-argued fit for the reported symptom — and it shipped, verified,
+    and was still wrong about being the cause of the recurrence. What
+    actually closed this was refusing to re-derive a second theory from
+    the code alone (the explicit instruction going into round two,
+    stated because round one had already tried that) and instead
+    instrumenting the real path and reading what real data actually did.
+    The one fact that made this tractable at all — zero matches for
+    `"compress"` in real, already-checked data — was available before
+    round two even started; the discipline that mattered was treating it
+    as a hard constraint on any new theory rather than a loose end to
+    explain away once a new plausible story appeared. When a fix feels
+    right and the bug comes back anyway, that combination is itself the
+    signal to go get live evidence next, not to reason harder from the
+    same code a second time.
 
 Feature creep is the known failure mode of this project.
