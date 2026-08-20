@@ -812,6 +812,153 @@ function runTests(H,d){
     !d.getElementById("scrim").classList.contains("on"));
   chooser.hidden=true;
 
+  /* category colour picker redesign (2026-08-20) - the picker's own
+     outside-click closer (a delegated document click listener, not a
+     single fixed scrim element the way the entry/close-out sheets have)
+     had no drag-boundary protection at all before this fix: dragging
+     inside the new spectrum box and releasing anywhere outside .cat would
+     have resolved, via the browser's own mousedown/mouseup-common-
+     ancestor rule for "click", to a target outside .cat and closed the
+     picker mid-drag - the same shape as item 5's sheet-drag fix above,
+     fixed here via catPressedInside (see app.js). Simulated the same way
+     item 5 is: mousedown targeted inside the picker, click targeted at
+     the resolved outside element, no real drag gesture needed. */
+  sw.click(); // reopen (closed by the second sw.click() above)
+  var box=d.querySelector(".cat .spectrum");
+  box.dispatchEvent(new Event("mousedown",{bubbles:true}));
+  d.body.dispatchEvent(new Event("click",{bubbles:true}));
+  assert("dragging from inside the colour picker to outside it doesn't close the picker",
+    !d.querySelector(".cat .picker").hidden);
+  d.body.dispatchEvent(new Event("mousedown",{bubbles:true}));
+  d.body.dispatchEvent(new Event("click",{bubbles:true}));
+  assert("a genuine press-and-release outside the picker still closes it",
+    d.querySelector(".cat .picker").hidden);
+
+  /* the old hue slider silently reset saturation/value to a fixed point
+     on every drag (see the SWATCHES comment in app.js) - a real bug,
+     fixed as a side effect of the HSV box redesign. Confirms the fix:
+     a custom colour's s/v survive a hue-only drag, only the hue rotates. */
+  sw.click();
+  var c0=H.getState().categories[0];
+  c0.color="#4477CC";
+  var svBefore=H.hsvOf(c0.color).slice(1);
+  var hueInput=d.querySelector(".cat .hue");
+  hueInput.value=200;
+  hueInput.dispatchEvent(new Event("input",{bubbles:true}));
+  var svAfter=H.hsvOf(H.getState().categories[0].color).slice(1);
+  assert("dragging the hue strip preserves saturation/value instead of resetting them",
+    Math.abs(svBefore[0]-svAfter[0])<0.01&&Math.abs(svBefore[1]-svAfter[1])<0.01);
+  sw.click();
+
+  /* HSV conversion correctness - pure functions, no DOM geometry needed.
+     What's NOT covered here, same accepted gap as every other drag/touch
+     test in this file: the spectrum box's actual pixel-to-colour mapping
+     (getBoundingClientRect-based) can't be exercised in this display:none
+     sandbox, which zeroes every element's layout rect (see the modal-
+     scroll-lock note above) - that needs a real device, same standing rule. */
+  assert("hsvToHex(0,0,1) is white", H.hsvToHex(0,0,1)==="#FFFFFF");
+  assert("hsvToHex(0,1,1) is pure red", H.hsvToHex(0,1,1)==="#FF0000");
+  assert("hsvToHex(120,1,1) is pure green", H.hsvToHex(120,1,1)==="#00FF00");
+  assert("hsvOf/hsvToHex round-trips a colour within float-rounding tolerance",(function(){
+    var hex="#3366CC", hsv=H.hsvOf(hex), back=H.hsvToHex(hsv[0],hsv[1],hsv[2]);
+    for(var i=1;i<7;i+=2){
+      if(Math.abs(parseInt(hex.slice(i,i+2),16)-parseInt(back.slice(i,i+2),16))>1) return false;
+    }
+    return true;
+  })());
+
+  /* achromatic-hue-corruption bug (reported from a real device, both
+     phone and laptop): dragging the spectrum box through an achromatic
+     point (S=0, the left edge, or V=0, the bottom edge - either way the
+     colour has no real hue) and then back into chromatic territory used
+     to silently rewrite the CATEGORY'S SAVED COLOUR to red, not just the
+     hue strip's displayed value - applyBoxDrag re-derived hue from
+     c.color on every drag frame, and an achromatic hex has no recoverable
+     hue for hsvOf to read back (hslOf's hue math defaults to 0 for it -
+     correct on its own terms, since an achromatic colour genuinely has no
+     hue, but wrong as a source of truth for the NEXT frame of the same
+     gesture). Tests the actual saved data the report asked for, not just
+     the display - the visible strip jump was downstream of this. */
+  var dragRow=d.querySelector(".cat");
+  var dragCat=H.catById(dragRow.dataset.cat);
+  dragCat.color=H.hsvToHex(220,0.8,0.8); // a real, clearly-blue starting hue
+  var originalHue=H.hsvOf(dragCat.color)[0];
+  H.beginSpectrumDrag(dragRow);
+  H.applyBoxPoint(dragRow,[0,0.5],false);  // S=0 - achromatic (grey)
+  H.applyBoxPoint(dragRow,[0.5,0.5],true); // back to chromatic, drag ends
+  assert("dragging through an achromatic point (S=0) and back doesn't corrupt the saved colour's hue",
+    Math.abs(H.hsvOf(H.catById(dragRow.dataset.cat).color)[0]-originalHue)<=1);
+
+  dragCat.color=H.hsvToHex(90,0.8,0.8); // a different starting hue (green) - independent case
+  var originalHue2=H.hsvOf(dragCat.color)[0];
+  H.beginSpectrumDrag(dragRow);
+  H.applyBoxPoint(dragRow,[0.5,0],false);  // V=0 - achromatic (black)
+  H.applyBoxPoint(dragRow,[0.5,0.5],true); // back to chromatic, drag ends
+  assert("dragging through an achromatic point (V=0) and back doesn't corrupt the saved colour's hue",
+    Math.abs(H.hsvOf(H.catById(dragRow.dataset.cat).color)[0]-originalHue2)<=1);
+
+  /* display half of the same fix: the hue strip must not visibly jump to
+     red while merely DWELLING at an achromatic point, not just
+     self-correct once the drag leaves it */
+  dragCat.color=H.hsvToHex(220,0.8,0.8);
+  H.beginSpectrumDrag(dragRow);
+  H.applyBoxPoint(dragRow,[0.6,0.6],false); // a genuinely chromatic frame first, so .hue's DOM value actually becomes ~220 via syncPickerUI - otherwise "holds its last position" would trivially pass by checking a value nothing ever set
+  H.applyBoxPoint(dragRow,[0,0.5],false);   // now land on S=0 and stay there
+  var hueDisplayed=+dragRow.querySelector(".hue").value;
+  assert("the hue strip holds its last real position while the box sits at an achromatic point, instead of jumping to red",
+    Math.abs(hueDisplayed-220)<=1);
+
+  /* the same bug, one level up: dragHue only protects the INSIDE of one
+     gesture. Once a drag COMMITS at an achromatic point, c.color is saved
+     as a genuinely achromatic hex - no hue left in it at all - and the
+     NEXT, entirely separate drag's beginSpectrumDrag() has nothing to
+     read except that hex, hitting the identical hsvOf-defaults-to-0
+     problem, just relocated to drag-start instead of mid-drag. Reported
+     from a real device: drag to an edge, release, wait, start a new drag
+     - the strip jumps to red again. Fixed via lastRealHue, a per-category
+     in-memory (not synced, not persisted) map kept fresh by every
+     genuinely chromatic frame syncPickerUI sees - beginSpectrumDrag falls
+     back to it when c.color is currently achromatic. Tests the actual
+     saved data across two SEPARATE gestures, same discipline as the
+     within-one-gesture tests above - the strip's display is downstream. */
+  dragCat.color=H.hsvToHex(220,0.8,0.8);
+  H.beginSpectrumDrag(dragRow);
+  H.applyBoxPoint(dragRow,[0.6,0.6],false); // a real chromatic frame - this is what populates lastRealHue for this category
+  H.applyBoxPoint(dragRow,[0,0.5],true);    // commit at S=0 - gesture ONE ends here, c.color is now truly achromatic
+  H.beginSpectrumDrag(dragRow);             // a NEW, separate gesture - c.color has no hue left to read
+  H.applyBoxPoint(dragRow,[0.5,0.5],true);  // a chromatic frame in gesture two, commit
+  assert("starting a new drag after a previous one committed an achromatic colour still recovers the last real hue (S=0 case)",
+    Math.abs(H.hsvOf(H.catById(dragRow.dataset.cat).color)[0]-220)<=1);
+
+  dragCat.color=H.hsvToHex(90,0.8,0.8);
+  H.beginSpectrumDrag(dragRow);
+  H.applyBoxPoint(dragRow,[0.6,0.6],false);
+  H.applyBoxPoint(dragRow,[0.5,0],true);    // commit at V=0 this time - also achromatic, gesture ONE ends here
+  H.beginSpectrumDrag(dragRow);
+  H.applyBoxPoint(dragRow,[0.5,0.5],true);
+  assert("starting a new drag after a previous one committed an achromatic colour still recovers the last real hue (V=0 case)",
+    Math.abs(H.hsvOf(H.catById(dragRow.dataset.cat).color)[0]-90)<=1);
+
+  /* recent colours - device-local, capped, most-recent-first, deduped */
+  H.getState().settings.recentColors=[];
+  for(var rci=0;rci<10;rci++) H.pushRecentColor("#"+String(rci).repeat(6));
+  var rc=H.getRecentColors();
+  assert("recent colours cap at 8", rc.length===8);
+  assert("recent colours are most-recent-first", rc[0]==="#999999");
+  assert("recent colours drop the oldest entries past the cap",
+    rc.indexOf("#000000")===-1&&rc.indexOf("#111111")===-1);
+  H.pushRecentColor("#555555");
+  var rc2=H.getRecentColors();
+  assert("re-picking an existing recent colour moves it to front instead of duplicating",
+    rc2.length===8&&rc2[0]==="#555555"&&rc2.filter(function(x){ return x==="#555555"; }).length===1);
+
+  /* expanded preset palette - a plain regression guard, not a re-run of
+     the six-check validation itself (done offline against the real
+     validator when these were chosen - see app.js's SWATCHES comment) */
+  assert("SWATCHES has the validated 15-colour palette", H.getSwatches().length===15);
+  assert("every SWATCHES entry is a valid 6-digit hex",
+    H.getSwatches().every(function(s){ return /^#[0-9A-F]{6}$/.test(s); }));
+
   /* 27. manually toggling "Also put it on" for extra days still works and
      isn't fought by the Day-dropdown sync once the user is driving it directly */
   H.getState().entries={};
