@@ -908,6 +908,37 @@ function runTests(H,d){
   assert("the hue strip holds its last real position while the box sits at an achromatic point, instead of jumping to red",
     Math.abs(hueDisplayed-220)<=1);
 
+  /* the same bug, one level up: dragHue only protects the INSIDE of one
+     gesture. Once a drag COMMITS at an achromatic point, c.color is saved
+     as a genuinely achromatic hex - no hue left in it at all - and the
+     NEXT, entirely separate drag's beginSpectrumDrag() has nothing to
+     read except that hex, hitting the identical hsvOf-defaults-to-0
+     problem, just relocated to drag-start instead of mid-drag. Reported
+     from a real device: drag to an edge, release, wait, start a new drag
+     - the strip jumps to red again. Fixed via lastRealHue, a per-category
+     in-memory (not synced, not persisted) map kept fresh by every
+     genuinely chromatic frame syncPickerUI sees - beginSpectrumDrag falls
+     back to it when c.color is currently achromatic. Tests the actual
+     saved data across two SEPARATE gestures, same discipline as the
+     within-one-gesture tests above - the strip's display is downstream. */
+  dragCat.color=H.hsvToHex(220,0.8,0.8);
+  H.beginSpectrumDrag(dragRow);
+  H.applyBoxPoint(dragRow,[0.6,0.6],false); // a real chromatic frame - this is what populates lastRealHue for this category
+  H.applyBoxPoint(dragRow,[0,0.5],true);    // commit at S=0 - gesture ONE ends here, c.color is now truly achromatic
+  H.beginSpectrumDrag(dragRow);             // a NEW, separate gesture - c.color has no hue left to read
+  H.applyBoxPoint(dragRow,[0.5,0.5],true);  // a chromatic frame in gesture two, commit
+  assert("starting a new drag after a previous one committed an achromatic colour still recovers the last real hue (S=0 case)",
+    Math.abs(H.hsvOf(H.catById(dragRow.dataset.cat).color)[0]-220)<=1);
+
+  dragCat.color=H.hsvToHex(90,0.8,0.8);
+  H.beginSpectrumDrag(dragRow);
+  H.applyBoxPoint(dragRow,[0.6,0.6],false);
+  H.applyBoxPoint(dragRow,[0.5,0],true);    // commit at V=0 this time - also achromatic, gesture ONE ends here
+  H.beginSpectrumDrag(dragRow);
+  H.applyBoxPoint(dragRow,[0.5,0.5],true);
+  assert("starting a new drag after a previous one committed an achromatic colour still recovers the last real hue (V=0 case)",
+    Math.abs(H.hsvOf(H.catById(dragRow.dataset.cat).color)[0]-90)<=1);
+
   /* recent colours - device-local, capped, most-recent-first, deduped */
   H.getState().settings.recentColors=[];
   for(var rci=0;rci<10;rci++) H.pushRecentColor("#"+String(rci).repeat(6));

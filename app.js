@@ -2509,6 +2509,26 @@ cats.addEventListener("change",function(ev){
    - called after any interaction that can change c.color, so there's one
    place that has to remember all four spots instead of four call sites
    each remembering to update the others */
+/* last genuinely chromatic hue seen per category, this page session only -
+   NOT state, NOT localStorage, NOT synced. Exists because a hue is not
+   recoverable from an achromatic hex once one gets saved (S=0 or V=0
+   collapses hsvToHex's output to r=g=b, and hsvOf/hslOf can only report
+   h=0 for that, correctly - there really isn't a hue left to report) -
+   see dragHue below for the within-one-gesture half of this; this is the
+   across-separate-gestures half, for exactly the case dragHue can't cover:
+   a drag that STARTS after a previous drag already committed an achromatic
+   color, with nothing but that saved hex left to read from otherwise.
+   Deliberately kept out of state: categories sync via Drive, and anything
+   added to state.categories[i] inherits this file's full CRDT merge
+   discipline (updatedAt/updatedBy, tombstones, mergeRecords' six cases -
+   see SYNC-LESSONS.md) - disproportionate for a picker cosmetic that isn't
+   real user data. Accepted, disclosed gap: a category already saved
+   achromatic from a PAST session, touched for the first time this session
+   by dragging straight to another achromatic point with no chromatic step
+   in between, has nothing here to fall back to either - the hex genuinely
+   carries no hue by that point, and there's nowhere left to recover one
+   from short of the synced field this is deliberately not becoming. */
+var lastRealHue={};
 function syncPickerUI(row,hex){
   var hsv=hsvOf(hex);
   row.querySelector(".sw").style.background=hex;
@@ -2521,12 +2541,16 @@ function syncPickerUI(row,hex){
      because anything touched the hue strip. Skipping the hue-dependent
      writes leaves them exactly where the last genuinely chromatic frame
      put them - holds the last real position, same fix direction as
-     dragHue above, applied to the display half of this bug. The dot IS
+     dragHue below, applied to the display half of this bug. The dot IS
      still updated unconditionally: S and V are both perfectly well-defined
-     at 0 - that's a real position, not an undefined one, unlike hue. */
+     at 0 - that's a real position, not an undefined one, unlike hue.
+     Stashing into lastRealHue here too, on the same condition, is what
+     makes it "kept fresh by literally every interaction that ever
+     produces a real hue" rather than only at drag boundaries. */
   if(hsv[1]>0&&hsv[2]>0){
     row.querySelector(".hue").value=hsv[0];
     box.style.setProperty("--h",hsv[0]);
+    lastRealHue[row.dataset.cat]=hsv[0];
   }
   dot.style.left=(hsv[1]*100)+"%";
   dot.style.top=((1-hsv[2])*100)+"%";
@@ -2625,10 +2649,19 @@ function spectrumPointAt(box,ev){
 /* captures the hue ONCE, before a drag can ever touch an achromatic point -
    see applyBoxPoint below for why re-deriving it mid-drag was the actual
    bug. Split out from the pointerdown listener (not just inlined there) so
-   a test can call the exact same capture step a real drag does. */
+   a test can call the exact same capture step a real drag does.
+   Trusts c.color's own hue only when c.color is CURRENTLY chromatic - a
+   drag starting right after a previous one committed an achromatic color
+   hits the identical "no recoverable hue" problem dragHue alone doesn't
+   cover, since it only protects the inside of one gesture, not the start
+   of the next one. Falls back to lastRealHue (see its own comment above)
+   for exactly that case; 0 only if this category has never had a real hue
+   observed this session either - an accepted, disclosed gap, not a fix
+   left half-done. */
 function beginSpectrumDrag(row){
-  var c=row&&catById(row.dataset.cat);
-  dragHue=c?hsvOf(c.color)[0]:0;
+  var c=row&&catById(row.dataset.cat); if(!c){ dragHue=0; return; }
+  var hsv=hsvOf(c.color);
+  dragHue=(hsv[1]>0&&hsv[2]>0)?hsv[0]:(lastRealHue[row.dataset.cat]!==undefined?lastRealHue[row.dataset.cat]:0);
 }
 /* the real per-frame state mutation, decoupled from spectrumPointAt's
    getBoundingClientRect so it's directly testable with a hand-picked [s,v]
