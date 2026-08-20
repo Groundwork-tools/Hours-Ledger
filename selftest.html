@@ -867,6 +867,47 @@ function runTests(H,d){
     return true;
   })());
 
+  /* achromatic-hue-corruption bug (reported from a real device, both
+     phone and laptop): dragging the spectrum box through an achromatic
+     point (S=0, the left edge, or V=0, the bottom edge - either way the
+     colour has no real hue) and then back into chromatic territory used
+     to silently rewrite the CATEGORY'S SAVED COLOUR to red, not just the
+     hue strip's displayed value - applyBoxDrag re-derived hue from
+     c.color on every drag frame, and an achromatic hex has no recoverable
+     hue for hsvOf to read back (hslOf's hue math defaults to 0 for it -
+     correct on its own terms, since an achromatic colour genuinely has no
+     hue, but wrong as a source of truth for the NEXT frame of the same
+     gesture). Tests the actual saved data the report asked for, not just
+     the display - the visible strip jump was downstream of this. */
+  var dragRow=d.querySelector(".cat");
+  var dragCat=H.catById(dragRow.dataset.cat);
+  dragCat.color=H.hsvToHex(220,0.8,0.8); // a real, clearly-blue starting hue
+  var originalHue=H.hsvOf(dragCat.color)[0];
+  H.beginSpectrumDrag(dragRow);
+  H.applyBoxPoint(dragRow,[0,0.5],false);  // S=0 - achromatic (grey)
+  H.applyBoxPoint(dragRow,[0.5,0.5],true); // back to chromatic, drag ends
+  assert("dragging through an achromatic point (S=0) and back doesn't corrupt the saved colour's hue",
+    Math.abs(H.hsvOf(H.catById(dragRow.dataset.cat).color)[0]-originalHue)<=1);
+
+  dragCat.color=H.hsvToHex(90,0.8,0.8); // a different starting hue (green) - independent case
+  var originalHue2=H.hsvOf(dragCat.color)[0];
+  H.beginSpectrumDrag(dragRow);
+  H.applyBoxPoint(dragRow,[0.5,0],false);  // V=0 - achromatic (black)
+  H.applyBoxPoint(dragRow,[0.5,0.5],true); // back to chromatic, drag ends
+  assert("dragging through an achromatic point (V=0) and back doesn't corrupt the saved colour's hue",
+    Math.abs(H.hsvOf(H.catById(dragRow.dataset.cat).color)[0]-originalHue2)<=1);
+
+  /* display half of the same fix: the hue strip must not visibly jump to
+     red while merely DWELLING at an achromatic point, not just
+     self-correct once the drag leaves it */
+  dragCat.color=H.hsvToHex(220,0.8,0.8);
+  H.beginSpectrumDrag(dragRow);
+  H.applyBoxPoint(dragRow,[0.6,0.6],false); // a genuinely chromatic frame first, so .hue's DOM value actually becomes ~220 via syncPickerUI - otherwise "holds its last position" would trivially pass by checking a value nothing ever set
+  H.applyBoxPoint(dragRow,[0,0.5],false);   // now land on S=0 and stay there
+  var hueDisplayed=+dragRow.querySelector(".hue").value;
+  assert("the hue strip holds its last real position while the box sits at an achromatic point, instead of jumping to red",
+    Math.abs(hueDisplayed-220)<=1);
+
   /* recent colours - device-local, capped, most-recent-first, deduped */
   H.getState().settings.recentColors=[];
   for(var rci=0;rci<10;rci++) H.pushRecentColor("#"+String(rci).repeat(6));

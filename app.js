@@ -2512,10 +2512,22 @@ cats.addEventListener("change",function(ev){
 function syncPickerUI(row,hex){
   var hsv=hsvOf(hex);
   row.querySelector(".sw").style.background=hex;
-  row.querySelector(".hue").value=hsv[0];
   var box=row.querySelector(".spectrum");
-  box.style.setProperty("--h",hsv[0]);
   var dot=box.querySelector(".dot");
+  /* an achromatic hex (S=0 or V=0) has no recoverable hue - hsvOf reports
+     0 (red) for it, correctly (there genuinely isn't one to report), but
+     writing that into the hue strip/box gradient here would jerk them to
+     red just because the box is passing through black or grey, not
+     because anything touched the hue strip. Skipping the hue-dependent
+     writes leaves them exactly where the last genuinely chromatic frame
+     put them - holds the last real position, same fix direction as
+     dragHue above, applied to the display half of this bug. The dot IS
+     still updated unconditionally: S and V are both perfectly well-defined
+     at 0 - that's a real position, not an undefined one, unlike hue. */
+  if(hsv[1]>0&&hsv[2]>0){
+    row.querySelector(".hue").value=hsv[0];
+    box.style.setProperty("--h",hsv[0]);
+  }
   dot.style.left=(hsv[1]*100)+"%";
   dot.style.top=((1-hsv[2])*100)+"%";
 }
@@ -2603,19 +2615,44 @@ cats.addEventListener("click",function(ev){
    .spectrum has no overflow/scroll of its own to accidentally become a
    competing scroll container; there's nothing here for touch-action:none
    to fight. */
-var dragBox=null, pickTimer=null;
+var dragBox=null, dragHue=0, pickTimer=null;
 function spectrumPointAt(box,ev){
   var r=box.getBoundingClientRect();
   var x=Math.min(Math.max((ev.clientX-r.left)/r.width,0),1);
   var y=Math.min(Math.max((ev.clientY-r.top)/r.height,0),1);
   return [x,1-y]; // [saturation, value] - value is inverted since y=0 is the box's top (brightest)
 }
-function applyBoxDrag(box,ev,commit){
-  var row=box.closest(".cat"); if(!row) return;
+/* captures the hue ONCE, before a drag can ever touch an achromatic point -
+   see applyBoxPoint below for why re-deriving it mid-drag was the actual
+   bug. Split out from the pointerdown listener (not just inlined there) so
+   a test can call the exact same capture step a real drag does. */
+function beginSpectrumDrag(row){
+  var c=row&&catById(row.dataset.cat);
+  dragHue=c?hsvOf(c.color)[0]:0;
+}
+/* the real per-frame state mutation, decoupled from spectrumPointAt's
+   getBoundingClientRect so it's directly testable with a hand-picked [s,v]
+   pair - this sandbox's iframe is display:none, which zeroes every
+   element's layout rect (see the modal-scroll-lock note elsewhere in this
+   file), so geometry-dependent input can't be exercised here, but the
+   actual colour math can be, and that's what the achromatic-hue bug lived
+   in, not the geometry.
+   USES dragHue, NOT hsvOf(c.color)[0] - that was the bug. c.color's own
+   hue is not recoverable once a drag frame lands on S=0 or V=0: hsvToHex
+   collapses to an achromatic hex there (v*s=0 zeroes chroma regardless of
+   h), and hsvOf/hslOf's hue math can only report h=0 for any achromatic
+   RGB (r=g=b) - correct math, since an achromatic colour genuinely has no
+   hue, but re-reading it as the source of truth for the NEXT frame meant
+   one drag frame landing on black or grey silently snapped every
+   following frame in that same gesture to red, corrupting c.color itself,
+   not just a display value - a real hue never held past that point,
+   confirmed by tracing rather than assumed. dragHue is captured once at
+   drag-start (beginSpectrumDrag, called from pointerdown below) and reused
+   for the whole gesture instead, so it can't be knocked out by anything
+   the drag itself produces. */
+function applyBoxPoint(row,sv,commit){
   var c=catById(row.dataset.cat); if(!c) return;
-  var sv=spectrumPointAt(box,ev);
-  var h=hsvOf(c.color)[0];
-  c.color=hsvToHex(h,sv[0],sv[1]);
+  c.color=hsvToHex(dragHue,sv[0],sv[1]);
   bumpCategory(c);
   syncPickerUI(row,c.color);
   recolorEntries();
@@ -2628,11 +2665,16 @@ function applyBoxDrag(box,ev,commit){
     pickTimer=setTimeout(function(){ persist(); renderTotals(); },250);
   }
 }
+function applyBoxDrag(box,ev,commit){
+  var row=box.closest(".cat"); if(!row) return;
+  applyBoxPoint(row,spectrumPointAt(box,ev),commit);
+}
 cats.addEventListener("pointerdown",function(ev){
   var box=ev.target.closest(".spectrum"); if(!box) return;
   ev.preventDefault();
   box.setPointerCapture(ev.pointerId);
   dragBox=box;
+  beginSpectrumDrag(box.closest(".cat"));
   applyBoxDrag(box,ev,false);
 });
 cats.addEventListener("pointermove",function(ev){
@@ -3211,6 +3253,8 @@ if(TEST_MODE){
     hsvOf:hsvOf,
     hsvToHex:hsvToHex,
     pushRecentColor:pushRecentColor,
+    beginSpectrumDrag:beginSpectrumDrag,
+    applyBoxPoint:applyBoxPoint,
     getRecentColors:function(){ return state.settings.recentColors; },
     getSwatches:function(){ return SWATCHES; },
     getDeviceId:getDeviceId,
