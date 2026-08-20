@@ -724,12 +724,58 @@ function getCachedToken(){
 function cacheToken(token,expiresInSec){
   writeStore(ACCESS_TOKEN_KEY,JSON.stringify({token:token,expiresAt:Date.now()+expiresInSec*1000}));
 }
+/* null = no load in flight; an array = one is, and everything in it is
+   waiting on the SAME script tag to settle. Without this, two callers
+   landing close together (the page-load pre-warm below and a real
+   interactive tap, most likely right after mobile Chrome silently
+   discards and reloads a long-backgrounded tab - see CLAUDE.md's backlog
+   for the real-device trace this came from) each fail the "already
+   loaded" check and inject their OWN <script src="...gsi/client">, so
+   Google's own setup code runs twice in one document - a plausible
+   source of a malformed request neither caller intended. This queue is
+   shared by both real callers and the TEST_MODE fake path below, so a
+   test exercises the actual de-dup logic, not a copy of it. */
+var gisScriptCallbacks=null;
+/* TEST_MODE only - stand in for window.google.accounts.oauth2 existing
+   and for "a real <script> tag would have been created here", since no
+   real script (and no real network request) is ever allowed to load
+   under TEST_MODE, same standard as every other real Google interaction
+   in this file. TEST_MODE_GIS_LOAD_COUNT lets a test assert that two
+   racing callers collapsed into exactly one load attempt, not two. */
+var TEST_MODE_GIS_LOADED=false, TEST_MODE_GIS_LOAD_COUNT=0;
+function gisScriptAlreadyLoaded(){
+  return TEST_MODE?TEST_MODE_GIS_LOADED:!!(window.google&&window.google.accounts&&window.google.accounts.oauth2);
+}
+/* settles every callback queued behind the one load attempt, in order,
+   then clears the queue BEFORE calling any of them - so if a queued
+   callback itself calls loadGisScript again, it sees accurate state
+   (this load already finished) rather than "still in flight" and
+   deadlocks waiting on something that's already done. A script element's
+   load/error events are a browser-guaranteed exactly-one-fires pair, so
+   - unlike GIS's own token callback elsewhere in this file - no timeout
+   backstop is needed here to guarantee this runs. */
+function settleGisScriptLoad(err){
+  var queued=gisScriptCallbacks;
+  gisScriptCallbacks=null;
+  queued.forEach(function(fn){ fn(err); });
+}
+/* TEST_MODE only - the test's own hand on the one thing that would
+   otherwise be a real network event. Mirrors setTestHangToken's shape:
+   nothing resolves on its own under TEST_MODE, only this. */
+function resolveTestGisScriptLoad(err){
+  if(!TEST_MODE) throw new Error("resolveTestGisScriptLoad is TEST_MODE only");
+  if(!err) TEST_MODE_GIS_LOADED=true;
+  settleGisScriptLoad(err||null);
+}
 function loadGisScript(cb){
-  if(window.google&&window.google.accounts&&window.google.accounts.oauth2){ cb(null); return; }
+  if(gisScriptAlreadyLoaded()){ cb(null); return; }
+  if(gisScriptCallbacks){ gisScriptCallbacks.push(cb); return; } /* a load is already in flight - queue behind it, don't start a second one */
+  gisScriptCallbacks=[cb];
+  if(TEST_MODE){ TEST_MODE_GIS_LOAD_COUNT++; return; } /* only resolveTestGisScriptLoad() ever settles this */
   var s=document.createElement("script");
   s.src="https://accounts.google.com/gsi/client";
-  s.onload=function(){ cb(null); };
-  s.onerror=function(){ cb(new Error("Couldn't load Google's sign-in script - check your connection")); };
+  s.onload=function(){ settleGisScriptLoad(null); };
+  s.onerror=function(){ settleGisScriptLoad(new Error("Couldn't load Google's sign-in script - check your connection")); };
   document.head.appendChild(s);
 }
 /* cb(err, token). Caches the token in its own key, outside synced state,
@@ -2946,6 +2992,10 @@ if(TEST_MODE){
     setDriveReconnectAttempted:function(v){ driveReconnectAttemptedThisSession=v; },
     setTestHangToken:function(v){ TEST_MODE_HANG_TOKEN=v; },
     setTestLateSuccessMs:function(v){ TEST_MODE_LATE_SUCCESS_MS=v; },
+    loadGisScript:loadGisScript,
+    resolveTestGisScriptLoad:resolveTestGisScriptLoad,
+    getGisScriptLoadCount:function(){ return TEST_MODE_GIS_LOAD_COUNT; },
+    isGisScriptLoadPending:function(){ return gisScriptCallbacks!==null; },
     getLastDriveSyncErr:function(){ return lastDriveSyncErr?{message:lastDriveSyncErr.message,needsReconnect:!!lastDriveSyncErr.needsReconnect,dismissed:!!lastDriveSyncErr.dismissed,viaFocus:!!lastDriveSyncErr.viaFocus}:null; },
     getDriveReconnectAttempted:function(){ return driveReconnectAttemptedThisSession; },
     clearLocalStateForTest:function(){
