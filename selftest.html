@@ -883,7 +883,7 @@ function runTests(H,d){
   /* expanded preset palette - a plain regression guard, not a re-run of
      the six-check validation itself (done offline against the real
      validator when these were chosen - see app.js's SWATCHES comment) */
-  assert("SWATCHES has the validated 19-colour palette", H.getSwatches().length===19);
+  assert("SWATCHES has the validated 15-colour palette", H.getSwatches().length===15);
   assert("every SWATCHES entry is a valid 6-digit hex",
     H.getSwatches().every(function(s){ return /^#[0-9A-F]{6}$/.test(s); }));
 

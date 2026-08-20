@@ -491,8 +491,24 @@ The look is deliberate — accounting ledger paper. Do not drift toward generic
 dashboard styling.
 
 - Paper `#FAFAF7`, ledger stripe `#E8EFE6`, ink `#16211B`, rule `#C2CDC1`,
-  muted `#6C7A70`, flag red `#B23A2F` (destructive and Drift only), grey `#9AA5A0`
-  (uncategorised only).
+  muted `#6C7A70`, grey `#9AA5A0` (uncategorised only). Flag red `#B23A2F` is
+  still the fixed color for destructive actions (delete buttons, etc.) and is
+  Drift's own shipped default color — but as of the color picker redesign
+  (2026-08-20) it is **no longer a reserved hue category colors must avoid**.
+  This reverses the line that used to read here ("flag red ... destructive
+  and Drift only"). Reasoning, recorded because it's a real reversal, not a
+  quiet drift: the original reservation copied a pattern from apps where red
+  means "wrong" (over budget, an error state) — Hours Ledger has no such
+  state anywhere. It's a plain logging tool, not a budget with an over/under;
+  Drift is just unlogged time shown plainly, not a flagged bad outcome, and
+  it's a normal category like any other that a user can recolor or delete
+  same as any of the defaults. Nothing in this app needs a warning color
+  reserved to warn about anything, so no hue needs to stay off-limits. The
+  category color picker's preset palette (`SWATCHES` in `app.js`) includes
+  red as an ordinary preset now, validated the same way every other preset
+  hue is (see the `SWATCHES` comment in `app.js` for the six-check pass/fail
+  detail) — it just no longer excludes red's hue range from that validation
+  the way the picker's first version did.
 - Type: Archivo for display, Spline Sans Mono for anything numeric or label-like.
   Numbers are always monospaced.
 - Square corners everywhere. No border-radius, no drop shadows except the one on

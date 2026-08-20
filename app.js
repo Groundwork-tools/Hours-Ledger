@@ -37,40 +37,58 @@ var KEY=TEST_MODE?"hours-ledger-selftest-v2":"hours-ledger-v2";
    real key-and-shape migration hard rule 1 asks for. v1 is read once here
    to carry existing verdicts forward as "this week"'s, then left untouched. */
 var OLD_KEY="hours-ledger-v1";
-/* validated categorical palette, expanded from the original 8 (picker
-   redesign, 2026-08-20) to 19 - 8 kept verbatim (7 are the live colors of
-   DEFAULTS categories below; keeping them means a category can always be
-   tapped back to its original/default color) plus 11 new, softer additions
-   (moderate-low chroma ~0.11-0.13 OKLCH at L~0.62 - "soft" here means less
-   saturated, not pale: the paper surface #FAFAF7 is itself near-white,
-   OKLCH L~0.98, so anything paler than L~0.65 fails the 3:1 contrast floor
-   against it regardless of hue - confirmed by direct sweep, not assumed).
-   Passes lightness band, chroma floor, CVD + normal-vision ADJACENT
-   separation (worst pair ΔE 9.6 CVD / 18.3 normal-vision, both comfortably
-   clear of the 8/15 gates - see the dataviz skill's six checks), and
-   contrast against the paper surface. Does NOT pass all-pairs CVD
-   separation at this count - confirmed neither did the original 8
-   (all-pairs worst ΔE only 6.0, well under the 15 floor) - so this is the
-   same standard the original set was actually held to, not a new weaker
-   bar. THE ORDER BELOW IS LOAD-BEARING: it's a locally-optimized "theme"
-   (found by random-restart pairwise-swap search maximizing the worst
-   adjacent pair), not hue-sorted or otherwise cosmetic - hue-sorting this
-   exact set reintroduces real collisions (confirmed: a hue-sorted attempt
-   at a similar 16-color set put two near-identical warm hues adjacent at
-   ΔE 0.8, and a new "olive-gold" 11° from the existing gold preset at ΔE
-   3.6, both far under every gate). Never reorder, insert, or resort this
-   array without re-running the six-check validator against the exact
-   resulting adjacent sequence - see the dataviz skill's
-   scripts/validate_palette.js. Deliberately stays clear of red's hue
-   range - reserved for the flag color (destructive actions and Drift
-   only) and mustn't be reused here; this is also why "coral" and "rose"
-   from the original mood reference don't appear as distinct additions -
-   coral's natural hue sits too close to the reserved red zone to get
-   real CVD separation from it, and the existing "People"/"Sleep" presets
-   already occupy the rose/violet territory. */
-var SWATCHES=["#0097BC","#758E29","#A86AB6","#27864F","#2B52A1","#009CA5","#6C3BB0","#239D6A",
-  "#1D669A","#009F89","#B77610","#248FCC","#B18725","#A63A9D","#0E9DAA","#A58100",
-  "#0093C5","#AF7C00","#009E97"];
+/* validated categorical palette (picker redesign, 2026-08-20 - superseded
+   its own first draft the same night: an earlier 19-color version, built
+   around keeping the original 8 plus softer additions, is gone entirely -
+   this replaced it, not extended it, once the brief changed to a fixed
+   10-anchor-hue structure that the old 8 didn't fit). 15 presets total: 10
+   named anchor hues (Red, Orange, Brown, Yellow, Green, Light blue, Blue,
+   Dark blue, Purple, Light purple), each validated individually, plus 5
+   second shades ("nuances") distributed one-per-family across 5 of the 7
+   non-blue anchors - Light/Blue/Dark-blue already has 3 shades of one
+   family by design (the cap this file uses everywhere: "no more than 3
+   shades of any single family"), so blue was excluded from getting a 6th.
+   Yellow and Purple ended up with only their one anchor shade, not by
+   preference but because an exhaustive search over all 21 ways to choose
+   5-of-7 families for a nuance found every combination that gave either of
+   them a second shade scored worse (lower worst-adjacent-pair margin) than
+   the winning combination (Red/Orange/Brown/Green/Light-purple) - a
+   measured result, not eyeballed balance.
+   Red is now a normal preset hue, not excluded - see CLAUDE.md's Design
+   constraints section for the reversal and its reasoning (Hours Ledger has
+   no "wrong" state for a reserved warning color to protect - the flag
+   color itself is unchanged for destructive actions and stays Drift's
+   default, but no hue is off-limits to category presets anymore).
+   Chose the OKLCH L for each anchor with the paper surface's own
+   contrast floor in mind, same finding as the previous draft: anything
+   paler than L~0.65 fails the 3:1 contrast floor against paper (#FAFAF7,
+   itself near-white at OKLCH L~0.98) regardless of hue, confirmed by
+   direct sweep - which is why "Yellow" here reads as mustard/gold rather
+   than a bright lemon yellow; true bright yellow cannot pass this app's
+   own contrast rule at any hue. Light/Blue/Dark-blue and Purple/Light-
+   purple lean on lightness, not a second hue, to differentiate within
+   their family - same "light X / X / dark X" logic a name implies.
+   PASSES CLEANLY, no floor-band reliance anywhere (contrast every other
+   entry in this file's history where a WARN got shipped and flagged as
+   fragile): worst adjacent CVD ΔE 18.2 (target ≥8), worst adjacent
+   normal-vision ΔE 18.5 (gate ≥15) - real margin on both, not a knife
+   edge. All 15 individually clear the lightness band and chroma floor too.
+   Does NOT pass all-pairs CVD separation at this count, same as every
+   version of this palette before it and the original 8 before that (see
+   the dataviz skill's own documented limit: no ordering of even 8 hues
+   clears all-pairs beyond 3) - this file has never claimed that standard.
+   THE ORDER BELOW IS LOAD-BEARING: a locally-optimized "theme" (random-
+   restart pairwise-swap search maximizing the worst adjacent pair, CVD
+   prioritized over normal-vision margin since CVD has been the binding
+   constraint throughout every version of this exercise), not hue-sorted
+   or cosmetic. Never reorder, insert, or resort this array without
+   re-running the six-check validator (dataviz skill's
+   scripts/validate_palette.js) against the exact resulting adjacent
+   sequence - and if red-hue exclusion is ever reinstated for some other
+   reason, that's a new constraint to validate against, not a reason to
+   assume this array still passes without re-running the check. */
+var SWATCHES=["#418E47","#1F74BF","#9A2F00","#D36C6E","#823B15","#A28700","#B171B4","#C56C21",
+  "#0999B2","#284E99","#519962","#8059BB","#B94642","#8C7ACB","#B26232"];
 function uid(){ return Math.random().toString(36).slice(2,9); }
 
 /* fixed ids (not uid()) so two fresh installs agree their starter
