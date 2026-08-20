@@ -1582,4 +1582,140 @@ dashboard styling.
     signal to go get live evidence next, not to reason harder from the
     same code a second time.
 
+19. **Mobile Google sign-in fails with a 400 after a long-backgrounded tab
+    — a real race fixed and fail-first tested; NOT confirmed as the actual
+    cause, and NOT merged.** Reported bug: pinned Hours Ledger tab on
+    phone, backgrounded for a while, switched back via the tab overview,
+    tapped to trigger sign-in — either landed on `accounts.google.com`'s
+    "400. That's an error. The server cannot process the request because
+    it is malformed." before reaching the account picker, or after
+    picking an account. Never seen on laptop, only mobile, on identical
+    code.
+
+    **Diagnosis, in two rounds — the first from code alone, the second
+    from a real-device test that ruled half of it out.** Round one (code
+    reading only): `initTokenClient`/`requestAccessToken()` have exactly
+    one call site in `app.js`, both re-created fresh per interactive
+    attempt — so the two-outcome pattern (fails before vs. after the
+    picker) is one client-side path with Google's own server-side
+    validation order determining how far the flow visibly gets, not two
+    different code paths here. Considered and could not rule out from
+    code alone: mobile Chrome's Page Lifecycle "freezing" a backgrounded
+    tab (JS paused, DOM/heap retained, nothing re-runs) versus fully
+    discarding it under memory pressure and silently reloading it when
+    the tab is next foregrounded (a real navigation, everything
+    reinitializes). Both were consistent with the reported symptoms from
+    code alone.
+
+    **Round two: a real-device test that needed no debugger, just the
+    live UI.** Before backgrounding, left the "Log now" entry sheet open
+    — state that lives only in memory, never in `localStorage` — then
+    backgrounded the tab for ~1.5 hours and switched back without
+    tapping anything. The sheet appeared briefly, then was replaced by
+    the normal closed register view. A genuine freeze would have kept it
+    open indefinitely (nothing re-runs to close it); a reload explains
+    exactly what was seen. **This confirmed the tab is being silently
+    discarded and reloaded, not frozen** — and, separately, explains
+    "mobile only, identical code" without needing any platform-specific
+    code difference: mobile Chrome discards backgrounded tabs under
+    memory pressure far more readily than desktop ever does, so this
+    whole scenario — a fresh reload landing right as the user is about to
+    interact — essentially never arises on laptop at all.
+
+    **Given a genuine reload was confirmed, not a freeze, the real
+    question became: what about a reload specifically could fail
+    intermittently rather than every time?** Traced, not guessed, from
+    the actual reload sequence:
+    - `index.html`'s cache-busting bootstrap
+      (`s.src="app.js?v="+Date.now()`) means a reload re-fetches and
+      re-executes `app.js` from scratch — `window.google` is gone,
+      everything rebuilds.
+    - At the bottom of `app.js`, anyone already connected pre-warms GIS
+      unconditionally on every load: `if(!TEST_MODE&&state.driveConnected)
+      loadGisScript(function(){});` — kicking off a real network fetch of
+      `https://accounts.google.com/gsi/client`.
+    - `loadGisScript(cb)` had exactly one guard: "is
+      `window.google.accounts.oauth2` already fully loaded." No
+      "currently loading" state existed at all. Because the whole IIFE
+      runs synchronously to completion before any user gesture can be
+      dispatched, every click/pointerdown listener (including
+      `getAccessToken`'s own path to `loadGisScript`) is already wired up
+      by the moment the pre-warm's fetch is merely *in flight* — so a tap
+      landing before that fetch resolves hits the exact same "not yet
+      loaded" branch the pre-warm did, and **injects a second,
+      independent `<script src=".../gsi/client">`**, running Google's own
+      setup code twice in one document. This is fully confirmed from this
+      repo's own code, not inferred.
+    - Why this is intermittent rather than constant: purely timing. A
+      fast tap on a slow fetch loses; a normal tap on an already-resolved
+      fetch never sees it. Mobile makes both halves of that more likely
+      at once — every repro here follows directly on a fresh
+      discard-reload (never true of a laptop's steady-state open tab),
+      and the first network request right after a phone resumes from
+      ~1.5 hours backgrounded plausibly faces real radio/connection
+      reassociation latency, stretching what's normally a sub-100ms fetch
+      into a window a reflexive tap can beat.
+
+    **The fix**, on `fix/gis-script-load-race`, entirely self-contained
+    inside `loadGisScript()` — neither the pre-warm call nor
+    `getAccessToken`'s own call site needed to change:
+    - `gisScriptCallbacks`: `null` when no load is in flight, an array of
+      every caller currently waiting on it. A caller arriving while one
+      is already in flight is queued behind it instead of starting a
+      second `<script>` tag.
+    - `settleGisScriptLoad(err)` resets the queue to `null` *before*
+      calling anything in it (so a callback that itself calls
+      `loadGisScript` again sees accurate state, not a deadlock on an
+      already-finished load), then notifies every queued caller with the
+      same outcome. A script element's `load`/`error` events are a
+      browser-guaranteed exactly-one-fires pair, so — unlike GIS's own
+      token callback elsewhere in this file — no timeout backstop is
+      needed to guarantee this runs.
+    - An error resets the queue too, so a failed load doesn't
+      permanently wedge every future `loadGisScript` call the way an
+      un-reset guard flag would (the same shape hard rule 9 exists for,
+      applied here to a plain internal variable rather than a boolean
+      this time).
+    - `TEST_MODE` gets a controllable fake load path
+      (`resolveTestGisScriptLoad`, mirroring `setTestHangToken`'s
+      existing shape) so the real de-dup logic is exercised by tests
+      without a test ever touching Google's real CDN — consistent with
+      this file's standing rule that nothing under `TEST_MODE` makes a
+      real Google network call.
+
+    **Fail-first, same pattern as the crash-based confirmation used for
+    the previous fix's migration tests**: against unpatched `app.js`, the
+    new tests call a hook (`loadGisScript`/`resolveTestGisScriptLoad`)
+    that doesn't exist yet, which throws inside the async test
+    continuation's promise chain — and because a rejected promise chain
+    never reaches its own final `return results;`, that discards *every*
+    accumulated async result, not just the new ones, replaced by one
+    honest synthetic failure naming exactly what threw
+    (`h.loadGisScript is not a function`). Restoring the fix brought the
+    full count back. **328/328 passing, 0 failing**, stable across
+    repeated runs.
+
+    **What this proves and what it doesn't, stated plainly, not
+    implied.** The tests prove the de-dup mechanism itself is correct in
+    isolation: three simultaneous callers collapse into exactly one load
+    attempt (not three) and all three are notified once it resolves; a
+    failed load notifies every queued caller with the same error and
+    correctly clears itself so a later call can retry rather than queuing
+    forever behind a dead attempt; the pre-existing already-loaded fast
+    path is unchanged. **What isn't proven, and can't be from here: that
+    this race is actually what produced the real 400 errors.** Confirming
+    that would need a live repro that reliably reproduces the exact
+    timing — a real mobile discard-reload racing a fast tap against a
+    slow post-resume network fetch — which isn't something forceable on
+    demand the way, say, item 10's touch bug was. This is architecturally
+    the most plausible mechanism found, consistent with every symptom
+    reported (intermittent, mobile-only despite identical code, both
+    picker-reached and picker-not-reached outcomes), and closes a real,
+    independently-confirmed gap (the missing in-flight guard) regardless
+    of whether it's the whole story. It is not confirmed the way the
+    verdict-tombstone bug was, with a specific real Drive-account trace
+    pinning the exact mechanism. **Built and fail-first tested on
+    `fix/gis-script-load-race`; not merged.** Sebastian is deciding
+    whether to build/merge it before or after this coming Sunday.
+
 Feature creep is the known failure mode of this project.

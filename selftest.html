@@ -2580,6 +2580,73 @@ function runAsyncTests(H,d){
       assert("undoing a verdict click reverts it - this never worked before the snapshot() fix, since the click handler never called snapshot()",
         h.getVerdict(cat.id,thisWeek)===null);
     })
+    .then(function(){
+      /* ---- loadGisScript() de-dup: real trace on a real phone (see
+         CLAUDE.md's backlog) found mobile Chrome silently discarding and
+         reloading a long-backgrounded Hours Ledger tab, then an
+         interactive sign-in tap landing before the page-load pre-warm's
+         own GIS script fetch had resolved - both callers failed the
+         "already loaded" check and each injected their own
+         <script src=".../gsi/client">. Everything under TEST_MODE here is
+         synchronous (nothing resolves except via resolveTestGisScriptLoad
+         itself), so no waitFor() is needed once the sandbox is ready -
+         but each scenario still needs its OWN fresh sandbox, since
+         TEST_MODE_GIS_LOADED is a one-way, page-lifetime flag exactly
+         like the real window.google.accounts.oauth2 it stands in for -
+         reusing one sandbox across scenarios would have the second
+         scenario silently inherit the first's "already loaded" state. */
+      return freshSandbox();
+    })
+    .then(function(fresh){
+      var h=fresh.H;
+      var r1=[],r2=[],r3=[];
+      h.loadGisScript(function(err){ r1.push(err); });
+      h.loadGisScript(function(err){ r2.push(err); });
+      h.loadGisScript(function(err){ r3.push(err); });
+      assert("three loadGisScript calls landing before the first resolves collapse into exactly ONE load attempt, not three",
+        h.getGisScriptLoadCount()===1);
+      assert("none of the queued callers fire before the shared load actually resolves",
+        r1.length===0&&r2.length===0&&r3.length===0);
+      h.resolveTestGisScriptLoad(null);
+      assert("once the single load resolves, EVERY queued caller is notified, not just the first",
+        r1.length===1&&r2.length===1&&r3.length===1);
+      assert("every queued caller is notified with no error",
+        r1[0]===null&&r2[0]===null&&r3[0]===null);
+    })
+    .then(function(){ return freshSandbox(); })
+    .then(function(fresh){
+      var h=fresh.H;
+      var r1=[],r2=[];
+      h.loadGisScript(function(err){ r1.push(err); });
+      h.loadGisScript(function(err){ r2.push(err); });
+      h.resolveTestGisScriptLoad(new Error("simulated network failure"));
+      assert("a FAILED load also notifies every queued caller, not just the first",
+        r1.length===1&&r2.length===1);
+      assert("every queued caller gets the SAME error object, not separately-constructed copies",
+        r1[0]===r2[0]&&r1[0] instanceof Error);
+      assert("after a failure, nothing is left marked in-flight - a later call starts a genuinely fresh attempt instead of queuing behind a dead one forever",
+        !h.isGisScriptLoadPending());
+      var r3=[];
+      h.loadGisScript(function(err){ r3.push(err); });
+      assert("that fresh attempt after a failure is real - the load count increments again rather than being silently swallowed",
+        h.getGisScriptLoadCount()===2);
+      h.resolveTestGisScriptLoad(null);
+      assert("...and it can still succeed normally",
+        r3.length===1&&r3[0]===null);
+    })
+    .then(function(){ return freshSandbox(); })
+    .then(function(fresh){
+      var h=fresh.H;
+      var r1=[];
+      h.loadGisScript(function(err){ r1.push(err); });
+      h.resolveTestGisScriptLoad(null);
+      assert("baseline: a single non-racing call still resolves normally",
+        h.getGisScriptLoadCount()===1&&r1.length===1&&r1[0]===null);
+      var r2=[];
+      h.loadGisScript(function(err){ r2.push(err); });
+      assert("a call after the script has already fully loaded hits the pre-existing fast path immediately - synchronous, no new load attempt, unchanged by this fix",
+        h.getGisScriptLoadCount()===1&&r2.length===1&&r2[0]===null);
+    })
     .then(function(){ return results; });
 }
 })();
