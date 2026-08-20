@@ -128,12 +128,28 @@ button{cursor:pointer}
 .cat .del{border:0;background:transparent;color:var(--muted);font-size:16px;line-height:1;padding:0 2px}
 .cat .del:hover{color:var(--flag)}
 .picker{position:absolute;z-index:20;top:100%;left:0;right:0;background:var(--paper);border:1px solid var(--ink);padding:10px;margin-top:2px}
-.presets{display:flex;gap:4px;margin-bottom:9px}
-.presets button{flex:1;height:20px;border:1px solid rgba(0,0,0,.25);padding:0}
+.presets{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:9px}
+.presets button{width:18px;height:18px;flex:none;border:1px solid rgba(0,0,0,.25);padding:0}
+/* saturation (x) x value (y) - not lightness - so the box uses its full
+   area instead of converging to black/white in its corners regardless of
+   x; see the hsvOf()/hsvToHex() comment in app.js for why HSV specifically.
+   --h is set per-row by app.js from the category's current hue.
+   touch-action:none: this box has no scroll/overflow of its own, so unlike
+   .gridscroll (backlog item 10) there's nothing for this to fight - it
+   just tells the browser this element handles 100% of its own touch
+   gestures, no default panning/zooming. */
+.spectrum{position:relative;width:100%;aspect-ratio:1.8;margin-bottom:8px;border:1px solid var(--rule);touch-action:none;cursor:crosshair;
+  background:
+    linear-gradient(to top,#000,rgba(0,0,0,0)),
+    linear-gradient(to right,#fff,rgba(255,255,255,0)),
+    hsl(var(--h) 100% 50%);}
+.spectrum .dot{position:absolute;width:12px;height:12px;margin:-6px 0 0 -6px;border:1.5px solid #fff;outline:1px solid rgba(0,0,0,.5);pointer-events:none}
 .hue{width:100%;height:18px;-webkit-appearance:none;appearance:none;background:linear-gradient(90deg,#7A4A45,#7A6A3A,#4E7040,#3A6E70,#3A4F7A,#5F3F72,#7A4A45);border:1px solid var(--rule);cursor:grab}
 .hue:active{cursor:grabbing}
 .hue::-webkit-slider-thumb{-webkit-appearance:none;width:8px;height:24px;background:var(--paper);border:1.5px solid var(--ink);margin-top:-4px}
 .hue::-moz-range-thumb{width:8px;height:24px;background:var(--paper);border:1.5px solid var(--ink);border-radius:0}
+.recents{display:flex;flex-wrap:wrap;gap:4px;margin-top:9px}
+.recents button{width:18px;height:18px;flex:none;border:1px solid rgba(0,0,0,.25);padding:0}
 .pickhint{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.09em;text-transform:uppercase;margin-top:7px;display:block}
 
 .catdelete{position:absolute;z-index:20;top:100%;left:0;right:0;background:var(--paper);border:1px solid var(--flag);padding:10px;margin-top:2px}

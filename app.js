@@ -37,12 +37,40 @@ var KEY=TEST_MODE?"hours-ledger-selftest-v2":"hours-ledger-v2";
    real key-and-shape migration hard rule 1 asks for. v1 is read once here
    to carry existing verdicts forward as "this week"'s, then left untouched. */
 var OLD_KEY="hours-ledger-v1";
-/* validated categorical palette (blue/gold/slate/olive/teal/mauve/green/violet) -
-   passes lightness band, chroma floor, CVD + normal-vision adjacent separation,
-   and contrast against the paper surface (see dataviz skill's six checks).
-   Deliberately stays clear of red's hue range - that's reserved for the flag
-   color (destructive actions and Drift only) and mustn't be reused here. */
-var SWATCHES=["#2B52A1","#B18725","#1D669A","#758E29","#0E9DAA","#A63A9D","#27864F","#6C3BB0"];
+/* validated categorical palette, expanded from the original 8 (picker
+   redesign, 2026-08-20) to 19 - 8 kept verbatim (7 are the live colors of
+   DEFAULTS categories below; keeping them means a category can always be
+   tapped back to its original/default color) plus 11 new, softer additions
+   (moderate-low chroma ~0.11-0.13 OKLCH at L~0.62 - "soft" here means less
+   saturated, not pale: the paper surface #FAFAF7 is itself near-white,
+   OKLCH L~0.98, so anything paler than L~0.65 fails the 3:1 contrast floor
+   against it regardless of hue - confirmed by direct sweep, not assumed).
+   Passes lightness band, chroma floor, CVD + normal-vision ADJACENT
+   separation (worst pair ΔE 9.6 CVD / 18.3 normal-vision, both comfortably
+   clear of the 8/15 gates - see the dataviz skill's six checks), and
+   contrast against the paper surface. Does NOT pass all-pairs CVD
+   separation at this count - confirmed neither did the original 8
+   (all-pairs worst ΔE only 6.0, well under the 15 floor) - so this is the
+   same standard the original set was actually held to, not a new weaker
+   bar. THE ORDER BELOW IS LOAD-BEARING: it's a locally-optimized "theme"
+   (found by random-restart pairwise-swap search maximizing the worst
+   adjacent pair), not hue-sorted or otherwise cosmetic - hue-sorting this
+   exact set reintroduces real collisions (confirmed: a hue-sorted attempt
+   at a similar 16-color set put two near-identical warm hues adjacent at
+   ΔE 0.8, and a new "olive-gold" 11° from the existing gold preset at ΔE
+   3.6, both far under every gate). Never reorder, insert, or resort this
+   array without re-running the six-check validator against the exact
+   resulting adjacent sequence - see the dataviz skill's
+   scripts/validate_palette.js. Deliberately stays clear of red's hue
+   range - reserved for the flag color (destructive actions and Drift
+   only) and mustn't be reused here; this is also why "coral" and "rose"
+   from the original mood reference don't appear as distinct additions -
+   coral's natural hue sits too close to the reserved red zone to get
+   real CVD separation from it, and the existing "People"/"Sleep" presets
+   already occupy the rose/violet territory. */
+var SWATCHES=["#0097BC","#758E29","#A86AB6","#27864F","#2B52A1","#009CA5","#6C3BB0","#239D6A",
+  "#1D669A","#009F89","#B77610","#248FCC","#B18725","#A63A9D","#0E9DAA","#A58100",
+  "#0093C5","#AF7C00","#009E97"];
 function uid(){ return Math.random().toString(36).slice(2,9); }
 
 /* fixed ids (not uid()) so two fresh installs agree their starter
@@ -91,6 +119,27 @@ function migrateVerdicts(s){
     });
   }
   return s;
+}
+/* Recent custom colors (picker redesign, 2026-08-20) - device-local only,
+   deliberately: state.settings is never part of the Drive sync payload
+   (syncEngine() only ever touches categories/entries/verdicts/closeouts -
+   startHour/endHour have always been device-local too, same precedent),
+   and a convenience list of recently-tapped colors is low-stakes enough
+   that following that precedent beats inventing a new merge policy for a
+   bare array with no per-record id/timestamp. Capped at 8 (same size as
+   the original preset row), most-recent first, deduped by hex so re-picking
+   an already-recent color just moves it to the front rather than
+   duplicating it. */
+var RECENT_COLORS_MAX=8;
+function migrateRecentColors(s){
+  if(!s.settings.recentColors) s.settings.recentColors=[];
+  return s;
+}
+function pushRecentColor(hex){
+  if(!state.settings.recentColors) state.settings.recentColors=[];
+  var rc=state.settings.recentColors.filter(function(h){ return h!==hex; });
+  rc.unshift(hex);
+  state.settings.recentColors=rc.slice(0,RECENT_COLORS_MAX);
 }
 /* the Keep/Compress/Cut verdict scale became Increase/Keep/Cut (see
    CLAUDE.md) - "compress" has no honest translation onto the new scale,
@@ -1037,6 +1086,7 @@ if(!state.weekCloseouts) state.weekCloseouts={};
 migrateVerdicts(state);
 migrateVerdictScale(state);
 migrateVerdictTombstoneCollisions(state);
+migrateRecentColors(state);
 
 /* ---------------- file linking (Chrome / Edge) ---------------- */
 var fileHandle=null, fileName="", writeTimer=null;
@@ -1328,6 +1378,7 @@ function applyState(json){
   migrateVerdicts(state);
   migrateVerdictScale(state);
   migrateVerdictTombstoneCollisions(state);
+  migrateRecentColors(state);
   writeStore(KEY,JSON.stringify(state));
   if(fileHandle){ clearTimeout(writeTimer); writeTimer=setTimeout(writeLinkedFile,600); }
   render();
@@ -1731,14 +1782,18 @@ if(window.matchMedia&&window.matchMedia("(hover: hover)").matches){
 
 function renderCats(){
   document.getElementById("cats").innerHTML=state.categories.map(function(c){
+    var hsv=hsvOf(c.color);
+    var recents=state.settings.recentColors||[];
     return '<div class="cat" data-cat="'+c.id+'">'+
       '<button class="sw" style="background:'+c.color+'" aria-label="Colour for '+escapeHtml(c.name)+'"></button>'+
       '<input class="nm" type="text" value="'+escapeHtml(c.name)+'" aria-label="Category name">'+
       '<button class="del" aria-label="Delete '+escapeHtml(c.name)+'">&times;</button>'+
       '<div class="picker" hidden>'+
         '<div class="presets">'+SWATCHES.map(function(s){ return '<button data-hex="'+s+'" style="background:'+s+'" aria-label="Use '+s+'"></button>'; }).join("")+"</div>"+
-        '<input class="hue" type="range" min="0" max="360" value="'+hueOf(c.color)+'" aria-label="Drag to change colour">'+
-        '<span class="pickhint">Drag the strip, or tap a swatch</span>'+
+        '<div class="spectrum" style="--h:'+hsv[0]+'"><i class="dot" style="left:'+(hsv[1]*100)+'%;top:'+((1-hsv[2])*100)+'%"></i></div>'+
+        '<input class="hue" type="range" min="0" max="360" value="'+hsv[0]+'" aria-label="Drag to change hue">'+
+        (recents.length?'<div class="recents">'+recents.map(function(s){ return '<button data-hex="'+s+'" style="background:'+s+'" aria-label="Use '+s+'"></button>'; }).join("")+"</div>":"")+
+        '<span class="pickhint">Drag the box or strip, or tap a swatch</span>'+
       "</div>"+
       '<div class="catdelete" hidden>'+
         '<p class="catdelete-msg"></p>'+
@@ -1802,21 +1857,54 @@ function openCategoryDeleteChooser(row,c,n){
 function render(){ renderGrid(); renderTotals(); renderCats(); refreshHint(); updateCloseoutAvailability(); updateColophon(); }
 
 /* ---------------- colour ---------------- */
-function hslHex(h){
-  /* bumped from 0.40/0.36 - the old values fell below OKLCH's chroma floor
-     across most of the hue wheel, which is what read as "very pale" */
-  var s=0.70,l=0.40;
+/* generalized from the old fixed-s/l hslHex(h) (picker redesign,
+   2026-08-20) - the old function only ever produced one point on the hue
+   wheel (s=0.70,l=0.40, chosen so it cleared OKLCH's chroma floor - see
+   the s/l defaults below, unchanged). The spectrum box needs the full
+   h/s/l range; the hue bar still only ever drives h, but must now hold s/l
+   steady at whatever the box last set rather than reset them - see the
+   hue input handler below for the actual fix. */
+function hslToHex(h,s,l){
   var c=(1-Math.abs(2*l-1))*s, x=c*(1-Math.abs((h/60)%2-1)), m=l-c/2, r,g,b;
   if(h<60){r=c;g=x;b=0;} else if(h<120){r=x;g=c;b=0;} else if(h<180){r=0;g=c;b=x;}
   else if(h<240){r=0;g=x;b=c;} else if(h<300){r=x;g=0;b=c;} else {r=c;g=0;b=x;}
   return "#"+[r,g,b].map(function(v){ return String(Math.round((v+m)*255).toString(16)).padStart(2,"0"); }).join("").toUpperCase();
 }
-function hueOf(hex){
+function hslHex(h){ return hslToHex(h,0.70,0.40); }
+/* returns [h,s,l] (h in 0-360, s/l in 0-1) - the inverse of hslToHex,
+   generalizing the old hueOf(hex) (kept as a thin wrapper below since
+   nothing else in this file needs s/l on its own) */
+function hslOf(hex){
   var r=parseInt(hex.slice(1,3),16)/255,g=parseInt(hex.slice(3,5),16)/255,b=parseInt(hex.slice(5,7),16)/255;
-  var mx=Math.max(r,g,b),mn=Math.min(r,g,b),d=mx-mn,h=0;
-  if(!d) return 0;
-  if(mx===r) h=60*(((g-b)/d)%6); else if(mx===g) h=60*((b-r)/d+2); else h=60*((r-g)/d+4);
-  return Math.round((h+360)%360);
+  var mx=Math.max(r,g,b),mn=Math.min(r,g,b),d=mx-mn,h=0,l=(mx+mn)/2,s=0;
+  if(d){
+    s=d/(1-Math.abs(2*l-1));
+    if(mx===r) h=60*(((g-b)/d)%6); else if(mx===g) h=60*((b-r)/d+2); else h=60*((r-g)/d+4);
+  }
+  return [(h+360)%360,s,l];
+}
+function hueOf(hex){ return Math.round(hslOf(hex)[0]); }
+/* HSV, not HSL, for the spectrum box specifically - a saturation x
+   lightness square wastes its top and bottom (everything near l=0 or l=1
+   converges to black/white regardless of s, giving a diamond of useful
+   area inside a square control), while saturation x value fills the whole
+   box - the standard technique behind every reference picker this redesign
+   is based on. Hue extraction is identical in both models (it depends only
+   on which RGB channel is max/min), so this reuses hslOf's h rather than
+   recomputing it; only s/v differ from HSL's s/l. The hue bar still edits
+   the same h either model would report, so nothing else in the file needs
+   to know HSV exists - only the box's own read/write boundary does. */
+function hsvOf(hex){
+  var r=parseInt(hex.slice(1,3),16)/255,g=parseInt(hex.slice(3,5),16)/255,b=parseInt(hex.slice(5,7),16)/255;
+  var mx=Math.max(r,g,b),mn=Math.min(r,g,b),d=mx-mn;
+  var v=mx,s=mx===0?0:d/mx;
+  return [hslOf(hex)[0],s,v];
+}
+function hsvToHex(h,s,v){
+  var c=v*s, x=c*(1-Math.abs((h/60)%2-1)), m=v-c, r,g,b;
+  if(h<60){r=c;g=x;b=0;} else if(h<120){r=x;g=c;b=0;} else if(h<180){r=0;g=c;b=x;}
+  else if(h<240){r=0;g=x;b=c;} else if(h<300){r=x;g=0;b=c;} else {r=c;g=0;b=x;}
+  return "#"+[r,g,b].map(function(v){ return String(Math.round((v+m)*255).toString(16)).padStart(2,"0"); }).join("").toUpperCase();
 }
 
 /* ---------------- modal ---------------- */
@@ -2371,14 +2459,67 @@ cats.addEventListener("input",function(ev){
     nameTimer=setTimeout(function(){ persist(); renderTotals(); },400);
   }
   if(ev.target.classList.contains("hue")){
-    c.color=hslHex(+ev.target.value);
+    /* preserves the box's current s/v instead of resetting them - the old
+       hslHex(h) call here silently discarded whatever s/l a custom pick
+       had, every time the hue strip moved; see the HSV comment above
+       hsvOf() for why this reads back through HSV, not HSL */
+    var hsv=hsvOf(c.color);
+    c.color=hsvToHex(+ev.target.value,hsv[1],hsv[2]);
     bumpCategory(c);
     row.querySelector(".sw").style.background=c.color;
+    row.querySelector(".spectrum").style.setProperty("--h",ev.target.value);
     recolorEntries();
     clearTimeout(nameTimer);
     nameTimer=setTimeout(function(){ persist(); renderTotals(); },250);
   }
 });
+/* "change" (not "input") fires once, on release - the same "commit only
+   the final value, not every drag frame" rule the spectrum box's pointerup
+   follows, so rotating the hue strip counts as a custom pick for recent
+   colours exactly like a box drag does, and doesn't spam the list with
+   every intermediate hue the strip passed through en route. */
+cats.addEventListener("change",function(ev){
+  if(!ev.target.classList.contains("hue")) return;
+  var row=ev.target.closest(".cat"); if(!row) return;
+  var c=catById(row.dataset.cat); if(!c) return;
+  pushRecentColor(c.color);
+  refreshRecentsRow(row);
+});
+
+/* keeps every piece of the open picker (swatch, box gradient + dot, hue
+   strip) in sync with whatever the category's color actually is right now
+   - called after any interaction that can change c.color, so there's one
+   place that has to remember all four spots instead of four call sites
+   each remembering to update the others */
+function syncPickerUI(row,hex){
+  var hsv=hsvOf(hex);
+  row.querySelector(".sw").style.background=hex;
+  row.querySelector(".hue").value=hsv[0];
+  var box=row.querySelector(".spectrum");
+  box.style.setProperty("--h",hsv[0]);
+  var dot=box.querySelector(".dot");
+  dot.style.left=(hsv[1]*100)+"%";
+  dot.style.top=((1-hsv[2])*100)+"%";
+}
+/* rebuilds just the recents row in place, not the whole picker via
+   renderCats() - a fresh custom pick should show up in "recently used"
+   right away (not just next time the panel happens to reopen), but a full
+   renderCats() would close the panel the user is mid-drag in, same reason
+   the preset-tap handler avoids it. Creates the row if this is the first
+   recent color a session has ever had (the initial render skips it
+   entirely when the list is empty). */
+function refreshRecentsRow(row){
+  var picker=row.querySelector(".picker");
+  var recents=state.settings.recentColors||[];
+  var el=picker.querySelector(".recents");
+  if(!recents.length){ if(el) el.remove(); return; }
+  var html=recents.map(function(s){ return '<button data-hex="'+s+'" style="background:'+s+'" aria-label="Use '+s+'"></button>'; }).join("");
+  if(el){ el.innerHTML=html; return; }
+  el=document.createElement("div");
+  el.className="recents";
+  el.innerHTML=html;
+  picker.querySelector(".hue").insertAdjacentElement("afterend",el);
+}
 
 cats.addEventListener("click",function(ev){
   var row=ev.target.closest(".cat"); if(!row) return;
@@ -2395,8 +2536,22 @@ cats.addEventListener("click",function(ev){
   if(pre){
     c.color=pre.dataset.hex;
     bumpCategory(c);
-    row.querySelector(".sw").style.background=c.color;
-    row.querySelector(".hue").value=hueOf(c.color);
+    syncPickerUI(row,c.color);
+    /* NOT renderCats() - rebuilding #cats would close the just-opened
+       picker (fresh markup starts every .picker hidden), same reason the
+       name-input handler above avoids it. The recents row (unaffected by
+       a preset tap anyway, since presets never join recents) picks up any
+       stale ordering next time the panel is naturally reopened. */
+    recolorEntries(); persist(); renderTotals();
+    return;
+  }
+  var rec=ev.target.closest(".recents button");
+  if(rec){
+    c.color=rec.dataset.hex;
+    bumpCategory(c);
+    pushRecentColor(c.color);
+    syncPickerUI(row,c.color);
+    refreshRecentsRow(row);
     recolorEntries(); persist(); renderTotals();
     return;
   }
@@ -2415,8 +2570,79 @@ cats.addEventListener("click",function(ev){
     return;
   }
 });
+
+/* ---------------- spectrum box drag ---------------- */
+/* Pointer Events (not the touch/mouse split the grid's own drag uses below)
+   - this is new interaction logic with no existing gesture code to share
+   (the grid's drag is a day/time-slot hold-then-commit, a different
+   coordinate space entirely - see CLAUDE.md's note on this). setPointerCapture
+   means .spectrum keeps receiving pointermove/pointerup for this pointer
+   even if it leaves the box mid-drag, so a fast drag to the box's edge
+   doesn't lose the gesture. touch-action:none on .spectrum (styles.css)
+   is what stops the page from also trying to scroll/zoom a touch that
+   started here - a plain CSS declaration, not a manual touchmove
+   preventDefault(), because unlike the gridscroll bug in backlog item 10,
+   .spectrum has no overflow/scroll of its own to accidentally become a
+   competing scroll container; there's nothing here for touch-action:none
+   to fight. */
+var dragBox=null, pickTimer=null;
+function spectrumPointAt(box,ev){
+  var r=box.getBoundingClientRect();
+  var x=Math.min(Math.max((ev.clientX-r.left)/r.width,0),1);
+  var y=Math.min(Math.max((ev.clientY-r.top)/r.height,0),1);
+  return [x,1-y]; // [saturation, value] - value is inverted since y=0 is the box's top (brightest)
+}
+function applyBoxDrag(box,ev,commit){
+  var row=box.closest(".cat"); if(!row) return;
+  var c=catById(row.dataset.cat); if(!c) return;
+  var sv=spectrumPointAt(box,ev);
+  var h=hsvOf(c.color)[0];
+  c.color=hsvToHex(h,sv[0],sv[1]);
+  bumpCategory(c);
+  syncPickerUI(row,c.color);
+  recolorEntries();
+  clearTimeout(pickTimer);
+  if(commit){
+    pushRecentColor(c.color);
+    refreshRecentsRow(row);
+    persist(); renderTotals();
+  }else{
+    pickTimer=setTimeout(function(){ persist(); renderTotals(); },250);
+  }
+}
+cats.addEventListener("pointerdown",function(ev){
+  var box=ev.target.closest(".spectrum"); if(!box) return;
+  ev.preventDefault();
+  box.setPointerCapture(ev.pointerId);
+  dragBox=box;
+  applyBoxDrag(box,ev,false);
+});
+cats.addEventListener("pointermove",function(ev){
+  if(!dragBox) return;
+  applyBoxDrag(dragBox,ev,false);
+});
+function endBoxDrag(ev){
+  if(!dragBox) return;
+  applyBoxDrag(dragBox,ev,true);
+  dragBox=null;
+}
+cats.addEventListener("pointerup",endBoxDrag);
+cats.addEventListener("pointercancel",endBoxDrag);
+
+/* Dragging inside the box and releasing outside the row must not close the
+   picker - the same shape as item 5's sheet-drag fix and the scrim's own
+   wireOutsideClose (see app.js's other scrims), applied here to the
+   document-level "click outside .cat closes every open picker" listener
+   below, which - unlike wireOutsideClose's single scrim element - has no
+   one fixed boundary element to check ev.target against, so this tracks
+   where the PRESS started instead: a drag that starts inside .cat and
+   resolves (via the browser's own mousedown/mouseup-common-ancestor rule)
+   to a click target outside .cat must still not close the picker. */
+var catPressedInside=false;
+document.addEventListener("mousedown",function(ev){ catPressedInside=!!ev.target.closest(".cat"); });
 document.addEventListener("click",function(ev){
-  if(ev.target.closest(".cat")) return;
+  if(catPressedInside||ev.target.closest(".cat")){ catPressedInside=false; return; }
+  catPressedInside=false;
   [].forEach.call(cats.querySelectorAll(".picker"),function(p){ p.hidden=true; });
   [].forEach.call(cats.querySelectorAll(".catdelete"),function(p){ p.hidden=true; });
 });
@@ -2810,6 +3036,7 @@ function importBackupJson(jsonText){
   migrateVerdicts(state);
   migrateVerdictScale(state);
   migrateVerdictTombstoneCollisions(state);
+  migrateRecentColors(state);
   /* an imported file never carries sync connection forward, even if it
      says driveConnected:true - reconnecting is one click, but silently
      resuming a background network sync right after opening an arbitrary
@@ -2960,6 +3187,14 @@ if(TEST_MODE){
     updateCloseoutAvailability:updateCloseoutAvailability,
     catById:catById,
     nowIso:nowIso,
+    hslToHex:hslToHex,
+    hslOf:hslOf,
+    hueOf:hueOf,
+    hsvOf:hsvOf,
+    hsvToHex:hsvToHex,
+    pushRecentColor:pushRecentColor,
+    getRecentColors:function(){ return state.settings.recentColors; },
+    getSwatches:function(){ return SWATCHES; },
     getDeviceId:getDeviceId,
     setDeviceId:function(id){ writeStore(DEVICE_KEY,id); },
     migrateSyncFields:migrateSyncFields,
