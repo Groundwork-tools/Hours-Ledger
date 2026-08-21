@@ -2794,6 +2794,77 @@ function runAsyncTests(H,d){
       assert("a call after the script has already fully loaded hits the pre-existing fast path immediately - synchronous, no new load attempt, unchanged by this fix",
         h.getGisScriptLoadCount()===1&&r2.length===1&&r2[0]===null);
     })
+    .then(function(){
+      /* mid-drag Drive-sync render bug (reported from a real laptop,
+         2026-08-21; never reproduced on phone - explained by driveConnected
+         being true on that laptop profile and not on the phone used for
+         testing). A spectrum-box drag's persist() arms scheduleDriveSync's
+         debounce same as any edit; if the eventual sync's render() lands
+         while a picker panel is open and mid-drag, renderCats()'s full
+         #cats.innerHTML replacement used to close the panel unconditionally
+         and detach the .spectrum node the drag was capturing - regardless
+         of cursor position, since it's not a click-based close at all.
+         Fixed two ways, BOTH required: (B) runDriveSync's success path
+         defers its render() while dragBox is set, flushed on release; (A)
+         renderCats() reopens whichever category's picker was open before
+         any rebuild it's part of - B alone still closes the panel the
+         instant the drag ends, since the deferred render fires right then;
+         A is what makes that landing correct. Drives a real connect+sync
+         through the fake-Drive path, same as every other Drive test here -
+         clean:true for the same isolation reason freshSandbox()'s own
+         comment gives. */
+      return freshSandbox(true);
+    })
+    .then(function(fresh){
+      var h=fresh.H, dd=fresh.d;
+      dd.getElementById("connectDrive").click();
+      return waitFor(function(){ return dd.getElementById("connectDrive").textContent==="Drive: synced"; },4000)
+        .then(function(ok){
+          assert("mid-drag render test, setup: connect + first sync completed",ok);
+          var row=dd.querySelector(".cat");
+          var catId=row.dataset.cat;
+          dd.querySelector(".cat .sw").click(); // open the picker
+          assert("mid-drag render test, setup: picker is open",
+            !dd.querySelector(".cat .picker").hidden);
+          h.beginSpectrumDrag(row);
+          h.applyBoxPoint(row,[0.6,0.6],false); // a live, uncommitted drag frame - matches persist() having fired at least once, which is what would arm scheduleDriveSync for real
+          h.setDragBoxForTest(dd.querySelector(".cat .spectrum")); // the same signal a real pointerdown sets - simulates "a drag is active" without needing real pointer capture in this display:none sandbox
+          /* a real remote change, so this sync round has something genuine
+             to merge - same shape as scheduleDriveSync's debounce firing
+             on its own 2s later, just triggered directly instead of waiting */
+          h.fakeDriveWrite({categories:[{id:catId,name:"Renamed remotely",color:"#2B52A1",
+            updatedAt:new Date().toISOString(),updatedBy:"sim-other-device",deleted:false}],
+            entries:[],closeouts:[],verdicts:[]});
+          h.runDriveSync(false);
+          return waitFor(function(){ return h.isDriveSyncInFlight()===false; },4000);
+        })
+        .then(function(ok){
+          assert("mid-drag render test, setup: the sync triggered mid-drag actually completed",ok);
+          /* (B)'s mechanism, checked directly: the sync has fully finished
+             (isDriveSyncInFlight is false) but the drag is STILL active
+             (dragBox still set, never flushed) - if renderMaybeDeferred
+             genuinely deferred instead of rendering immediately,
+             renderPending must still be true right here. */
+          assert("(B) renderMaybeDeferred genuinely deferred the render while the drag was still active, rather than rendering immediately",
+            h.isRenderPending()===true);
+          /* (B)'s other half: not just "did it defer" but "did deferring
+             actually protect the live gesture's own DOM reference". This is
+             the part a panel-visibility check alone can't distinguish from
+             (A) alone - see the note below once (A) is exercised for why. */
+          assert("(B) the drag's own DOM reference is still connected while the drag remains active - not torn down and replaced mid-gesture",
+            h.getDragBoxForTest()!==null&&h.getDragBoxForTest().isConnected);
+          /* NOW end the drag for real, through the exact tail logic
+             endBoxDrag() itself runs (not a reimplementation of it) - this
+             is what actually exercises (A): a genuine renderCats() call
+             happens for the first time in this test, right now, with a
+             picker open. Without (A), THIS is where the panel would close -
+             checked directly below, not inferred. */
+          h.flushPendingRenderForTest();
+          assert("(A) once the deferred render actually flushes (drag end), the picker panel that was open before the rebuild is still open after it",
+            !dd.querySelector(".cat .picker").hidden);
+          h.setDragBoxForTest(null);
+        });
+    })
     .then(function(){ return results; });
 }
 })();

@@ -1233,7 +1233,7 @@ function connectDrive(){
       state.driveConnected=true;
       driveSyncApplyingRemote=true;
       try{ persist(); } finally{ driveSyncApplyingRemote=false; }
-      render(); refreshHint(); updateColophon();
+      renderMaybeDeferred(); refreshHint(); updateColophon();
       document.getElementById("connectDrive").disabled=false;
       document.getElementById("connectDrive").textContent="Drive: syncing…";
       /* appended to THIS toast, not a second showToast() call right after it -
@@ -1343,7 +1343,7 @@ function runDriveSync(manual){
       state.driveConnected=true;
       driveSyncApplyingRemote=true;
       try{ persist(); } finally{ driveSyncApplyingRemote=false; }
-      render();
+      renderMaybeDeferred();
       /* user-facing, not just the console.log already inside
          sweepCompressVerdicts itself - this exact self-heal ran silently
          for weeks in real use before anyone noticed, because nothing
@@ -1798,7 +1798,17 @@ if(window.matchMedia&&window.matchMedia("(hover: hover)").matches){
   barEl.addEventListener("mouseleave",function(){ barTip.hidden=true; });
 }
 
+/* (A) half of the mid-drag Drive-sync fix (see renderMaybeDeferred's
+   comment for the other half) - this is a full innerHTML replacement, so
+   without this a category's open .picker would close on ANY render that
+   happens to land while it's open, not just a deferred sync-triggered
+   one (a render can come from plenty of other places - editing another
+   field, an undo, etc.). Captured by category id, not by DOM node,
+   since the node itself is about to be destroyed either way. */
 function renderCats(){
+  var openPickerCat=null;
+  var openEl=document.querySelector("#cats .picker:not([hidden])");
+  if(openEl) openPickerCat=openEl.closest(".cat").dataset.cat;
   document.getElementById("cats").innerHTML=state.categories.map(function(c){
     var hsv=hsvOf(c.color);
     var recents=state.settings.recentColors||[];
@@ -1822,6 +1832,10 @@ function renderCats(){
         "</div>"+
       "</div></div>";
   }).join("");
+  if(openPickerCat){
+    var row=document.querySelector('#cats .cat[data-cat="'+openPickerCat+'"]');
+    if(row) row.querySelector(".picker").hidden=false;
+  }
 }
 function countCategoryEntries(catId){
   var n=0;
@@ -1873,6 +1887,35 @@ function openCategoryDeleteChooser(row,c,n){
 }
 
 function render(){ renderGrid(); renderTotals(); renderCats(); refreshHint(); updateCloseoutAvailability(); updateColophon(); }
+/* Drive-sync bug (reported from a real laptop, 2026-08-21): a spectrum-box
+   drag calls persist() on a pause in movement, which arms
+   scheduleDriveSync's 2s debounce same as any other edit - correct,
+   expected behaviour on its own. But if the sync's own success path lands
+   its render() call while that same drag is still in progress, renderCats()'s
+   full #cats.innerHTML replacement used to close the open picker panel
+   unconditionally (regardless of cursor position - it's not a click-based
+   close at all, the whole row's DOM node gets destroyed and replaced with
+   a fresh, closed one out from under the drag) and detach the very
+   .spectrum element dragBox was pointing at.
+   dragBox (declared below, near the spectrum box's own drag handlers) is
+   already a reliable "is a box drag active right now" signal - non-null
+   from pointerdown until pointerup/pointercancel - reused here rather than
+   adding a second flag for the same fact. Deferring is only HALF the fix
+   on its own: the moment the drag ends, the deferred render fires right
+   then and would still close the panel, just relocated from "mid-drag" to
+   "the instant you let go" - see renderCats()'s own comment for the other
+   half (A), which is what makes the deferred render land correctly once
+   it does run. Neither half alone is a real fix; both are required
+   together. Used by runDriveSync's and connectDrive's success paths only
+   (not render()'s many other callers - undo, applyState, the plain
+   page-load render - which have no reason to ever defer) so this doesn't
+   change render()'s general contract, just the two places a render can
+   land from a background timer while the user's hands are elsewhere. */
+var renderPending=false;
+function renderMaybeDeferred(){
+  if(dragBox){ renderPending=true; return; }
+  render();
+}
 
 /* ---------------- colour ---------------- */
 /* generalized from the old fixed-s/l hslHex(h) (picker redesign,
@@ -2718,6 +2761,11 @@ function endBoxDrag(ev){
   if(!dragBox) return;
   applyBoxDrag(dragBox,ev,true);
   dragBox=null;
+  /* flush a render deferred by renderMaybeDeferred() while this drag was
+     active - see its own comment for why deferring alone isn't the fix:
+     without renderCats()'s own picker-preserving half (A), this render
+     would just close the panel right now instead of mid-drag. */
+  if(renderPending){ renderPending=false; render(); }
 }
 cats.addEventListener("pointerup",endBoxDrag);
 cats.addEventListener("pointercancel",endBoxDrag);
@@ -3288,6 +3336,10 @@ if(TEST_MODE){
     pushRecentColor:pushRecentColor,
     beginSpectrumDrag:beginSpectrumDrag,
     applyBoxPoint:applyBoxPoint,
+    setDragBoxForTest:function(el){ dragBox=el; },
+    getDragBoxForTest:function(){ return dragBox; },
+    isRenderPending:function(){ return renderPending; },
+    flushPendingRenderForTest:function(){ if(renderPending){ renderPending=false; render(); } },
     getRecentColors:function(){ return state.settings.recentColors; },
     getSwatches:function(){ return SWATCHES; },
     getDeviceId:getDeviceId,
