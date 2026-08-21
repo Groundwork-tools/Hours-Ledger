@@ -1734,4 +1734,23 @@ dashboard styling.
     `fix/gis-script-load-race`; not merged.** Sebastian is deciding
     whether to build/merge it before or after this coming Sunday.
 
+20. **`#fChips` (the category chip list inside the open entry sheet) can go
+    stale if categories change while the entry sheet is open.** Found
+    2026-08-21 while tracing an unrelated bug (the mid-drag Drive-sync
+    render issue in the category colour picker — see the "What's live and
+    verified" entry for that fix). `paintChips()` is what populates
+    `#fChips`, and it only ever runs from `openSheet()` — `render()`
+    (and everything that calls it, including a background Drive sync)
+    never touches it. So if a category is added, renamed, recoloured, or
+    deleted by an incoming sync while the entry sheet happens to be open,
+    the chip list keeps showing whatever it had at the moment the sheet
+    was opened until it's closed and reopened. Not fixed — recorded so
+    it isn't rediscovered from scratch. Confirmed narrow in one respect:
+    `render()` never rebuilds the entry sheet's own DOM the way it used to
+    rebuild the category rail's `.picker` panel, so this is staleness, not
+    the same destroy-mid-interaction shape that fix addresses — a stale
+    chip list is a smaller problem than a panel vanishing out from under
+    an active drag. Low priority on its own (needs both an open entry
+    sheet and a landing sync in the same narrow window), but real.
+
 Feature creep is the known failure mode of this project.
