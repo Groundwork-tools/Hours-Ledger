@@ -264,6 +264,16 @@ button{cursor:pointer}
 .colophon{border-top:1px solid var(--ink);margin-top:44px;padding:14px 0 0;display:flex;flex-wrap:wrap;gap:8px 20px;align-items:baseline;font-family:var(--mono);font-size:11px;color:var(--muted)}
 .colophon a{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
 .colophon .right{margin-left:auto}
+/* .trio: exactly-3-item footer (index.html's, since privacy.html's footer
+   still has just 2 items and stays on the plain flex rule above) laid out
+   as true left/middle/right via a 1fr-auto-1fr grid — the two 1fr tracks
+   are always equal width regardless of how long the left or right text
+   is, so .mid lands on the bar's actual center, not just the midpoint of
+   whatever space happens to be left between the other two */
+.colophon.trio{display:grid;grid-template-columns:1fr auto 1fr}
+.colophon.trio>*{min-width:0}
+.colophon.trio .mid{justify-self:center}
+.colophon.trio .moneylink{justify-self:end}
 .fab{display:block;position:fixed;right:16px;bottom:20px;z-index:35;border:1px solid var(--ink);
   background:var(--ink);color:var(--paper);padding:15px 20px;font-size:12px;letter-spacing:.12em;
   text-transform:uppercase;font-weight:700;box-shadow:0 3px 0 rgba(22,33,27,.3)}
