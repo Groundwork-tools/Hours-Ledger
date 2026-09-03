@@ -15,6 +15,19 @@
   --mono:"Spline Sans Mono",ui-monospace,"SF Mono",Menlo,monospace;
 }
 *{box-sizing:border-box}
+/* Real-phone bug (reported 2026-09-03): "Undo works on everything…" and the
+   Clear this week / How it works buttons rendered visibly larger than every
+   sibling using the exact same .hint/.danger/.ghost classes (compare against
+   dataHint's "Every change saves…", same class, normal size right above it).
+   No font-size rule anywhere targets these differently — this is iOS
+   Safari's own automatic text-size inflation ("text autosizing"), a
+   heuristic that boosts font-size on some text blocks and not others based
+   on their position/line-count, independent of the CSS actually written.
+   text-size-adjust:100% is the standard, well-known way to turn that
+   heuristic off outright so every element renders at exactly the size this
+   stylesheet says — a no-op on desktop/laptop, where this property does
+   nothing. */
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 /* an author rule setting display on a hidden element (e.g. .two{display:grid})
    otherwise beats the browser's own [hidden]->display:none — always lose to it */
 [hidden]{display:none!important}
@@ -295,6 +308,19 @@ button{cursor:pointer}
   .weeknav{width:100%;margin-left:0;flex-wrap:wrap}
   .weeknav input[type=date]{flex:1;min-width:0}
   .tools .ghost{min-width:0}
+  /* Real-phone bug (reported 2026-09-03): .trio's grid centering, confirmed
+     correct on laptop and in headless Chrome at several widths, went wrong
+     on a real iPhone specifically once the left item wrapped to 3 lines —
+     .mid (Privacy) effectively vanished, not just off-center. Rather than
+     keep guessing at whichever WebKit grid/baseline quirk caused that
+     without a way to test it directly, this falls back at phone widths to
+     the exact flex + justify-content:space-between pattern Money Ledger's
+     own footer already uses in production and Sebastian confirmed correct
+     on a real phone there — proven on the browser this actually needed to
+     work on, not re-derived from scratch. Laptop/tablet widths are
+     untouched: the rule above this media query still governs there, and
+     that's already confirmed good. */
+  .colophon.trio{display:flex;justify-content:space-between}
 }
 @media print{
   .weeknav,.tools,.hint,.emptyhint,.status,.panel-label button,.cat .sw,.cat .del,.verdict,.warn{display:none!important}
