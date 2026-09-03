@@ -26,14 +26,19 @@ Teaching matters here as much as shipping.
 3. **No build step.** Files must be servable as-is by GitHub Pages. What is in the
    repo is what runs.
 4. **No data leaves the browser.** No telemetry, no error reporting, no fetch to
-   anything. The colophon promises this in writing; keep it true. (A plain
-   outbound `<a>` link the user chooses to click — like the Money Ledger link
-   in the footer — isn't the app sending data; nothing is transmitted
-   automatically. Google Drive sync — merged to `main` and live since
-   2026-08-14, see the backlog — is the one deliberate exception, and only for someone who
-   explicitly presses "Connect Google Drive": the colophon's privacy line
-   itself changes for that person specifically, via `updateColophon()`, so
-   the promise stays true rather than silently wrong for whoever opts in.)
+   anything. This promise is written down in full on `privacy.html`, linked from
+   the footer; keep it true. (A plain outbound `<a>` link the user chooses to
+   click — like the Money Ledger link in the footer — isn't the app sending
+   data; nothing is transmitted automatically. Google Drive sync — merged to
+   `main` and live since 2026-08-14, see the backlog — is the one deliberate
+   exception, and only for someone who explicitly presses "Connect Google
+   Drive". Up to 2026-09-03 the footer itself carried a one-line version of
+   this that changed text for exactly that person, via `updateColophon()`; that
+   inline line (and "Built by Sebastian Poulsen" alongside it) was dropped from
+   the footer that day in favor of `privacy.html`'s fuller writeup, already
+   linked from the same footer — `updateColophon()` was removed with it rather
+   than left as permanent dead code. The promise itself didn't move or weaken,
+   just where it's written.)
 5. **Every destructive action must be undoable.** Deleting an entry, deleting a
    category, clearing a week, importing over existing data — all go through
    `snapshot()` before mutating. New destructive features do too.

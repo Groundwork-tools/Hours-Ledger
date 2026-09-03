@@ -1233,7 +1233,7 @@ function connectDrive(){
       state.driveConnected=true;
       driveSyncApplyingRemote=true;
       try{ persist(); } finally{ driveSyncApplyingRemote=false; }
-      renderMaybeDeferred(); refreshHint(); updateColophon();
+      renderMaybeDeferred(); refreshHint();
       document.getElementById("connectDrive").disabled=false;
       document.getElementById("connectDrive").textContent="Drive: syncing…";
       /* appended to THIS toast, not a second showToast() call right after it -
@@ -1363,18 +1363,6 @@ function runDriveSync(manual){
       setStatus("Drive sync failed, will retry",true);
     });
   },manual);
-}
-
-/* keeps hard rule 4's colophon promise honest once sync is opted into -
-   "nothing leaves the browser" stops being true the moment someone connects
-   Drive, so the footer has to say something different for exactly that
-   person rather than keep asserting something now false */
-function updateColophon(){
-  var el=document.getElementById("colophonPrivacy");
-  if(!el) return;
-  el.textContent=state.driveConnected?
-    "Your week syncs to your own Google Drive, connected by you. Nothing else leaves this browser.":
-    "Your week never leaves this browser. No account, no tracking, no server.";
 }
 
 /* ---------------- undo / redo ---------------- */
@@ -1886,7 +1874,7 @@ function openCategoryDeleteChooser(row,c,n){
   panel.hidden=false;
 }
 
-function render(){ renderGrid(); renderTotals(); renderCats(); refreshHint(); updateCloseoutAvailability(); updateColophon(); }
+function render(){ renderGrid(); renderTotals(); renderCats(); refreshHint(); updateCloseoutAvailability(); }
 /* Drive-sync bug (reported from a real laptop, 2026-08-21): a spectrum-box
    drag calls persist() on a pause in movement, which arms
    scheduleDriveSync's 2s debounce same as any other edit - correct,
@@ -3184,7 +3172,7 @@ function importBackupJson(jsonText){
      file, with no chance to reconsider first, is not a call this app
      gets to make for the user */
   state.driveConnected=false;
-  persist(); render(); refreshHint(); updateColophon();
+  persist(); render(); refreshHint();
   /* the flip above is otherwise invisible: entries keep saving locally,
      nothing on screen changes, and the Drive button - the one persistent,
      always-visible piece of UI that speaks to sync state - just sits on
