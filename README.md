@@ -3,7 +3,7 @@
 A free weekly time tracker. Log the week you actually had, see where the hours
 went, and decide what to increase, keep or cut.
 
-**Use it:** https://sebpoulsen.github.io/Hours-Ledger/
+**Use it:** https://groundwork-tools.github.io/Hours-Ledger/
 
 ## What it does
 
