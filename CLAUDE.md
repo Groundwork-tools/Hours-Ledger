@@ -294,6 +294,15 @@ on purpose.
   against his actual Drive data (visible in the console log — category
   ids `false2c`, `xpk30a7`, `nq4jy4v`, `9kp6uh7` all resolved correctly).
   `selftest.html`: 317/317.
+- **Org transfer, SebPoulsen → Groundwork-tools** (2026-09-05): repo
+  transferred and all hardcoded links (OG images, README, cross-links,
+  sync scripts) updated accordingly. Google OAuth authorized origins
+  updated to `groundwork-tools.github.io` (old `sebpoulsen.github.io`
+  origin removed after real-device sync confirmed working on both apps).
+  As reported by Sebastian — the OAuth console change and the
+  real-device confirmation happened outside this tool session, so
+  they're recorded here on his word, not independently verified from
+  here.
 
 ---
 
