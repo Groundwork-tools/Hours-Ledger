@@ -2,3 +2,4 @@
 # page save) — these hold real logged entries and should never be committed.
 hours-ledger*.json
 hours-ledger*.txt
+.DS_Store
