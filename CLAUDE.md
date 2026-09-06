@@ -303,6 +303,19 @@ on purpose.
   real-device confirmation happened outside this tool session, so
   they're recorded here on his word, not independently verified from
   here.
+- **Eager expired-Drive-token detection** (2026-09-06): merged to `main`
+  and live. See backlog item 21 for the full trace. Both fixes confirmed
+  by Sebastian via real-browser localhost testing before merge: (1) an
+  expired token is now detected immediately on page interaction —
+  actually faster than expected, before an explicit reload — and the
+  account picker opened on the first tap; (2) tab-refocus detection
+  works — returning to a tab whose token lapsed while backgrounded
+  showed "tap to resume syncing" immediately, the picker opened on the
+  first tap, and the sync completed afterward. The phone-specific
+  touch/visibility path wasn't separately device-tested (real Drive
+  OAuth only works from the live origin, not a branch preview) — the
+  localhost real-browser check on the same code paths was accepted as
+  sufficient. `selftest.html`: 369/369.
 
 ---
 
@@ -1767,9 +1780,10 @@ dashboard styling.
     an active drag. Low priority on its own (needs both an open entry
     sheet and a landing sync in the same narrow window), but real.
 
-21. **Slow detection of an expired Drive token — built and fail-first
-    tested on `fix/eager-token-expiry-check`, NOT merged; real-device
-    phone check pending.** Reported: after the cached Drive token
+21. **Slow detection of an expired Drive token — ~~built and fail-first
+    tested on `fix/eager-token-expiry-check`, NOT merged~~ merged to
+    `main` and live 2026-09-06, confirmed via real-browser localhost
+    testing (see "What's live and verified" above).** Reported: after the cached Drive token
     expires, reloading the page took ~1-2s before the button flipped
     from "Drive: synced" to "tap to resume syncing"; during that window
     a logged entry saved locally but didn't sync, with no warning. On
