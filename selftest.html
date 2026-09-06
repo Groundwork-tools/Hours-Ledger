@@ -2865,6 +2865,110 @@ function runAsyncTests(H,d){
           h.setDragBoxForTest(null);
         });
     })
+    .then(function(){
+      /* ---- eager cached-token expiry detection. Before this, an expired
+         Drive token was only noticed when the 2s-debounced runDriveSync()
+         got to it (on reload), or on the next edit (for a token that lapsed
+         while the tab sat open) - during which window the button still said
+         "Drive: synced" while edits weren't reaching Drive. These cover the
+         mechanism; the real-device timing check is in CLAUDE.md's
+         verification note for this backlog item. */
+      return freshSandbox(true);
+    })
+    .then(function(fresh){
+      var h=fresh.H,dd=fresh.d,b=dd.getElementById("connectDrive");
+
+      var s=h.getState(); s.driveConnected=true; h.setState(s);
+
+      // showDriveReconnectNeeded(): the shared "token lapsed" UI state
+      h.setDriveNeedsReconnect(false);
+      h.showDriveReconnectNeeded();
+      assert("showDriveReconnectNeeded sets the button to the resume-syncing state",
+        b.textContent==="Drive: tap to resume syncing");
+      assert("showDriveReconnectNeeded arms driveNeedsReconnect so the next tap reconnects",
+        h.getDriveNeedsReconnect()===true);
+      assert("showDriveReconnectNeeded marks the status line stale",
+        dd.getElementById("status").classList.contains("stale"));
+      assert("showDriveReconnectNeeded leaves the button enabled (it stays tappable to reconnect)",
+        b.disabled===false);
+
+      // driveCachedTokenPresentButExpired(): absent vs. expired vs. valid
+      h.clearCachedTokenForTest();
+      assert("no cached token key at all is not treated as 'present but expired' (a device mid-first-connect must stay optimistic)",
+        h.driveCachedTokenPresentButExpired()===false);
+      h.cacheTokenForTest("stale-token",-30);
+      assert("a cached token past its expiry reads as present-but-expired",
+        h.driveCachedTokenPresentButExpired()===true);
+      assert("getCachedToken returns null for an expired token",
+        h.getCachedToken()===null);
+      h.cacheTokenForTest("good-token",3600);
+      assert("a still-valid cached token is not present-but-expired",
+        h.driveCachedTokenPresentButExpired()===false);
+      assert("getCachedToken returns a still-valid token as-is",
+        h.getCachedToken()==="good-token");
+
+      // recheckDriveToken(): the tab-refocus / visibility path
+      h.clearCachedTokenForTest();
+      h.setDriveNeedsReconnect(false);
+      b.textContent="Drive: synced";
+      h.recheckDriveToken();
+      assert("recheckDriveToken flips to reconnect-needed when the cached token has lapsed while the tab sat open",
+        h.getDriveNeedsReconnect()===true && b.textContent==="Drive: tap to resume syncing");
+
+      // guard: a still-valid token means a refocus is a no-op
+      h.cacheTokenForTest("good-token",3600);
+      h.setDriveNeedsReconnect(false);
+      b.textContent="Drive: synced";
+      h.recheckDriveToken();
+      assert("recheckDriveToken does nothing while the cached token is still valid",
+        h.getDriveNeedsReconnect()===false && b.textContent==="Drive: synced");
+
+      // guard: surfaceDriveReconnectIfTokenLapsed reports whether it acted
+      h.setDriveNeedsReconnect(false);
+      assert("surfaceDriveReconnectIfTokenLapsed returns false when the token is still valid",
+        h.surfaceDriveReconnectIfTokenLapsed()===false);
+      h.clearCachedTokenForTest();
+      assert("surfaceDriveReconnectIfTokenLapsed returns true when it surfaces a lapsed token",
+        h.surfaceDriveReconnectIfTokenLapsed()===true);
+      h.clearCachedTokenForTest();
+    })
+    .then(function(){
+      /* end-to-end: an already-expired token present on page load is
+         reflected on the button at load time - not after the debounce, and
+         without scheduling a sync that could only rediscover the same
+         state - and the first tap anywhere then drives the reconnect. The
+         expired token is seeded via localStorage directly (same origin as
+         the sandbox) rather than an app hook, so this test still runs -
+         and fails at the assertion, not with a throw - against pre-fix
+         app.js for a clean fail-first. */
+      return freshSandbox(true);
+    })
+    .then(function(fresh){
+      var h=fresh.H,dd=fresh.d;
+      dd.getElementById("connectDrive").click();
+      return waitFor(function(){ return dd.getElementById("connectDrive").textContent==="Drive: synced"; },4000)
+        .then(function(ok){
+          assert("eager-token-check e2e, setup: device connects and does its first sync",ok);
+          try{ localStorage.setItem("hours-ledger-access-token-TESTMODE",
+            JSON.stringify({token:"expired-on-reload",expiresAt:Date.now()-60000})); }catch(e){}
+          return killSandboxAndOpenFresh(dd);
+        })
+        .then(function(reloaded){
+          var h2=reloaded.H,d2=reloaded.d;
+          return waitFor(function(){
+            return d2.getElementById("connectDrive").textContent==="Drive: tap to resume syncing";
+          },1500).then(function(flipped){
+            assert("on reload with an expired cached token the button says 'tap to resume syncing' at load, not a stale 'Drive: synced'",flipped);
+            assert("...and driveNeedsReconnect is already armed on load, so the first tap opens the picker rather than just flipping status",
+              h2.getDriveNeedsReconnect()===true);
+            d2.body.dispatchEvent(new Event("pointerdown",{bubbles:true}));
+            return waitFor(function(){ return d2.getElementById("connectDrive").textContent==="Drive: synced"; },4000);
+          }).then(function(recovered){
+            assert("the first tap after an expired-token reload drives the reconnect through to a completed sync",recovered);
+            try{ localStorage.removeItem("hours-ledger-access-token-TESTMODE"); }catch(e){}
+          });
+        });
+    })
     .then(function(){ return results; });
 }
 })();
