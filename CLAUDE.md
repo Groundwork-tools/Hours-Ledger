@@ -303,6 +303,19 @@ on purpose.
   real-device confirmation happened outside this tool session, so
   they're recorded here on his word, not independently verified from
   here.
+- **Eager expired-Drive-token detection** (2026-09-06): merged to `main`
+  and live. See backlog item 21 for the full trace. Both fixes confirmed
+  by Sebastian via real-browser localhost testing before merge: (1) an
+  expired token is now detected immediately on page interaction —
+  actually faster than expected, before an explicit reload — and the
+  account picker opened on the first tap; (2) tab-refocus detection
+  works — returning to a tab whose token lapsed while backgrounded
+  showed "tap to resume syncing" immediately, the picker opened on the
+  first tap, and the sync completed afterward. The phone-specific
+  touch/visibility path wasn't separately device-tested (real Drive
+  OAuth only works from the live origin, not a branch preview) — the
+  localhost real-browser check on the same code paths was accepted as
+  sufficient. `selftest.html`: 369/369.
 
 ---
 
@@ -1766,5 +1779,90 @@ dashboard styling.
     chip list is a smaller problem than a panel vanishing out from under
     an active drag. Low priority on its own (needs both an open entry
     sheet and a landing sync in the same narrow window), but real.
+
+21. **Slow detection of an expired Drive token — ~~built and fail-first
+    tested on `fix/eager-token-expiry-check`, NOT merged~~ merged to
+    `main` and live 2026-09-06, confirmed via real-browser localhost
+    testing (see "What's live and verified" above).** Reported: after the cached Drive token
+    expires, reloading the page took ~1-2s before the button flipped
+    from "Drive: synced" to "tap to resume syncing"; during that window
+    a logged entry saved locally but didn't sync, with no warning. On
+    phone, the "tap anywhere to reconnect" behaviour needed several taps
+    before reacting.
+
+    **Root cause (traced, not guessed):** token expiry was never checked
+    eagerly at load. `index.html`'s old line set the button to "Drive:
+    synced" unconditionally whenever `driveConnected`; the *only* thing
+    that ever discovered an expired token was `runDriveSync(false)`,
+    reached solely through `scheduleDriveSync()`'s `setTimeout` —
+    `DRIVE_SYNC_DEBOUNCE_MS` = 2000ms. So the flip happened a flat ~2s
+    after load, and *later* if the user kept editing, since every
+    `persist()` does `clearTimeout` + a fresh 2000ms timer. The
+    underlying check (`getCachedToken()`) is fully synchronous — a
+    localStorage read plus a timestamp compare — it was just only ever
+    called from behind that timer. The phone "several taps" symptom was
+    downstream of the same lag, confirmed not separate: the
+    `pointerdown`-anywhere reconnect listener bails unless
+    `driveNeedsReconnect` is already `true`, and nothing set that flag
+    until the debounced sync finally ran.
+
+    **Not silent data loss:** an entry logged in the lag window stays in
+    `state.entries` and gets stamped + pushed by the next successful
+    sync (`syncEngine()` builds `toPush` from current state, not a
+    diff), via either the tap-to-reconnect flow or the next load's
+    catch-up. The bug was the misleading "synced" label during the
+    window, not lost data — which lowered urgency but not the fix.
+
+    **Fix, two parts on one branch:**
+    - **Eager load check** (`app.js`, the `if(state.driveConnected)`
+      block after `setStatus()` near the file bottom): call
+      `getCachedToken()` synchronously at load. Valid → "Drive: synced"
+      + the existing catch-up `scheduleDriveSync()` (BUG 2 fix, moved
+      verbatim into the `else`). Missing/expired → `showDriveReconnectNeeded()`
+      immediately (0ms) and *don't* schedule a sync (it could only
+      rediscover the same state and can't push anyway). Production uses
+      `!getCachedToken()`; TEST_MODE uses `driveCachedTokenPresentButExpired()`
+      so a fresh test sandbox that never seeded a token stays optimistic
+      (the fake-token connect flow never calls `cacheToken`).
+    - **Tab-refocus re-check** (`app.js`, after the `pointerdown`
+      listener): `recheckDriveToken()` → `surfaceDriveReconnectIfTokenLapsed()`
+      wired to `visibilitychange` (guarded on `visibilityState`),
+      `focus`, and `pageshow`. A token that lapses while the tab sits
+      open now surfaces the moment the user returns to the tab — no
+      reload. This never opens the picker (no user gesture); it only
+      arms `driveNeedsReconnect` so the next tap does, same as the
+      existing reconnect flow. Guarded against firing mid-sign-in
+      (`driveSyncInFlight`) and when reconnect is already shown.
+    - New shared helper `showDriveReconnectNeeded()` sets the same
+      button text / stale status / `driveNeedsReconnect=true` that
+      `runDriveSync()`'s error branch already sets — comment on both
+      notes they must stay in sync (not worth refactoring
+      `runDriveSync`'s branch, which also does flag/disabled bookkeeping
+      the load path doesn't need).
+
+    **Tests (`selftest.html`, 369/369 with the fix, stable over 3
+    runs):** unit coverage for `showDriveReconnectNeeded`,
+    `driveCachedTokenPresentButExpired` (absent vs. expired vs. valid),
+    and `recheckDriveToken` (fires on a lapsed token, no-ops on a valid
+    one); plus an end-to-end reload test — connect, seed an expired
+    token into the TESTMODE key via `localStorage` directly (no app
+    hook, so it runs against pre-fix code too), reload, assert the
+    button reads "tap to resume syncing" at load and the first
+    `pointerdown` drives a full reconnect. Fail-first: the e2e block's
+    two new-behaviour assertions fail cleanly against pre-fix `app.js`
+    (button stays "Drive: synced", flag never armed) while the
+    pre-existing tap→sync assertion still passes; the hook-dependent
+    unit block was confirmed separately by temporarily skipping it (the
+    documented missing-hook pattern — a throw collapses the async
+    continuation), same approach as items 18-19.
+
+    **What tests can't prove here — the real-device phone check before
+    merge:** (1) reload with an expired token → status flips
+    immediately, first tap opens the account picker; (2) leave the
+    app/tab open past token expiry, background it, return → status
+    flips to reconnect on return with no reload, and the very next tap
+    opens the picker. A green suite isn't proof for this one — the bug
+    is about timing and real focus/visibility dispatch, which the
+    headless virtual-time harness doesn't reproduce faithfully.
 
 Feature creep is the known failure mode of this project.

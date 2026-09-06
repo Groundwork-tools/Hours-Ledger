@@ -1209,6 +1209,49 @@ var driveSyncTimer=null,driveSyncInFlight=false,driveSyncApplyingRemote=false;
    forever after the first time it was ever dismissed. */
 var driveNeedsReconnect=false, driveReconnectAttemptedThisSession=false, lastDriveSyncErr=null;
 
+/* Puts the button/status into the "your token lapsed, tap to resume" state
+   without going through a sync attempt to get there. Used by the eager
+   page-load token check and the tab-refocus check further down - both
+   discover an expired cached token synchronously via getCachedToken() and
+   want that reflected immediately, rather than waiting for the 2s-debounced
+   runDriveSync() to be the first thing that notices (the window during
+   which the button still says "Drive: synced" while edits quietly aren't
+   reaching Drive - the bug this whole change exists to close). The text
+   here deliberately matches what runDriveSync()'s own error branch sets, so
+   the two paths can't drift into showing different things for the same
+   state. Idempotent - safe to call repeatedly (a refocus that fires more
+   than once). Never opens the account picker: that still only ever happens
+   off a real tap (the connectDrive button, or the pointerdown listener). */
+function showDriveReconnectNeeded(){
+  driveNeedsReconnect=true;
+  var b=document.getElementById("connectDrive");
+  if(b){ b.disabled=false; b.textContent="Drive: tap to resume syncing"; }
+  setStatus("Drive: tap anywhere in the app to resume syncing",true);
+}
+/* The shared decision behind both the eager load check and the refocus
+   listener: a connected device whose cached token has silently lapsed with
+   nothing having surfaced it yet. Skips if a sync is mid-flight (its own
+   callback will set the right state) or reconnect is already showing.
+   Returns whether it acted, for tests. */
+function surfaceDriveReconnectIfTokenLapsed(){
+  if(!state.driveConnected||driveNeedsReconnect||driveSyncInFlight) return false;
+  if(getCachedToken()) return false;
+  console.log("[drive] surfaceDriveReconnectIfTokenLapsed: connected but no valid cached token - showing reconnect state now");
+  showDriveReconnectNeeded();
+  return true;
+}
+/* On load only, tell "token present but expired" apart from "no token key
+   at all". In production a connected device that has no valid token needs
+   to reconnect either way, so !getCachedToken() is the whole test. Under
+   TEST_MODE the connect flow never writes this key (fake tokens skip
+   caching), so "absent" there just means a test hasn't seeded one and must
+   stay optimistic - a test exercising the lapsed path seeds an expired
+   token explicitly. */
+function driveCachedTokenPresentButExpired(){
+  var raw=null; try{ raw=readStore(ACCESS_TOKEN_KEY); }catch(e){ return false; }
+  return !!raw && !getCachedToken();
+}
+
 function connectDrive(){
   console.log("[drive] connectDrive() click handler ran. driveConnected="+state.driveConnected+" driveSyncInFlight="+driveSyncInFlight+" driveNeedsReconnect="+driveNeedsReconnect);
   if(state.driveConnected){ console.log("[drive] connectDrive: already connected, delegating to runDriveSync(true)"); runDriveSync(true); return; } /* already connected - button doubles as "sync now" */
@@ -3095,7 +3138,10 @@ document.getElementById("linkFile").addEventListener("click",function(){
 });
 
 document.getElementById("connectDrive").addEventListener("click",connectDrive);
-if(state.driveConnected) document.getElementById("connectDrive").textContent="Drive: synced";
+/* the button's connected-state text ("Drive: synced" vs. "tap to resume
+   syncing") is decided by the eager token check near the bottom of this
+   file, after setStatus() - doing it here would just be overwritten by that
+   setStatus() call a few lines later anyway. */
 
 /* reconnect on any real tap in the app, not a dedicated button - a token
    silently expiring shouldn't mean hunting for the right button before the
@@ -3123,6 +3169,28 @@ document.addEventListener("pointerdown",function(ev){
   driveReconnectAttemptedThisSession=true;
   runDriveSync(true);
 },true);
+
+/* A cached token lives ~1hr; a tab (a pinned phone tab especially) easily
+   sits open longer than that. Nothing re-checks expiry while the tab just
+   sits there - the next edit's debounced sync would eventually notice, but
+   not until then, and the button keeps saying "Drive: synced" meanwhile,
+   the same lie the eager load check above removes for a reload. Re-run the
+   same synchronous check whenever the tab is brought back to the
+   foreground, so a token that lapsed while the user was away shows as
+   "tap to resume syncing" the moment they return - no reload needed. This
+   never opens the picker (no user gesture here); it only arms
+   driveNeedsReconnect so the user's very next tap anywhere triggers the
+   existing pointerdown reconnect flow immediately.
+   Three triggers, belt and suspenders: visibilitychange covers a mobile
+   tab coming back from the background (the case iOS Safari fires most
+   reliably), focus covers a desktop window/tab regaining focus, and
+   pageshow covers a bfcache restore where neither of the other two is
+   guaranteed. All idempotent via surfaceDriveReconnectIfTokenLapsed's own
+   guards. */
+function recheckDriveToken(){ surfaceDriveReconnectIfTokenLapsed(); }
+document.addEventListener("visibilitychange",function(){ if(document.visibilityState==="visible") recheckDriveToken(); });
+window.addEventListener("focus",recheckDriveToken);
+window.addEventListener("pageshow",recheckDriveToken);
 
 /* not gated by TEST_MODE, unlike __HL_TEST__ below - this is for reading
    live state from a real, connected browser's own console while debugging
@@ -3258,16 +3326,44 @@ if(!window.showSaveFilePicker) document.getElementById("linkFile").hidden=true;
 
 render();
 setStatus("Saved "+clockNow());
-/* BUG 2 fix: a debounced sync scheduled by persist() dies with the page if
-   the tab closes or reloads before it fires - nothing before this line
-   ever re-scheduled one on the next load, so whatever was saved in the
-   last few seconds of a session could sit locally, correctly saved, and
-   never reach Drive until some unrelated future edit happened to trigger
-   another sync. A device that's already connected always gets a catch-up
-   sync scheduled here, on every load - if nothing was actually missed
-   this is a harmless no-op merge (case 2: identical content, nothing to
-   decide); if something was missed, this is what actually sends it. */
-if(state.driveConnected) scheduleDriveSync();
+/* Eager, synchronous token check. getCachedToken() is a localStorage read
+   plus a timestamp compare - no async, no network - so there's no reason to
+   let the 2s-debounced runDriveSync() below be the first thing to discover
+   an already-dead token. Before this, the button said "Drive: synced" for
+   that whole ~2s window (longer if the user kept editing, since every
+   persist() resets the debounce) while entries saved locally but never
+   reached Drive, with nothing on screen saying so. Now an expired token is
+   reflected at 0ms and driveNeedsReconnect is armed immediately, so the
+   first tap anywhere opens the picker rather than the first tap just
+   flipping the status and a later tap doing the reconnect.
+
+   TEST_MODE's connect flow never caches a token (fake tokens skip it), so
+   there "no token key" just means a test hasn't seeded one - stay
+   optimistic; only a test that explicitly seeds an expired token exercises
+   the reconnect branch. In production getCachedToken()===null is the whole
+   test: a connected device with no valid token needs to reconnect whether
+   the key is expired or gone.
+
+   BUG 2 fix (unchanged, now in the else branch): a debounced sync
+   scheduled by persist() dies with the page if the tab closes/reloads
+   before it fires, so whatever was saved in the last few seconds of a
+   session could sit locally and never reach Drive. A connected device with
+   a still-valid token gets a catch-up sync scheduled here on every load -
+   a harmless no-op merge if nothing was missed, the actual resend if
+   something was. When the token's expired we skip it: runDriveSync(false)
+   would only rediscover the same expired-token state 2s later and can't
+   push anything anyway; the missed entries go up on the next real
+   reconnect instead, which syncs whatever state currently is. */
+if(state.driveConnected){
+  var driveNeedReconnectOnLoad=TEST_MODE?driveCachedTokenPresentButExpired():!getCachedToken();
+  if(driveNeedReconnectOnLoad){
+    console.log("[drive] page load: connected but cached token is missing/expired - showing reconnect state now, not scheduling a sync");
+    showDriveReconnectNeeded();
+  }else{
+    document.getElementById("connectDrive").textContent="Drive: synced";
+    scheduleDriveSync();
+  }
+}
 
 /* pre-warm the GIS script (just the JS library fetch - no account/network-
    auth interaction, nothing shown, same script this page already fetched
@@ -3360,6 +3456,13 @@ if(TEST_MODE){
     setDriveNeedsReconnect:function(v){ driveNeedsReconnect=v; },
     getDriveNeedsReconnect:function(){ return driveNeedsReconnect; },
     setDriveReconnectAttempted:function(v){ driveReconnectAttemptedThisSession=v; },
+    getCachedToken:getCachedToken,
+    cacheTokenForTest:function(token,expiresInSec){ cacheToken(token,expiresInSec); },
+    clearCachedTokenForTest:function(){ try{ localStorage.removeItem(ACCESS_TOKEN_KEY); }catch(e){} },
+    driveCachedTokenPresentButExpired:driveCachedTokenPresentButExpired,
+    showDriveReconnectNeeded:showDriveReconnectNeeded,
+    surfaceDriveReconnectIfTokenLapsed:surfaceDriveReconnectIfTokenLapsed,
+    recheckDriveToken:recheckDriveToken,
     setTestHangToken:function(v){ TEST_MODE_HANG_TOKEN=v; },
     setTestLateSuccessMs:function(v){ TEST_MODE_LATE_SUCCESS_MS=v; },
     loadGisScript:loadGisScript,
