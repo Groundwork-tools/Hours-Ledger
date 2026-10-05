@@ -2144,9 +2144,11 @@ dashboard styling.
     `OLD-STACK` and the undo-through-connect scenarios can still build one.
     Their assertions are unchanged; only their connect helpers turn the seam
     on. The new tests do not.
-    **Not covered:** real devices and real Drive. The phone check of the
-    first round is still owed, and neither the clear-on-connect nor the
-    entry guard has been seen on a real device.
+    **Real-device status:** at the time of this round nothing here had been
+    seen on a real device. What has since been checked on real devices (laptop
+    on the branch, phone on the live site after the merge) is recorded under
+    the third round below. The entry guard and the import → reconnect →
+    Ctrl+Z path are still not covered by it.
 
     **Third round (2026-10-05): the clear is a trim, not a full clear.**
     Found by reading, then confirmed in test mode: `connectDrive()` is also
@@ -2217,13 +2219,18 @@ dashboard styling.
     (found because the malformed-snapshot test failed even with the correct
     rule); and an always-true assertion I had left in was removed rather
     than kept as a green row.
-    **Real-device check, what actually happened (as reported by Sebastian,
-    before the merge):** the **laptop** ran this branch — fresh incognito
-    profile, an entry made before connecting, then connect, then Ctrl+Z, which
-    said "Nothing left to undo" (the trim working as designed); and a
-    create-undo-reload sequence held. The **phone ran the old live code**, not
-    this branch, so **phone-side undo on the new code is NOT yet verified**.
-    Still not covered: the entry guard and the import → reconnect → Ctrl+Z
-    path on a real device, and real Drive beyond that laptop run.
+    **Real-device checks (as reported by Sebastian):**
+    - *Laptop, on the branch, before the merge:* fresh incognito profile, an
+      entry made before connecting, then connect, then Ctrl+Z, which said
+      "Nothing left to undo" (the trim working as designed); and a
+      create-undo-reload sequence held.
+    - *Phone, on the live site after the merge:* the earlier phone run had
+      used the old live code, so it didn't count. This one did: fresh
+      incognito profile, **the phone doing the undo**, the laptop checked
+      afterwards for ghosts (none), the tab closed right after the undo (it
+      held), and the Drive button stayed on "synced". **Phone-side undo on
+      the new code is verified.**
+    - *Still not covered on a real device:* the entry guard (dead category
+      id), the import → reconnect → Ctrl+Z path, and the pinned KNOWN GAP.
 
 Feature creep is the known failure mode of this project.
