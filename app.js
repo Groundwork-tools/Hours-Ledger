@@ -1419,8 +1419,77 @@ function snapshot(desc){
   redoStack=[];
   writeStore(UKEY,JSON.stringify(undoStack.slice(-12)));
 }
+/* Undo/redo used to replace state wholesale with the snapshot. With Drive
+   connected that makes an undone record ABSENT locally rather than
+   tombstoned, so the next merge reads the absence as "new on Drive" and
+   brings it back (a create that was undone returns as a ghost; an undone
+   edit returns as a duplicate) - see CLAUDE.md's undo-ghost entry.
+
+   Fix: keep full-state snapshots, but turn the difference between the
+   current entries and the snapshot's into FORWARD edits - a tombstone for a
+   record the snapshot didn't have, a revive for one it did, the snapshot's
+   content for one that changed - each with a fresh updatedAt/updatedBy, so
+   an undo is just another edit as far as sync can tell. Every one of the
+   three is guarded on "this device last touched it" (updatedBy is this
+   device, or unstamped): a record another device has since created, edited
+   or deleted is theirs, and an undo of something unrelated must not
+   override it. Only runs once this device has sync fields at all
+   (state.deletedEntries exists, the same gate removeEntry uses) - a device
+   that never connected takes exactly the old whole-snapshot path.
+   Entries only; categories/verdicts/close-outs keep the old behavior
+   (known open bug of the same class, see the backlog). */
+function entryIndex(entriesMap){
+  var m={};
+  Object.keys(entriesMap||{}).forEach(function(date){
+    entriesMap[date].forEach(function(e){ m[e.id]={date:date,e:e}; });
+  });
+  return m;
+}
+function sameEntryContent(a,b){
+  return a.date===b.date&&a.e.label===b.e.label&&a.e.cat===b.e.cat&&a.e.start===b.e.start&&a.e.end===b.e.end;
+}
+function undoEntriesAsForwardEdits(snap,cur){
+  var dev=getDeviceId(),now=nowIso();
+  function mine(rec){ return !rec.updatedBy||rec.updatedBy===dev; }
+  var curIdx=entryIndex(cur.entries),snapIdx=entryIndex(snap.entries);
+  var entries=JSON.parse(JSON.stringify(cur.entries||{}));
+  var tombs=JSON.parse(JSON.stringify(cur.deletedEntries||{}));
+  function removeLive(id,date){
+    entries[date]=entries[date].filter(function(e){ return e.id!==id; });
+    if(!entries[date].length) delete entries[date];
+  }
+  function addLive(id,date,src){
+    if(!entries[date]) entries[date]=[];
+    entries[date].push({id:id,label:src.label,cat:src.cat,start:src.start,end:src.end,updatedAt:now,updatedBy:dev});
+  }
+  Object.keys(curIdx).forEach(function(id){
+    var c=curIdx[id],sn=snapIdx[id];
+    if(!sn){                                             /* created after the snapshot -> tombstone it */
+      if(!mine(c.e)) return;
+      removeLive(id,c.date);
+      tombs[id]={id:id,date:c.date,updatedAt:now,updatedBy:dev,deletedAt:now};
+    }else if(!sameEntryContent(c,sn)&&mine(c.e)){        /* changed since the snapshot -> put the snapshot's content back */
+      removeLive(id,c.date);
+      addLive(id,sn.date,sn.e);
+    }
+  });
+  Object.keys(snapIdx).forEach(function(id){
+    if(curIdx[id]) return;                               /* handled above */
+    var t=tombs[id];
+    if(t&&t.updatedBy&&t.updatedBy!==dev) return;        /* another device deleted it since - theirs to keep */
+    delete tombs[id];
+    addLive(id,snapIdx[id].date,snapIdx[id].e);          /* deleted/edited-away after the snapshot -> revive */
+  });
+  return {entries:entries,deletedEntries:tombs};
+}
 function applyState(json){
+  var prev=state;
   state=JSON.parse(json);
+  if(prev&&prev.deletedEntries){
+    var fwd=undoEntriesAsForwardEdits(state,prev);
+    state.entries=fwd.entries;
+    state.deletedEntries=fwd.deletedEntries;
+  }
   if(!state.settings) state.settings={startHour:6,endHour:24};
   if(!state.entries) state.entries={};
   if(!state.weekCloseouts) state.weekCloseouts={};
@@ -1430,6 +1499,9 @@ function applyState(json){
   migrateRecentColors(state);
   writeStore(KEY,JSON.stringify(state));
   if(fileHandle){ clearTimeout(writeTimer); writeTimer=setTimeout(writeLinkedFile,600); }
+  /* an undo/redo that wrote tombstones is a real edit: it has to reach Drive
+     like any other, not wait for some later edit or reload to carry it */
+  if(state.driveConnected) persist();
   render();
 }
 function undo(){

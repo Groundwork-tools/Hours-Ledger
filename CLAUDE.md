@@ -445,20 +445,18 @@ on purpose.
   clean, and a dismissed/failed attempt only suppresses auto-retry for
   that one episode, not forever, so a later, separate expiry can still
   resolve itself smoothly.
-- **Known, accepted gap: undo/redo while connected doesn't itself trigger a
-  Drive push.** `undo()`/`redo()` go through `applyState()`, which writes
-  straight to `localStorage` and never calls `persist()` — so the specific
-  change an undo/redo just reverted isn't, by itself, what schedules the
-  next sync. Deliberately left as-is rather than fixed alongside the import
-  and `driveSyncApplyingRemote` fixes above: unlike those two, this one
-  self-heals on its own within one step — either the next edit's ordinary
-  `persist()` call (which syncs whatever `state` currently is, not a diff,
-  so the reverted content goes up regardless) or the next page load (the
-  sync-on-load catch-up already covers this). The only genuinely silent
-  window is undo/redo followed by neither — leaving the tab open indefinitely
-  with no further edit and no reload — judged too narrow to be worth the
-  same treatment. If this ever needs revisiting, it's not a new bug; it's
-  this exact tradeoff being reconsidered.
+- **Undo/redo of entries is a forward edit, and does persist and push
+  (reverses the earlier "known, accepted gap: undo/redo doesn't trigger a
+  Drive push").** That gap was deliberately accepted while undo only ever
+  swapped state wholesale, because the reverted content went up with the
+  next sync anyway. It stopped being acceptable once undo had to write
+  tombstones (see backlog item 22): an undo that creates a tombstone is a
+  real edit, so it has to be durable and reach other devices like any
+  other. `applyState()` now calls `persist()` when `driveConnected`; a
+  never-connected device skips it and behaves exactly as before. Snapshots
+  stay full-state (`hours-ledger-undo-v1` is unchanged, old stacks still
+  work) — the diff against the current entries is computed at apply time,
+  see `undoEntriesAsForwardEdits()`.
 - **Weekly verdicts and week close-outs sync too, as of the phase 2 work
   (see the backlog)** — `weeklyVerdicts`/`weekCloseouts` are nested maps
   keyed by week with no record ids of their own, a different shape from
@@ -1864,5 +1862,83 @@ dashboard styling.
     opens the picker. A green suite isn't proof for this one — the bug
     is about timing and real focus/visibility dispatch, which the
     headless virtual-time harness doesn't reproduce faithfully.
+
+22. **Undo vs. Drive sync — "ghost entries" — fix built and fail-first
+    tested, merged to `main` 2026-10-05 after a real-device check on the
+    laptop against the real Drive file (as reported by Sebastian; the phone
+    was not separately reported).** Reported:
+    with Drive connected, create an entry, Ctrl+Z, create another — the
+    undone entry reappears as a live entry, once per cycle.
+
+    **Root cause (reproduced in `selftest.html`, not just read):**
+    `undo()`/`redo()` restored a whole-state JSON snapshot, which made the
+    undone record *absent* locally rather than tombstoned. The next sync
+    saw it present on Drive only and kept it (`mergeRecords` case 1, "an
+    omission is not a deletion" — hard rule 7 working as designed). Needs
+    the create to have synced before the undo (undo inside the 2s debounce
+    leaves nothing on Drive to resurrect). Undo-edit produced a
+    *duplicate* (old entry revived by case 3, edited copy re-added by case
+    1). Undo-delete happened to work on one device only because the pushed
+    tombstone carries this device's own id (case 3, "remote is my own
+    stale echo"); with a second device that had already seen the delete it
+    diverged (A kept the entry, B did not). The snapshot does capture
+    `deletedEntries`/`deletedCategories`, but that didn't help: for an
+    undone create there never was a tombstone to restore, and for an undone
+    delete the restore drops the tombstone.
+
+    **Decisions (Sebastian, 2026-10-05):**
+    1. **Scope: entries only.** **Known open bug of the same class, not
+       fixed here:** undo/redo of categories (delete, rename, recolor),
+       weekly verdicts, week close-outs, "clear week" and import still
+       restore whole-state and can resurrect or diverge after a sync. Not
+       run or reproduced — reasoned from the identical mechanism. Needs its
+       own pass, same approach, per record type.
+    2. **Undo/redo persist() and push** when connected (see the data
+       model entry that replaces the old "accepted gap").
+    3. **Keep full-state snapshots; diff at apply time and apply as forward
+       edits** with fresh `updatedAt`/`updatedBy` (rejected: storing
+       per-action deltas — a new undo-store shape and key for no extra
+       correctness once the guards below exist). Three cases, each guarded
+       on "this device last touched it" (`updatedBy` is this device, or
+       unstamped): record not in the snapshot → tombstone; record in the
+       snapshot but not current → revive, unless another device's
+       tombstone is on it; content differs → put the snapshot's content
+       back. A record another device created, edited or deleted since the
+       snapshot is left alone — otherwise an undo of something unrelated
+       would silently delete or overwrite their work (the main risk of a
+       naive diff). Only runs once the device has sync fields
+       (`state.deletedEntries` exists, same gate as `removeEntry`); a
+       device that never connected takes the old whole-snapshot path.
+       The guard is a heuristic on `updatedBy`, not a log of what the undone
+       action touched.
+       **Deliberate no-op, not a bug:** undoing the *creation* of a record
+       another device has since edited does nothing to that record. The
+       edit made it the other device's (`updatedBy` is theirs), and the
+       guard exists precisely to protect that edit, so undo leaves it alone
+       rather than deleting someone else's work. Confirmed in the
+       `OLD-STACK` scenario (undoing E1's original creation leaves "E1 by
+       B"). The cost is that the user's Ctrl+Z can appear to do nothing for
+       that step — accepted; the alternative is an undo that silently
+       destroys another device's change.
+
+    **Tests (`selftest.html`, `runUndoSyncTests()`), fail-first against the
+    pre-fix `app.js`:** the three required scenarios plus a two-device
+    undo-delete, (a) undo then reload with no sync, (b)/(c) another device
+    edits E then this device undoes an unrelated action (back-dated, and
+    with a real 3s gap), (d) a snapshot predating sync fields restored after
+    connecting, (e) redo of an undone create, one scenario per guard
+    (`GUARD-TOMBSTONE`, `GUARD-REVIVE`; the content-revert guard is pinned
+    by (b)/(c)), and `OLD-STACK` (a 4-deep stack of real snapshots restored
+    by reload, older than another device's edit/create/delete, undone to the
+    bottom). **Mutation-checked:** removing each guard alone in a copy of
+    `app.js` makes its own scenario fail and restoring it passes. Worth
+    remembering: the tombstone guard's scenario only flips if the other
+    device's record is back-dated — inside `mergeRecords`' 5s window a wrongly
+    written tombstone is masked, so a fast test can't see a missing guard.
+    (d) and (e) and the
+    single-device undo-delete and undo-before-sync controls passed even
+    before the fix — they're regression guards, not fail-first tests. Not
+    covered: real devices, real Drive, and the interplay with an undo stack
+    left over from before this fix on a connected device.
 
 Feature creep is the known failure mode of this project.
