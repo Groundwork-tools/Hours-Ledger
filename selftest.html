@@ -2972,7 +2972,8 @@ function runAsyncTests(H,d){
     .then(function(){ return results; })
     .then(function(r){ return runUndoSyncTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runUndoKeepsConnectionTests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runUndoStaleSnapshotTests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runUndoStaleSnapshotTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runUndoConnectRuleTests().then(function(more){ return r.concat(more); }); });
 }
 
 /* ---------------------------------------------------------------------
@@ -3018,6 +3019,7 @@ function runUndoSyncTests(){
   }
   function connectedSandbox(){
     return freshSandbox(true).then(function(f){
+      f.H.setKeepUndoOnConnectForTest(true); /* build the legacy stack ("before Drive connect" kept) these scenarios are about */
       f.d.getElementById("connectDrive").click();
       return waitFor(function(){ return f.d.getElementById("connectDrive").textContent==="Drive: synced"; },4000).then(function(ok){
         check("setup: fake Drive connect completed",ok);
@@ -3486,7 +3488,8 @@ function runUndoKeepsConnectionTests(){
   }
   function btn(f){ return f.d.getElementById("connectDrive").textContent; }
   function stat(f){ return f.d.getElementById("statusText").textContent; }
-  function connectClick(f){
+  function connectClick(f,fresh){
+    if(!fresh) f.H.setKeepUndoOnConnectForTest(true); /* legacy stack: see app.js TEST_MODE_KEEP_UNDO_ON_CONNECT */
     f.d.getElementById("connectDrive").click();
     return waitFor(function(){ return btn(f)==="Drive: synced"; },4000).then(function(ok){
       check("setup: fake Drive connect completed",ok);
@@ -3709,12 +3712,18 @@ function runUndoKeepsConnectionTests(){
     .then(function(){ return results; });
 }
 /* ---------------------------------------------------------------------
-   Entry restore must not put back a dead category id (CLAUDE.md item 22).
-   undoEntriesAsForwardEdits used to restore a snapshot entry's category even
-   when that category had since been tombstoned (name-dedup merged a starter
-   category away at connect, or another device deleted it), leaving the
-   entry on a category nobody can see and pushing that to Drive. The entry
-   now keeps its current category - or none, when it is being revived. */
+   Pre-connect undo snapshots are stale against the merged state (found on a
+   real device, reproduced in test mode: undoing through "before Drive
+   connect" emptied the category list, greyed every entry, and wrote an
+   entry's category back as a tombstoned id that then reached Drive).
+   Two fixes, tested here:
+   (a) a successful connect clears the undo stack (memory, redo, and the
+       persisted hours-ledger-undo-v1); a failed or cancelled one keeps it;
+   (b) undoEntriesAsForwardEdits never writes back a category id that is
+       dead (tombstoned in the restored state, or deleted by another
+       device) - the entry keeps its current category instead.
+   The other scenarios in this file turn on setKeepUndoOnConnectForTest so
+   they can still build a legacy stack; these ones do not. */
 function runUndoStaleSnapshotTests(){
   var results=[];
   function check(name,cond,observed){
@@ -3780,10 +3789,89 @@ function runUndoStaleSnapshotTests(){
   function rec(id,name,color,when){ return {id:id,name:name,color:color,updatedAt:when,updatedBy:"dev-B",deleted:false,deletedAt:null}; }
 
   return Promise.resolve()
+    /* ---- (a) 1: a successful connect empties the stack, in memory and in storage, and it stays empty after a reload */
+    .then(function(){ return freshSandbox(true); })
+    .then(function(f){
+      var h=f.H;
+      addEntry(h,"Before connect",480,540);
+      check("clear-on-connect setup: one snapshot on the stack before connecting",stored().length===1,descs());
+      return connect(f).then(function(ok){
+        check("connect succeeded",ok);
+        return settle(h);
+      }).then(function(){
+        check("after a successful connect the persisted undo stack is empty",stored().length===0,descs());
+        h.undo();
+        check("...and Ctrl+Z says nothing left to undo",toast(f)==="Nothing left to undo",toast(f));
+        check("...and the entry made before connecting is still there (nothing was undone)",h.entriesFor(DATE).length===1);
+        return killSandboxAndOpenFresh(f.d);
+      }).then(function(n){
+        return delay(300).then(function(){ return settle(n.H); }).then(function(){
+          check("after a reload the persisted undo stack is still empty",stored().length===0,descs());
+          n.H.undo();
+          check("...and Ctrl+Z after the reload still says nothing left to undo",toast(n)==="Nothing left to undo",toast(n));
+        });
+      });
+    })
+    /* ---- (a) 2: the redo stack is cleared too */
+    .then(function(){ return freshSandbox(true); })
+    .then(function(f){
+      var h=f.H;
+      addEntry(h,"Redo me",480,540);
+      h.undo();                                          /* puts a step on the redo stack */
+      return connect(f).then(function(){ return settle(h); }).then(function(){
+        h.redo();
+        check("after a successful connect redo has nothing to redo either (redo stack cleared)",h.entriesFor(DATE).length===0,JSON.stringify(h.entriesFor(DATE).map(function(e){ return e.label; })));
+      });
+    })
+    /* ---- (a) 3: a failed connect keeps the stack */
+    .then(function(){ return freshSandbox(true); })
+    .then(function(f){
+      var h=f.H;
+      addEntry(h,"Before failed connect",480,540);
+      h.setTestHangToken(true);                          /* sign-in never completes -> withGisTimeout fails the attempt */
+      f.d.getElementById("connectDrive").click();
+      return waitFor(function(){ return btn(f)==="Connect Drive"&&/Couldn't connect/.test(toast(f)); },20000).then(function(failed){
+        check("failed-connect setup: the attempt failed and the button went back to 'Connect Drive'",failed,"button='"+btn(f)+"' toast='"+toast(f)+"'");
+        check("a failed connect keeps the undo stack (add entry + before Drive connect)",stored().length===2&&stored()[1].d==="before Drive connect",descs());
+        check("...and the device did not become connected",!h.getState().driveConnected);
+        h.setTestHangToken(false);
+      });
+    })
+    /* ---- (a) 4: a cancelled connect (backup confirm declined) keeps the stack untouched */
+    .then(function(){ return freshSandbox(true); })
+    .then(function(f){
+      var h=f.H;
+      addEntry(h,"Before cancelled connect",480,540);
+      f.d.defaultView.confirm=function(){ return false; };
+      f.d.getElementById("connectDrive").click();
+      return delay(300).then(function(){
+        check("a cancelled connect keeps the undo stack exactly as it was (one snapshot, no connect snapshot)",stored().length===1&&stored()[0].d==="add entry",descs());
+        check("...and the device did not become connected",!h.getState().driveConnected);
+      });
+    })
+    /* ---- (a) 5: after connect, new edits undo normally and the stack rebuilds */
+    .then(function(){ return freshSandbox(true); })
+    .then(function(f){
+      var h=f.H;
+      addEntry(h,"Old",480,540);
+      return connect(f).then(function(){ return settle(h); }).then(function(){
+        addEntry(h,"New A",600,660); addEntry(h,"New B",700,760);
+        check("after connect the stack rebuilds from new edits only",stored().length===2&&stored().every(function(x){ return x.d==="add entry"; }),descs());
+        h.undo();
+        check("undo #1 removes the newest edit",h.entriesFor(DATE).map(function(e){ return e.label; }).sort().join("|")==="New A|Old");
+        h.undo();
+        check("undo #2 removes the next one",h.entriesFor(DATE).map(function(e){ return e.label; }).join("|")==="Old");
+        h.undo();
+        check("undo #3 stops at the connect point: nothing left to undo, Old is kept",toast(f)==="Nothing left to undo"&&h.entriesFor(DATE).length===1,toast(f));
+        check("...and driveConnected stayed true throughout",h.getState().driveConnected===true);
+        return settle(h);
+      });
+    })
     /* ---- (b) 1: entry guard, the category was deleted by another device after an edit moved the entry */
     .then(function(){ return freshSandbox(true); })
     .then(function(f){
       var h=f.H;
+      h.setKeepUndoOnConnectForTest(true);
       return connect(f).then(function(){ return settle(h); }).then(function(){
         var A=h.getState().categories[1].id,B=h.getState().categories[0].id;
         return backdateCat(h,A).then(function(){
@@ -3811,6 +3899,7 @@ function runUndoStaleSnapshotTests(){
     .then(function(){ return freshSandbox(true); })
     .then(function(f){
       var h=f.H,T="2026-10-04T09:00:00.000Z";
+      h.setKeepUndoOnConnectForTest(true);
       var seeds=[["seed-studies","Studies"],["seed-work","Work / income"],["seed-side-projects","Side projects"],["seed-training","Training"],["seed-people","People"],["seed-admin","Admin & errands"],["seed-sleep","Sleep"],["seed-drift","Drift"]];
       h.fakeDriveWrite({categories:seeds.map(function(s){ return rec("r-"+s[0],s[1],"#1D669A",T); }),
         entries:[],verdicts:[],closeouts:[]});
@@ -3848,8 +3937,158 @@ function runUndoStaleSnapshotTests(){
     .then(function(){ return results; });
 
   function connectedSandboxLegacy(){
-    return freshSandbox(true).then(function(f){ return connect(f).then(function(){ return f; }); });
+    return freshSandbox(true).then(function(f){ f.H.setKeepUndoOnConnectForTest(true); return connect(f).then(function(){ return f; }); });
   }
+}
+/* ---------------------------------------------------------------------
+   What a successful connect keeps in the undo stack (CLAUDE.md item 22,
+   third round). The rule:
+     (1) always drop the "before Drive connect" snapshot connectDrive() just
+         pushed, whatever it contains;
+     (2) drop every snapshot from before this device ever synced - its saved
+         state has neither deletedCategories nor deletedEntries (an empty {}
+         counts as present: a device that synced but deleted nothing has {});
+     (3) keep the rest. Malformed snapshots are dropped. Redo stays cleared.
+   Needed because reconnecting after an import runs the same first-connect
+   path, and a full clear wiped the undo of the import. */
+function runUndoConnectRuleTests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); }
+  var DATE="2026-04-20",UKEY="hours-ledger-selftest-undo-v1";
+  function settle(h){
+    return delay(250).then(function(){ return waitFor(function(){ return !h.isDriveSyncInFlight(); },4000); }).then(function(){ return delay(50); });
+  }
+  function btn(f){ return f.d.getElementById("connectDrive").textContent; }
+  function toast(f){ return f.d.getElementById("toastText").textContent; }
+  function stored(){ try{ return JSON.parse(localStorage.getItem(UKEY)||"[]"); }catch(e){ return null; } }
+  function descs(){ return JSON.stringify((stored()||[]).map(function(x){ return x.d; })); }
+  function hasContainers(item){ try{ var q=JSON.parse(item.s); return !!(q.deletedCategories||q.deletedEntries); }catch(e){ return false; } }
+  function addEntry(h,label,start,end){
+    h.snapshot("add entry"); h.putEntry(DATE,label,h.getState().categories[0].id,start,end,null); h.persist();
+  }
+  function connect(f){
+    f.d.getElementById("connectDrive").click();
+    return waitFor(function(){ return btn(f)==="Drive: synced"; },4000);
+  }
+  function names(h){ return h.getState().categories.map(function(c){ return c.name; }).join(", ")||"(none)"; }
+  function dates(h){ return JSON.stringify(Object.keys(h.getState().entries).sort()); }
+  function setContainers(h,on){
+    var s=h.getState();
+    if(on){ s.deletedEntries=s.deletedEntries||{}; s.deletedCategories=s.deletedCategories||{}; }
+    else{ delete s.deletedEntries; delete s.deletedCategories; }
+  }
+  function reload(f){
+    f.el.parentNode.removeChild(f.el);
+    return freshSandbox().then(function(n){ return delay(300).then(function(){ return n; }); });
+  }
+
+  return Promise.resolve()
+    /* ---- 1: import, reconnect, Ctrl+Z restores the pre-import state; driveConnected stays true */
+    .then(function(){ return freshSandbox(true); })
+    .then(function(f){
+      var h=f.H;
+      return connect(f).then(function(){ return settle(h); }).then(function(){
+        addEntry(h,"My entry",480,540);
+        return settle(h);
+      }).then(function(){
+        var before=names(h);
+        var backup={version:2,settings:{startHour:6,endHour:24},categories:[{id:"imp1",name:"Imported cat",color:"#27864F"}],
+          entries:{"2026-04-21":[{id:"i1",label:"Imported entry",cat:"imp1",start:600,end:660}]},weeklyVerdicts:{},weekCloseouts:{}};
+        h.importBackupJson(JSON.stringify(backup));
+        check("import setup: the import disconnected Drive and the device holds only the imported category",
+          h.getState().driveConnected===false&&names(h)==="Imported cat",names(h));
+        return connect(f).then(function(ok){
+          check("reconnect after the import completed",ok);
+          return settle(h);
+        }).then(function(){
+          check("after the reconnect the undo of the import is still on the stack (open a copy)",
+            stored().some(function(x){ return x.d==="open a copy"; }),descs());
+          check("...and the reconnect's own 'before Drive connect' snapshot is not",!stored().some(function(x){ return x.d==="before Drive connect"; }),descs());
+          h.undo();
+          check("Ctrl+Z after the reconnect undoes the import",toast(f)==="Undone: open a copy",toast(f));
+          check("...the pre-import categories are back and the imported one is gone",names(h)===before&&names(h).indexOf("Imported cat")===-1,names(h));
+          check("...the pre-import entry is back and the imported entry is gone",dates(h)==="[\"2026-04-20\"]"&&h.entriesFor(DATE)[0].label==="My entry",dates(h));
+          check("...and driveConnected stayed true",h.getState().driveConnected===true,String(h.getState().driveConnected));
+          return settle(h);
+        });
+      });
+    })
+    /* ---- 2 + 3 + 4: first-ever connect on a mixed stack; the connect snapshot carries containers too */
+    .then(function(){ return freshSandbox(true); })
+    .then(function(f){
+      var h=f.H;
+      /* an unsynced device (no containers) -> pre-sync snapshots; with containers on -> post-sync-looking ones, interleaved */
+      h.snapshot("pre A");
+      setContainers(h,true);  h.snapshot("post B");
+      setContainers(h,false); h.snapshot("pre C");
+      setContainers(h,true);  h.snapshot("post D");   /* state now HAS containers, so the connect snapshot pushed next carries them too */
+      h.persist();
+      check("mixed-stack setup: four snapshots, alternating pre-sync and post-sync",descs()==='["pre A","post B","pre C","post D"]'&&stored().map(hasContainers).join()==="false,true,false,true",descs()+" containers="+stored().map(hasContainers).join());
+      return connect(f).then(function(ok){
+        check("first connect with a mixed stack completed",ok);
+        return settle(h);
+      }).then(function(){
+        check("only the post-sync snapshots survive, in order",descs()==='["post B","post D"]',descs());
+        check("the connect snapshot just pushed is dropped even though it carried the containers",!stored().some(function(x){ return x.d==="before Drive connect"; }),descs());
+        h.undo();
+        check("...and Ctrl+Z pops the newest survivor",toast(f)==="Undone: post D",toast(f));
+        return settle(h);                                /* ends on an undo: let its sync finish before the next scenario */
+      });
+    })
+    /* ---- 5: malformed snapshots are dropped */
+    .then(function(){ return freshSandbox(true); })
+    .then(function(f){
+      var h=f.H,good=JSON.stringify(Object.assign({},h.getState(),{deletedEntries:{},deletedCategories:{}}));
+      localStorage.setItem(UKEY,JSON.stringify([
+        {s:"not json {{",d:"garbage text"},{s:"null",d:"null state"},{d:"no state at all"},{s:good,d:"good post-sync"}]));
+      return reload(f).then(function(n){
+        check("malformed setup: the persisted stack holds four items, three of them unusable",stored().length===4,descs());
+        return connect(n).then(function(ok){
+          check("connect with malformed snapshots on the stack completed",ok);
+          return settle(n.H);
+        }).then(function(){
+          check("malformed snapshots are dropped, the good post-sync one is kept",descs()==='["good post-sync"]',descs());
+        });
+      });
+    })
+    /* ---- 6: KNOWN GAP - a synced device's backup imported onto a never-connected device */
+    .then(function(){ return freshSandbox(true); })
+    .then(function(A){
+      var h=A.H;
+      return connect(A).then(function(){ return settle(h); }).then(function(){
+        addEntry(h,"A entry",600,660);
+        return settle(h);
+      }).then(function(){
+        var exported=JSON.stringify(h.getState());           /* what Export a copy writes: the whole state, containers included */
+        A.el.parentNode.removeChild(A.el);
+        ["hours-ledger-selftest-v2","hours-ledger-device-id-TESTMODE",UKEY].forEach(function(k){ localStorage.removeItem(k); }); /* a different, never-connected device; the fake Drive file stays */
+        return freshSandbox().then(function(B){
+          var hb=B.H;
+          check("KNOWN GAP setup: the exported backup carries the sync containers",/"deletedEntries"/.test(exported)&&/"deletedCategories"/.test(exported));
+          check("KNOWN GAP setup: device B has never connected and has no containers",!("deletedEntries" in hb.getState())&&!("deletedCategories" in hb.getState())&&!hb.getState().driveConnected);
+          addEntry(hb,"B before import",480,540);
+          hb.importBackupJson(exported);
+          check("KNOWN GAP setup: importing it gives B the containers without ever connecting it",
+            ("deletedEntries" in hb.getState())&&("deletedCategories" in hb.getState())&&hb.getState().driveConnected===false);
+          addEntry(hb,"B after import",700,760);              /* this snapshot is taken while B holds the imported containers */
+          return connect(B).then(function(ok){
+            check("KNOWN GAP setup: B's first connect completed",ok);
+            return settle(hb);
+          }).then(function(){
+            /* If this assertion ever starts failing, someone changed what a first connect keeps (or what an
+               import hands a device) - that is a decision, not a test to quietly update. CLAUDE.md item 22. */
+            check("KNOWN GAP (CLAUDE.md item 22): the snapshot taken after the import SURVIVES B's first connect, because it looks synced",
+              descs()==='["add entry"]'&&hasContainers(stored()[0]),descs());
+            check("KNOWN GAP: the pre-import snapshots, the import's own 'open a copy' and the connect snapshot are dropped",
+              !stored().some(function(x){ return x.d==="open a copy"||x.d==="before Drive connect"; }),descs());
+          });
+        });
+      });
+    })
+    .then(function(){ return results; });
 }
 })();
 </script>

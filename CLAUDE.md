@@ -2022,7 +2022,7 @@ dashboard styling.
     undefined, the import undo observed `true`, containers `undefined`,
     both category collisions and the verdict collision observed the record
     still live. With the fix: 0 failing / 105; full `selftest.html` 0
-    failing / 474. Passing even before the fix, so regression guards rather
+    failing / 474 (500 after the second round below). Passing even before the fix, so regression guards rather
     than fail-first: redo after a plain undo (the discriminating redo case
     is the deliberate-disconnect one), Pre keeping its sync fields.
     **Mutation-checked**, each failing alone and passing restored: removing
@@ -2036,5 +2036,188 @@ dashboard styling.
     (found by the mutation run, not by the fail-first run); and a test that
     flips `driveConnected` directly can't assert the button, since only
     import updates it. Not covered: real devices, real Drive.
+
+    **Second round, same branch (2026-10-05): pre-connect snapshots are
+    stale against the merged state — clear the undo stack on connect, and
+    guard the entry restore.** Found on a real device (fresh incognito
+    profile, one entry made before connecting to the real file) and
+    reproduced in test mode against the fake Drive:
+    - *The finding.* Undo #2 through "before Drive connect" emptied the
+      category list and greyed every entry; undo #3 appeared to bring them
+      back. Reproduced when the real file holds the starter categories' names
+      under other ids: name-dedup (`dedupeCategoriesByName`) tombstones the
+      device's own `seed-*` ids at connect, the snapshot has only those seed
+      ids, and the carried-tombstone-wins rule from the first round then
+      removes them too, so zero categories. What brought them back was the
+      next sync, not #3: categories absent locally read to the merge as new
+      on Drive (case 1, hard rule 7 working as designed). **Drive's
+      categories were never removed or changed.**
+    - *The dead-category-id finding.* An *entry* on Drive was changed: the
+      pre-connect entry had been remapped to the surviving category at
+      connect (`r-seed-studies`); the entry restore put the snapshot's
+      `seed-studies` back — an id the merge had already tombstoned — and the
+      next sync pushed it. The entry stays grey on every device. This flaw
+      is in the already-deployed `8238f2f` (the "changed since the snapshot →
+      put the snapshot's content back" branch restores `cat` too), not in the
+      first round of this branch.
+    - *Not reproduced:* the empty-profile report ("Nothing left to undo"
+      instead of a reachable connect snapshot). In test mode, empty profile,
+      connect, Ctrl+Z #1 said "Undone: before Drive connect" and #2 said
+      "Nothing left to undo". `connectDrive()` pushes the snapshot
+      unconditionally, right after the backup confirm and before sign-in
+      (no dedup, no empty-state check); only `snapshot()`/`undo()`/`redo()`
+      and the load touch the stack. **Unexplained.** Sebastian confirmed the
+      "Nothing left to undo" came on the **second** Ctrl+Z press; the first
+      undid his own entry, made after connecting. So the stack held the
+      entry's snapshot but, on that run, no "before Drive connect" snapshot
+      under it — whereas in test mode, same sequence, the connect snapshot is
+      there and press #2 pops it. Why it was missing on his run is not
+      known. Reasoned candidate, untested: the device was already connected,
+      so the button took the "sync now" path, which pushes no snapshot.
+
+    **Decisions (Sebastian, 2026-10-05):**
+    1. **A successful connect clears the undo history** (*narrowed in the third round below: it now trims instead of emptying*) —
+       `clearUndoHistoryAfterConnect()`, called in `connectDrive()` right
+       after the first merge is applied and saved: in-memory stack, redo
+       stack, and the persisted `hours-ledger-undo-v1` (to `[]`). A failed or
+       cancelled connect never reaches it, so that stack is kept. Reason:
+       every pre-connect snapshot is stale against the merged state, and
+       merely not pushing the connect snapshot (option b) would have left an
+       older pre-connect snapshot reachable — undo #3 wiped the categories in
+       the real repro. **The cost, said plainly:** undo for actions made
+       before connecting is lost, once, after the existing backup-export
+       confirm. That is a narrow reading of hard rule 5 ("every destructive
+       action must be undoable") — it holds for everything after connecting,
+       not for the one-time connect boundary. Alternatives considered:
+       (b) don't push the connect snapshot — smaller, but leaves older
+       pre-connect snapshots with the same problem; (c) category forward
+       edits now — the real fix for categories, but a bigger change that
+       widens scope and still left the entry flaw. (c) is still open.
+    2. **Entry guard: `undoEntriesAsForwardEdits` never puts back a dead
+       category id.** "Dead" = tombstoned in the state being restored (carried
+       over, e.g. name-dedup) or deleted by *another* device (not ours to
+       undo, same idea as the entry guards). For the in-place branch the
+       entry keeps its current category (and if that makes the content
+       identical, nothing is written, so no pointless push); for a *revived*
+       entry there is no current entry, so it gets no category (null,
+       "No category") rather than a dead id. A category this device deleted
+       itself is not dead here: the snapshot restore brings it back with the
+       entry, so undoing a delete-with-reassign still works. **Correction to
+       the first framing:** "edit an entry's category, delete the old
+       category, undo the edit" is not reachable in that order on one
+       device — undo pops the delete first and brings the category back. The
+       reachable ways in are another device's delete, and name-dedup at
+       connect; both are tested. Edits are replace-with-new-id
+       (`putEntry(replaceId)`), so the revive branch is the common one; the
+       in-place branch is covered by a direct state change in the test.
+    3. **The collision rule from the first round is left as it is** (a
+       carried tombstone always beats a restored live category). It produced
+       the zero-categories result in the real repro when name-dedup
+       tombstoned the seed ids. With decision 1 it only matters for stacks
+       that already exist on already-connected devices (a newly connected
+       device no longer has a pre-connect snapshot to restore). Revisit
+       later.
+    4. **Still open, unchanged:** the stamping gap and snapshots that already
+       contain the sync containers (see the first round, decision 4), and
+       category/verdict/close-out undo generally (option c).
+
+    **Tests** (`selftest.html`, `runUndoStaleSnapshotTests()`), written
+    first. Against the unchanged logic (only a test seam added to `app.js`):
+    11 failing / 131 in the three undo blocks — e.g. after a successful
+    connect the stack observed `["add entry","before Drive connect"]` and
+    Ctrl+Z said "Undone: before Drive connect"; `Edited E->seed-work` and
+    `Untitled-pre->seed-studies` observed on the fake Drive (a dead
+    category). With the fix: 0 failing / 131; full `selftest.html` 0 failing /
+    500. **Mutation-checked**, each alone: removing the stack clear → 6
+    failing; removing the entry guard → 5 failing; restored → passing.
+    Guard scenarios back-date the category's stamp *before* the snapshot is
+    taken and the other device's delete after it — otherwise the restore
+    just revives the category (the known category-undo gap) and the guard has
+    nothing to guard (found when the first draft passed against the old
+    code). Passing before the fix, so regression guards only: a failed
+    connect and a cancelled connect keep the stack; the redo stack is empty
+    after connect (`snapshot()` already clears it).
+    **How legacy stacks are still tested:** a connected device that
+    connected before this change still has a pre-connect snapshot in its
+    persisted stack. `setKeepUndoOnConnectForTest` (TEST_MODE-only, off by
+    default, never read outside TEST_MODE) makes a connect keep the stack so
+    `OLD-STACK` and the undo-through-connect scenarios can still build one.
+    Their assertions are unchanged; only their connect helpers turn the seam
+    on. The new tests do not.
+    **Not covered:** real devices and real Drive. The phone check of the
+    first round is still owed, and neither the clear-on-connect nor the
+    entry guard has been seen on a real device.
+
+    **Third round (2026-10-05): the clear is a trim, not a full clear.**
+    Found by reading, then confirmed in test mode: `connectDrive()` is also
+    what runs when a device that is *not* connected presses "Connect Drive" —
+    including **reconnecting after an import** forced `driveConnected` to
+    false. That pushed a fresh "before Drive connect" snapshot and, with the
+    full clear, wiped the stack, so the import's undo ("open a copy") was
+    gone: after import → reconnect → Ctrl+Z the toast read "Nothing left to
+    undo". The other reconnect paths never reach it: the expired-token login
+    popup goes through `runDriveSync(true)` (no snapshot, no clear), and
+    pressing the button on an already-connected device after a reload
+    delegates to `runDriveSync(true)` too (all three confirmed in test mode).
+
+    **The rule** (`clearUndoHistoryAfterConnect(connectSnap)`): on connect
+    success, (1) always drop the "before Drive connect" snapshot just pushed,
+    whatever it contains (`connectDrive` hands it over by identity, so an
+    edit made while the sign-in is open can't be mistaken for it); (2) drop
+    every snapshot from before this device ever synced — its saved state has
+    neither `deletedCategories` nor `deletedEntries` (an empty `{}` counts as
+    *present*: a device that synced but deleted nothing has `{}`, checked);
+    (3) keep the rest. A snapshot that can't be parsed is dropped. Redo
+    stays cleared. A first-ever connect behaves exactly as the full clear
+    did, since every snapshot is then pre-sync. Which paths create the
+    containers (read): only `syncEngine`'s output on connect/sync, and the
+    gated carry-over in `applyState`; load, v1 migration and the verdict
+    migrations never do — **except import**, which is the known gap below.
+
+    **Known gap (KNOWN GAP, pinned by a test).** The predicate is "has
+    containers", and `importBackupJson` does `state=d` (export writes the
+    whole state, containers included). So importing a backup exported from a
+    *synced* device onto a *never-connected* device hands it the containers,
+    and a snapshot taken after that import looks synced and **survives that
+    device's first connect**. Ran in test mode: stack before the connect
+    `["add entry","open a copy","add entry"]`, after it `["add entry"]` (the
+    post-import one; the pre-import ones, "open a copy" and the connect
+    snapshot are dropped). In that run the surviving snapshot did no visible
+    harm because the imported categories already matched Drive's. **Reasoned,
+    not run:** it could restore the imported category set instead of the merged
+    one when Drive holds extra categories, the same stale-snapshot mechanism as
+    before. Why accepted: it is rare, and recoverable — Drive keeps the data
+    and the entry guard covers dead category ids.
+
+    **Options not taken, with reasons (Sebastian, 2026-10-05):**
+    - *Require `driveConnected===true` in the snapshot:* would permanently
+      drop undo history for edits made after an import-disconnect on a device
+      that really did sync — a loss that cannot be recovered. Worse than the
+      gap it closes.
+    - *Strip the containers on import for an unconnected device:* fixes the
+      source, but changes import behaviour, so it needs its own decision
+      under hard rule 6.
+    The `KNOWN GAP` tests fail loudly the day either behaviour changes, so
+    that day someone has to decide again rather than quietly update a test.
+
+    **Tests** (`selftest.html`, `runUndoConnectRuleTests()`), written first.
+    Against the full clear: 8 failing / 153 — e.g. the import's "open a
+    copy" observed absent, Ctrl+Z "Nothing left to undo", the imported
+    category still present after the "undo", a mixed stack observed `[]`
+    instead of the post-sync survivors, and the gap pin observed `[]`. With
+    the rule: 0 failing / 153. **Mutation-checked**, each failing and then
+    restored: revert to a full clear → 8 failing; keep everything → 16
+    failing; remove the always-drop of the connect snapshot → 5 failing.
+    No record in these tests depends on the 5 s merge window (they assert
+    stack contents and the immediate undo result), so nothing needed
+    back-dating. Two harness notes: a scenario that ends on an undo must
+    `settle()` before the next one starts — the mixed-stack scenario didn't
+    at first, and its late sync wrote a connected state into the shared
+    storage, so the *next* scenario's page loaded as already connected
+    (found because the malformed-snapshot test failed even with the correct
+    rule); and an always-true assertion I had left in was removed rather
+    than kept as a green row. **Not covered:** real devices and real Drive;
+    none of the clear-on-connect, the trim, or the entry guard has been seen
+    on a real device.
 
 Feature creep is the known failure mode of this project.

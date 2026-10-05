@@ -1259,6 +1259,7 @@ function connectDrive(){
   var proceed=confirm("Before connecting, it's worth exporting a copy as a backup first - Your data → Export a copy.\n\nContinue connecting Google Drive now?");
   if(!proceed) return;
   snapshot("before Drive connect");
+  var connectSnap=undoStack[undoStack.length-1];
   setStatus("Connecting to Drive…");
   document.getElementById("connectDrive").disabled=true;
   getAccessToken(function(err,token){
@@ -1276,6 +1277,9 @@ function connectDrive(){
       state.driveConnected=true;
       driveSyncApplyingRemote=true;
       try{ persist(); } finally{ driveSyncApplyingRemote=false; }
+      /* the first merge is applied and saved: connect has succeeded, so every
+         snapshot taken before it is now stale against the merged state */
+      clearUndoHistoryAfterConnect(connectSnap);
       renderMaybeDeferred(); refreshHint();
       document.getElementById("connectDrive").disabled=false;
       document.getElementById("connectDrive").textContent="Drive: syncing…";
@@ -1411,8 +1415,51 @@ function runDriveSync(manual){
 /* ---------------- undo / redo ---------------- */
 var UKEY=TEST_MODE?"hours-ledger-selftest-undo-v1":"hours-ledger-undo-v1";
 var undoStack=[], redoStack=[];
+/* TEST_MODE only: keeps the pre-connect undo stack across a successful connect,
+   i.e. the behavior every device that connected BEFORE the clear-on-connect
+   change still has in its persisted stack. Tests that exercise "an existing
+   stack on an already-connected device" (OLD-STACK, the undo-through-connect
+   scenarios) turn it on so they can still build such a stack; it is never set
+   outside TEST_MODE, and nothing in the real app reads it. */
+var TEST_MODE_KEEP_UNDO_ON_CONNECT=false;
 try{ undoStack=JSON.parse(readStore(UKEY))||[]; }catch(e){ undoStack=[]; }
 
+/* A successful connect trims the undo history instead of emptying it. The rule:
+     (1) always drop the "before Drive connect" snapshot connectDrive() just
+         pushed (connectSnap), whatever it contains;
+     (2) drop every snapshot from before this device ever synced: its saved
+         state has neither deletedCategories nor deletedEntries (an empty {}
+         counts as present - a device that synced but deleted nothing has {});
+     (3) keep the rest. A snapshot that can't be parsed is dropped. Redo is
+         cleared.
+   Why: a pre-sync snapshot is stale against the merged state - its categories
+   are the device's own starter set, it has no sync containers. Restoring one
+   emptied the category list, greyed every entry, and wrote an entry's
+   category back as an id the merge had already tombstoned, then pushed that
+   to Drive (reproduced in test mode, first seen on a real device). A full
+   clear fixed that but also wiped the undo of an import: reconnecting after
+   an import runs this same first-connect path. Snapshots taken while the
+   device was synced (the import's own "open a copy", edits made after it)
+   have containers and are kept. Called only once connectDrive() has applied
+   and saved the first merge; a failed or cancelled connect never reaches it,
+   so that stack is kept whole.
+   Cost, accepted: undo for actions made before the device first synced is
+   lost, once, after the backup-export confirm - a narrow reading of hard
+   rule 5 (CLAUDE.md, backlog item 22).
+   KNOWN GAP: the predicate is "has containers", and an import of a backup
+   exported from a synced device gives a never-connected device those
+   containers, so a snapshot taken after such an import survives that
+   device's first connect. Pinned by a test; see CLAUDE.md item 22. */
+function clearUndoHistoryAfterConnect(connectSnap){
+  if(TEST_MODE&&TEST_MODE_KEEP_UNDO_ON_CONNECT) return;
+  function syncedBefore(item){
+    try{ var q=JSON.parse(item.s); return !!(q.deletedCategories||q.deletedEntries); }
+    catch(e){ return false; }
+  }
+  undoStack=undoStack.filter(function(x){ return x!==connectSnap&&syncedBefore(x); });
+  redoStack=[];
+  writeStore(UKEY,JSON.stringify(undoStack.slice(-12)));
+}
 function snapshot(desc){
   undoStack.push({s:JSON.stringify(state),d:desc||"change"});
   if(undoStack.length>25) undoStack.shift();
@@ -3598,6 +3645,7 @@ if(TEST_MODE){
     surfaceDriveReconnectIfTokenLapsed:surfaceDriveReconnectIfTokenLapsed,
     recheckDriveToken:recheckDriveToken,
     setTestHangToken:function(v){ TEST_MODE_HANG_TOKEN=v; },
+    setKeepUndoOnConnectForTest:function(v){ TEST_MODE_KEEP_UNDO_ON_CONNECT=v; },
     setTestLateSuccessMs:function(v){ TEST_MODE_LATE_SUCCESS_MS=v; },
     loadGisScript:loadGisScript,
     resolveTestGisScriptLoad:resolveTestGisScriptLoad,
