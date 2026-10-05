@@ -2969,7 +2969,485 @@ function runAsyncTests(H,d){
           });
         });
     })
+    .then(function(){ return results; })
+    .then(function(r){ return runUndoSyncTests().then(function(more){ return r.concat(more); }); });
+}
+
+/* ---------------------------------------------------------------------
+   Undo vs. Drive sync - the "ghost entry" bug (see CLAUDE.md backlog).
+   Undo restores a whole-state JSON snapshot (applyState), which makes a
+   record the user just undid ABSENT locally, not tombstoned - so with Drive
+   connected, a sync that already carried that record reads the absence as
+   "new on the remote" and brings it back (mergeRecords case 1).
+
+   Each scenario below mirrors the exact calls the real UI handlers make
+   (saveSheet: snapshot -> putEntry -> persist; fDelete: snapshot ->
+   removeEntry -> persist) rather than clicking through the sheet, then
+   calls the real undo() and lets the real debounced runDriveSync() run
+   against the fake Drive. Every check puts what it actually observed into
+   its own name, so a failing run reads as evidence, not just a red row.
+   Each scenario gets its own clean sandbox (freshSandbox(true)). */
+function runUndoSyncTests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); }
+  var DATE="2026-04-20";
+  function fmt(e){ return e.label+" "+e.start+"-"+e.end; }
+  function localList(h){ return "["+h.entriesFor(DATE).map(fmt).join(", ")+"]"; }
+  function remoteList(h){
+    var r=h.fakeDriveRead();
+    return "["+((r&&r.entries)||[]).filter(function(e){ return e.date===DATE&&!e.deleted; }).map(fmt).join(", ")+"]";
+  }
+  function remoteHas(h,label){
+    var r=h.fakeDriveRead();
+    return !!r&&r.entries.some(function(e){ return e.date===DATE&&!e.deleted&&e.label===label; });
+  }
+  /* a sync round has fully finished once nothing is in flight - the extra
+     leading delay lets the 50ms TEST_MODE debounce fire first */
+  function settle(h){
+    return delay(250).then(function(){ return waitFor(function(){ return !h.isDriveSyncInFlight(); },4000); }).then(function(){ return delay(50); });
+  }
+  function catId(h){ return h.getState().categories[0].id; }
+  /* same three calls saveSheet() makes for a plain add */
+  function addEntry(h,label,start,end){
+    h.snapshot("add entry"); h.putEntry(DATE,label,catId(h),start,end,null); h.persist();
+  }
+  function connectedSandbox(){
+    return freshSandbox(true).then(function(f){
+      f.d.getElementById("connectDrive").click();
+      return waitFor(function(){ return f.d.getElementById("connectDrive").textContent==="Drive: synced"; },4000).then(function(ok){
+        check("setup: fake Drive connect completed",ok);
+        return f;
+      });
+    });
+  }
+
+  return Promise.resolve()
+    /* ---- STEP 0a: CONTROL - never connected. create, undo, create */
+    .then(function(){ return freshSandbox(true); })
+    .then(function(f){
+      var h=f.H;
+      addEntry(h,"Ghost A",540,600);
+      h.undo();
+      addEntry(h,"Real B",840,900);
+      return settle(h).then(function(){
+        check("STEP0 disconnected: create, Ctrl+Z, create leaves exactly the second entry",
+          h.entriesFor(DATE).length===1&&h.entriesFor(DATE)[0].label==="Real B",localList(h));
+      });
+    })
+    /* ---- STEP 0b: same sequence, fake Drive connected, with the first
+       entry given time to actually reach Drive before the undo */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H;
+      addEntry(h,"Ghost A",540,600);
+      return waitFor(function(){ return remoteHas(h,"Ghost A"); },4000).then(function(reached){
+        check("STEP0 connected: precondition - the first entry reached the fake Drive before the undo",reached,remoteList(h));
+        return settle(h);
+      }).then(function(){
+        h.undo();
+        check("STEP0 connected: right after Ctrl+Z the entry is gone locally (undo itself works)",
+          h.entriesFor(DATE).length===0,localList(h));
+        /* was "absent, NOT tombstoned" (the bug itself) before the forward-edit fix - this is the line that flipped */
+        check("STEP0 connected: ...and the undo is recorded as a tombstone in deletedEntries, not just an absence",
+          Object.keys(h.getState().deletedEntries||{}).length===1,JSON.stringify(h.getState().deletedEntries));
+        addEntry(h,"Real B",840,900);
+        return waitFor(function(){ return remoteHas(h,"Real B"); },4000);
+      }).then(function(){ return settle(h); })
+      .then(function(){
+        check("STEP0 connected: create, Ctrl+Z, create leaves exactly the second entry (no ghost)",
+          h.entriesFor(DATE).length===1&&h.entriesFor(DATE)[0].label==="Real B",
+          "local="+localList(h)+" remote="+remoteList(h));
+      });
+    })
+    /* ---- STEP 0c: what does the undo snapshot actually capture? */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H;
+      addEntry(h,"Snap A",540,600);
+      return settle(h).then(function(){
+        h.snapshot("delete Snap A");
+        var stack=JSON.parse(localStorage.getItem("hours-ledger-selftest-undo-v1"));
+        var top=JSON.parse(stack[stack.length-1].s);
+        check("STEP0 snapshot() stores the WHOLE state, including deletedEntries and deletedCategories",
+          top.deletedEntries&&top.deletedCategories&&top.entries,
+          "top-level keys in the snapshot: "+Object.keys(top).join(","));
+        var id=h.entriesFor(DATE)[0].id;
+        h.removeEntry(id);
+        check("STEP0 removeEntry() while connected writes a tombstone",!!h.getState().deletedEntries[id],
+          JSON.stringify(Object.keys(h.getState().deletedEntries)));
+        h.undo();
+        check("STEP0 undo of a delete restores the live entry AND drops the tombstone with it (snapshot predates the tombstone)",
+          h.entriesFor(DATE).length===1&&!h.getState().deletedEntries[id],
+          "entries="+localList(h)+" tombstones="+JSON.stringify(Object.keys(h.getState().deletedEntries)));
+        return settle(h); /* undo now schedules its own sync - let it land before the next scenario resets the shared fake Drive */
+      });
+    })
+
+    /* ================= STEP 2: the regression tests ================= */
+
+    /* ---- 2a. undo-create, then the next sync. Same mechanism as STEP0b,
+       but the "next sync" is just a plain sync (what a reload's catch-up
+       sync does) rather than one triggered by creating a second entry. */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H;
+      addEntry(h,"Ghost A",540,600);
+      return waitFor(function(){ return remoteHas(h,"Ghost A"); },4000).then(function(){ return settle(h); }).then(function(){
+        h.undo();
+        h.scheduleDriveSync();
+        return settle(h);
+      }).then(function(){
+        check("UNDO-CREATE then sync: the undone entry stays gone (not re-added from Drive)",
+          h.entriesFor(DATE).length===0,"local="+localList(h)+" remote="+remoteList(h));
+      });
+    })
+
+    /* ---- 2a-control. undo BEFORE the debounced sync ever fires: the entry
+       never reached Drive, so there is nothing to resurrect. Expected to
+       pass today - it's why the bug needs the create to have synced first. */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H;
+      addEntry(h,"Never synced A",540,600);
+      h.undo(); /* synchronous - well inside the 50ms TEST_MODE debounce */
+      addEntry(h,"Real B",840,900);
+      return waitFor(function(){ return remoteHas(h,"Real B"); },4000).then(function(){ return settle(h); }).then(function(){
+        check("CONTROL undo-create BEFORE the first sync fires: no ghost (the entry never reached Drive)",
+          h.entriesFor(DATE).length===1&&h.entriesFor(DATE)[0].label==="Real B","local="+localList(h)+" remote="+remoteList(h));
+      });
+    })
+
+    /* ---- 2b. undo-edit. An edit is removeEntry(old id) + push(new id), so
+       it syncs as tombstone(old) + new live record. Undo restores the old
+       record and drops the new one with no tombstone for it. */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H;
+      addEntry(h,"Orig",540,600);
+      return waitFor(function(){ return remoteHas(h,"Orig"); },4000).then(function(){ return settle(h); }).then(function(){
+        var oldId=h.entriesFor(DATE)[0].id;
+        h.snapshot("edit entry"); h.putEntry(DATE,"Edited",catId(h),540,630,oldId); h.persist(); /* saveSheet's edit path */
+        return waitFor(function(){ return remoteHas(h,"Edited"); },4000);
+      }).then(function(){ return settle(h); }).then(function(){
+        h.undo();
+        h.scheduleDriveSync();
+        return settle(h);
+      }).then(function(){
+        var l=h.entriesFor(DATE);
+        check("UNDO-EDIT then sync: exactly the original entry is back - the edited copy does not return alongside it",
+          l.length===1&&l[0].label==="Orig","local="+localList(h)+" remote="+remoteList(h));
+      });
+    })
+
+    /* ---- 2c. undo-delete, ONE device. Expected to pass today, by
+       accident: the pushed tombstone carries this device's own id, so
+       mergeRecords case 3 ("remote is my own stale echo -> trust local")
+       lets the restored live record win. */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H;
+      addEntry(h,"Del E",540,600);
+      return waitFor(function(){ return remoteHas(h,"Del E"); },4000).then(function(){ return settle(h); }).then(function(){
+        var id=h.entriesFor(DATE)[0].id;
+        h.snapshot("delete Del E"); h.removeEntry(id); h.persist(); /* fDelete's path */
+        return waitFor(function(){ var r=h.fakeDriveRead(); return r.entries.some(function(e){ return e.id===id&&e.deleted; }); },4000);
+      }).then(function(){ return settle(h); }).then(function(){
+        h.undo();
+        h.scheduleDriveSync();
+        return settle(h);
+      }).then(function(){
+        check("UNDO-DELETE then sync, single device: the entry stays restored",
+          h.entriesFor(DATE).length===1&&remoteHas(h,"Del E"),"local="+localList(h)+" remote="+remoteList(h));
+      });
+    })
+
+    /* ---- 2c-two. undo-delete with a SECOND device that saw the delete
+       before the undo. Device B is driven through the real syncEngine()
+       with its own device id against the same fake Drive file (the fake
+       Drive is one shared blob, so B needs no sandbox of its own). */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H;
+      var blankB=JSON.parse(JSON.stringify(h.getState()));
+      function syncB(stateB){
+        var eng=h.syncEngine(stateB,h.fakeDriveRead(),"dev-B");
+        h.fakeDriveWrite(eng.toPush);
+        return eng.newLocalState;
+      }
+      function bList(st){ return "["+((st.entries[DATE]||[]).map(fmt).join(", "))+"]"; }
+      var stateB,id;
+      addEntry(h,"Two-dev E",540,600);
+      return waitFor(function(){ return remoteHas(h,"Two-dev E"); },4000).then(function(){ return settle(h); }).then(function(){
+        /* back-date the entry's stamp by 10 minutes on both A and Drive: a
+           real delete happens minutes after the create, and mergeRecords
+           deliberately never deletes on a guess inside a 5s window */
+        id=h.entriesFor(DATE)[0].id;
+        var stamp=new Date(Date.now()-600000).toISOString();
+        h.findEntry(id).e.updatedAt=stamp;
+        var r=h.fakeDriveRead(); r.entries.forEach(function(x){ if(x.id===id) x.updatedAt=stamp; }); h.fakeDriveWrite(r);
+        stateB=h.syncEngine(blankB,h.fakeDriveRead(),"dev-B").newLocalState; /* B pulls the entry */
+        h.snapshot("delete Two-dev E"); h.removeEntry(id); h.persist();
+        return waitFor(function(){ var r2=h.fakeDriveRead(); return r2.entries.some(function(e){ return e.id===id&&e.deleted; }); },4000);
+      }).then(function(){ return settle(h); }).then(function(){
+        stateB=syncB(stateB); /* B sees A's delete */
+        check("setup: device B applied A's delete",!(stateB.entries[DATE]&&stateB.entries[DATE].length),bList(stateB));
+        h.undo(); /* A undoes the delete... */
+        h.scheduleDriveSync();
+        return settle(h);
+      }).then(function(){
+        stateB=syncB(stateB); /* ...and B syncs again */
+        check("UNDO-DELETE then sync, two devices: the undo reaches the other device (it sees the entry again)",
+          !!stateB.entries[DATE]&&stateB.entries[DATE].length===1,
+          "A="+localList(h)+" B="+bList(stateB)+" remote="+remoteList(h));
+      });
+    })
+
+    /* ================= STEP 4: tests required for the forward-edit fix ================= */
+
+    /* ---- (a) undo, then reload with NO sync in between. The raw storage
+       read is exactly what a reload parses before any sync can run. */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H,aId;
+      addEntry(h,"Reload A",540,600);
+      return waitFor(function(){ return remoteHas(h,"Reload A"); },4000).then(function(){ return settle(h); }).then(function(){
+        aId=h.entriesFor(DATE)[0].id;
+        h.undo();
+        var raw=JSON.parse(localStorage.getItem("hours-ledger-selftest-v2"));
+        check("(a) undo-create is written to storage immediately (what a reload would read, before any sync)",
+          !(raw.entries[DATE]&&raw.entries[DATE].length),"stored entries on "+DATE+": "+JSON.stringify(raw.entries[DATE]||[]));
+        check("(a) ...and storage now carries a tombstone for it, so the reload's catch-up sync cannot read the absence as 'new on Drive'",
+          !!(raw.deletedEntries&&raw.deletedEntries[aId]),"stored tombstones: "+JSON.stringify(Object.keys(raw.deletedEntries||{})));
+        return killSandboxAndOpenFresh(f.d); /* tab closed straight after the undo: the debounce dies with it */
+      }).then(function(fresh){
+        var h2=fresh.H;
+        return delay(300).then(function(){ return settle(h2); }).then(function(){
+          check("(a) undo-create then reload: the entry stays gone after the reload's catch-up sync",
+            h2.entriesFor(DATE).length===0,"local="+localList(h2)+" remote="+remoteList(h2));
+        });
+      });
+    })
+
+    /* ---- (b)/(c) another device edits E; this device then undoes an
+       UNRELATED action. (b) back-dates E's creation stamp; (c) uses a real
+       3s clock gap and no back-dating, so nothing leans on stamp spacing. */
+    .then(function(){ return otherDeviceEditScenario(true); })
+    .then(function(){ return otherDeviceEditScenario(false); })
+
+    /* ---- (d) undo stack snapshot that predates sync fields, restored
+       after connecting Drive. Stack: [before add X (empty), before add Y,
+       before Drive connect]; every one of them has no updatedAt, no
+       deletedEntries. */
+    .then(function(){ return freshSandbox(true); })
+    .then(function(f){
+      var h=f.H,d2=f.d,threw=null;
+      addEntry(h,"Pre-sync X",540,600);
+      addEntry(h,"Pre-sync Y",840,900);
+      d2.getElementById("connectDrive").click();
+      return waitFor(function(){ return d2.getElementById("connectDrive").textContent==="Drive: synced"; },4000).then(function(){
+        try{ h.undo(); }catch(e){ threw=e; } /* pops "before Drive connect": a snapshot with no sync fields */
+        check("(d) undo to a pre-sync-fields snapshot after connecting does not throw",!threw,String(threw));
+        return settle(h);
+      }).then(function(){
+        d2.getElementById("connectDrive").click(); /* reconnect and merge against what the first connect pushed */
+        return waitFor(function(){ return d2.getElementById("connectDrive").textContent==="Drive: synced"; },4000);
+      }).then(function(){ return settle(h); }).then(function(){
+        check("(d) ...and after reconnecting both entries exist exactly once (no ghost, no duplicate)",
+          h.entriesFor(DATE).length===2,"local="+localList(h)+" remote="+remoteList(h));
+        /* second undo walks past the snapshot where X did not exist yet */
+        try{ h.undo(); h.undo(); }catch(e){ threw=e; }
+        check("(d) undoing further back through pre-sync snapshots does not throw",!threw,String(threw));
+        return settle(h);
+      });
+    })
+
+    /* ---- (e) redo of undo-create, then sync */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H;
+      addEntry(h,"Redo A",540,600);
+      return waitFor(function(){ return remoteHas(h,"Redo A"); },4000).then(function(){ return settle(h); }).then(function(){
+        h.undo(); h.scheduleDriveSync(); /* explicit schedule: harmless once undo pushes by itself */
+        return settle(h);
+      }).then(function(){
+        h.redo(); h.scheduleDriveSync();
+        return settle(h);
+      }).then(function(){
+        var after1="local="+localList(h)+" remote="+remoteList(h);
+        h.scheduleDriveSync();
+        return settle(h).then(function(){
+          check("(e) redo of undo-create, then sync: the entry returns and stays",
+            h.entriesFor(DATE).length===1&&remoteHas(h,"Redo A")&&remoteList(h)===localList(h),
+            after1+" | after one more sync: local="+localList(h)+" remote="+remoteList(h));
+        });
+      });
+    })
+
+    /* ================= STEP 5: one scenario per guard, plus an old undo stack ================= */
+
+    /* ---- tombstone guard: a record ANOTHER device created after this
+       device's snapshot must not be tombstoned by an undo of something
+       unrelated. (Passes pre-fix too - a wholesale restore drops G locally
+       and the merge re-adds it from Drive - so it only guards the new code.) */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H;
+      addEntry(h,"Mine E",540,600);
+      return waitFor(function(){ return remoteHas(h,"Mine E"); },4000).then(function(){ return settle(h); }).then(function(){
+        addEntry(h,"Unrelated F",840,900);
+        return waitFor(function(){ return remoteHas(h,"Unrelated F"); },4000);
+      }).then(function(){ return settle(h); }).then(function(){
+        var r=h.fakeDriveRead();
+        /* G is stamped 10 minutes ago, not now: a tombstone this device wrongly wrote for it would otherwise land
+           inside mergeRecords' 5s "never delete on a guess" window and be masked, so a removed guard would not show */
+        r.entries.push({id:"g-from-B",date:DATE,label:"B created G",cat:null,start:1000,end:1060,
+          updatedAt:new Date(Date.now()-600000).toISOString(),updatedBy:"dev-B",deleted:false,deletedAt:null});
+        h.fakeDriveWrite(r);
+        h.scheduleDriveSync();
+        return settle(h);
+      }).then(function(){
+        check("GUARD-TOMBSTONE setup: this device pulled G, created by B",h.entriesFor(DATE).some(function(e){ return e.label==="B created G"; }),localList(h));
+        h.undo(); /* undoes "add Unrelated F" */
+        h.scheduleDriveSync();
+        return settle(h);
+      }).then(function(){
+        var labels=h.entriesFor(DATE).map(function(e){ return e.label; }).sort().join("|");
+        check("GUARD-TOMBSTONE: undoing an unrelated action removes F but does not tombstone G (created by another device)",
+          labels==="B created G|Mine E"&&remoteHas(h,"B created G"),"local="+localList(h)+" remote="+remoteList(h));
+      });
+    })
+
+    /* ---- revive guard: a record ANOTHER device deleted after this device's
+       snapshot must not be revived by an undo of something unrelated. */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H,hId;
+      addEntry(h,"H deleted by B",540,600);
+      return waitFor(function(){ return remoteHas(h,"H deleted by B"); },4000).then(function(){ return settle(h); }).then(function(){
+        hId=h.entriesFor(DATE)[0].id;
+        var stamp=new Date(Date.now()-600000).toISOString(); /* real deletes come minutes later; inside 5s mergeRecords never deletes on a guess */
+        h.findEntry(hId).e.updatedAt=stamp;
+        var r=h.fakeDriveRead(); r.entries.forEach(function(x){ if(x.id===hId) x.updatedAt=stamp; }); h.fakeDriveWrite(r);
+        addEntry(h,"Unrelated K",840,900); /* this snapshot still has H live */
+        return waitFor(function(){ return remoteHas(h,"Unrelated K"); },4000);
+      }).then(function(){ return settle(h); }).then(function(){
+        var now=new Date().toISOString(),r=h.fakeDriveRead();
+        r.entries.forEach(function(x){ if(x.id===hId){ x.label=null; x.cat=null; x.start=null; x.end=null; x.deleted=true; x.deletedAt=now; x.updatedAt=now; x.updatedBy="dev-B"; } });
+        h.fakeDriveWrite(r);
+        h.scheduleDriveSync();
+        return settle(h);
+      }).then(function(){
+        check("GUARD-REVIVE setup: B's delete of H reached this device",!h.entriesFor(DATE).some(function(e){ return e.id===hId; }),localList(h));
+        h.undo(); /* undoes "add Unrelated K"; the snapshot it restores still has H */
+        h.scheduleDriveSync();
+        return settle(h);
+      }).then(function(){
+        check("GUARD-REVIVE: undoing an unrelated action does not bring back an entry another device deleted",
+          h.entriesFor(DATE).length===0&&remoteList(h)==="[]","local="+localList(h)+" remote="+remoteList(h));
+      });
+    })
+
+    /* ---- an OLD undo stack on a connected device. The stack is built by
+       the real snapshot() calls (its shape is untouched by the fix), every
+       snapshot carries sync fields, and it is restored the way a real one is:
+       a page reload re-reads it from storage. It is older than another
+       device's later edit of E1, creation of G and deletion of E2. */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H;
+      function idOf(hh,label){ var l=hh.entriesFor(DATE).filter(function(e){ return e.label===label; }); return l.length?l[0].id:null; }
+      function labelsOf(hh){ return hh.entriesFor(DATE).map(function(e){ return e.label; }).sort().join("|"); }
+      addEntry(h,"E1",540,600);
+      return waitFor(function(){ return remoteHas(h,"E1"); },4000).then(function(){ return settle(h); }).then(function(){
+        addEntry(h,"E2",660,720); return waitFor(function(){ return remoteHas(h,"E2"); },4000);
+      }).then(function(){ return settle(h); }).then(function(){
+        addEntry(h,"E3",780,840); return waitFor(function(){ return remoteHas(h,"E3"); },4000);
+      }).then(function(){ return settle(h); }).then(function(){
+        var e1=idOf(h,"E1"),e2=idOf(h,"E2"),stamp=new Date(Date.now()-600000).toISOString();
+        [e1,e2].forEach(function(id){ h.findEntry(id).e.updatedAt=stamp; });
+        var r=h.fakeDriveRead(); r.entries.forEach(function(x){ if(x.id===e1||x.id===e2) x.updatedAt=stamp; }); h.fakeDriveWrite(r);
+        h.persist();
+        return settle(h).then(function(){
+          var now=new Date().toISOString(),r2=h.fakeDriveRead();
+          r2.entries.forEach(function(x){
+            if(x.id===e1){ x.label="E1 by B"; x.updatedAt=now; x.updatedBy="dev-B"; }
+            if(x.id===e2){ x.label=null; x.cat=null; x.start=null; x.end=null; x.deleted=true; x.deletedAt=now; x.updatedAt=now; x.updatedBy="dev-B"; }
+          });
+          r2.entries.push({id:"g-from-B2",date:DATE,label:"G by B",cat:null,start:1000,end:1060,updatedAt:stamp,updatedBy:"dev-B",deleted:false,deletedAt:null}); /* back-dated, see the tombstone-guard scenario */
+          h.fakeDriveWrite(r2);
+          h.scheduleDriveSync();
+          return settle(h);
+        });
+      }).then(function(){
+        check("OLD-STACK setup: this device now has B's edit of E1, B's G, B's delete of E2, and its own E3",
+          labelsOf(h)==="E1 by B|E3|G by B",localList(h));
+        return killSandboxAndOpenFresh(f.d); /* the undo stack is restored from storage, as after a real reload */
+      }).then(function(fresh){
+        var hh=fresh.H,stack=JSON.parse(localStorage.getItem("hours-ledger-selftest-undo-v1")||"[]");
+        check("OLD-STACK setup: the reloaded page restored a 4-deep stack (\"before Drive connect\" has no sync fields; the three adds were taken before B's edits)",
+          stack.length===4&&stack[0].d==="before Drive connect"&&!/"updatedAt"/.test(stack[0].s),
+          "stack="+stack.length+" descriptions="+JSON.stringify(stack.map(function(x){ return x.d; })));
+        function intact(step){
+          var l=hh.entriesFor(DATE),labels=labelsOf(hh);
+          var noE2=!l.some(function(e){ return e.label==="E2"; })&&remoteList(hh).indexOf("E2")===-1;
+          var editKept=l.some(function(e){ return e.label==="E1 by B"; })&&!l.some(function(e){ return e.label==="E1"; });
+          var gKept=l.some(function(e){ return e.label==="G by B"; });
+          check("OLD-STACK undo #"+step+": no ghost (E2 stays deleted), B's edit of E1 and B's G both intact",
+            noE2&&editKept&&gKept,"local="+localList(hh)+" remote="+remoteList(hh));
+        }
+        return delay(300).then(function(){ return settle(hh); }).then(function(){
+          var p=Promise.resolve();
+          [1,2,3,4].forEach(function(n){ /* #4 pops "before Drive connect": undoes the connect itself (driveConnected goes false), by design */
+            p=p.then(function(){ hh.undo(); hh.scheduleDriveSync(); return settle(hh); }).then(function(){ intact(n); });
+          });
+          return p;
+        }).then(function(){
+          check("OLD-STACK after undoing every step: E3 (this device's own) is gone and stays gone; only B's work remains",
+            labelsOf(hh)==="E1 by B|G by B"&&remoteList(hh)===localList(hh),"local="+localList(hh)+" remote="+remoteList(hh));
+        });
+      });
+    })
     .then(function(){ return results; });
+
+  function otherDeviceEditScenario(backdate){
+    var tag=backdate?"(b) back-dated":"(c) real 3s clock gap";
+    return connectedSandbox().then(function(f){
+      var h=f.H;
+      addEntry(h,"Mine E",540,600);
+      return waitFor(function(){ return remoteHas(h,"Mine E"); },4000).then(function(){ return settle(h); }).then(function(){
+        if(backdate){
+          var id=h.entriesFor(DATE)[0].id,stamp=new Date(Date.now()-600000).toISOString();
+          h.findEntry(id).e.updatedAt=stamp;
+          var r=h.fakeDriveRead(); r.entries.forEach(function(x){ if(x.id===id) x.updatedAt=stamp; }); h.fakeDriveWrite(r);
+          return null;
+        }
+        return delay(3000);
+      }).then(function(){
+        addEntry(h,"Unrelated F",840,900);
+        return waitFor(function(){ return remoteHas(h,"Unrelated F"); },4000);
+      }).then(function(){ return settle(h); }).then(function(){
+        /* device B edits E on Drive, stamped now, by a different device */
+        var r=h.fakeDriveRead();
+        r.entries.forEach(function(x){ if(x.label==="Mine E"){ x.label="B edit"; x.end=660; x.updatedAt=new Date().toISOString(); x.updatedBy="dev-B"; } });
+        h.fakeDriveWrite(r);
+        h.scheduleDriveSync();
+        return settle(h);
+      }).then(function(){
+        check(tag+" setup: this device pulled B's edit of E",h.entriesFor(DATE).some(function(e){ return e.label==="B edit"; }),localList(h));
+        h.undo(); /* undoes "add Unrelated F" - nothing to do with E */
+        h.scheduleDriveSync(); /* harmless once undo pushes by itself */
+        return settle(h);
+      }).then(function(){
+        var l=h.entriesFor(DATE);
+        check(tag+": undoing an unrelated action keeps B's edit of E and removes only F",
+          l.length===1&&l[0].label==="B edit"&&l[0].end===660&&remoteList(h)==="[B edit 540-660]",
+          "local="+localList(h)+" remote="+remoteList(h));
+      });
+    });
+  }
 }
 })();
 </script>
