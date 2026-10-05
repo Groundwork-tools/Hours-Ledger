@@ -2216,8 +2216,14 @@ dashboard styling.
     storage, so the *next* scenario's page loaded as already connected
     (found because the malformed-snapshot test failed even with the correct
     rule); and an always-true assertion I had left in was removed rather
-    than kept as a green row. **Not covered:** real devices and real Drive;
-    none of the clear-on-connect, the trim, or the entry guard has been seen
-    on a real device.
+    than kept as a green row.
+    **Real-device check, what actually happened (as reported by Sebastian,
+    before the merge):** the **laptop** ran this branch — fresh incognito
+    profile, an entry made before connecting, then connect, then Ctrl+Z, which
+    said "Nothing left to undo" (the trim working as designed); and a
+    create-undo-reload sequence held. The **phone ran the old live code**, not
+    this branch, so **phone-side undo on the new code is NOT yet verified**.
+    Still not covered: the entry guard and the import → reconnect → Ctrl+Z
+    path on a real device, and real Drive beyond that laptop run.
 
 Feature creep is the known failure mode of this project.
