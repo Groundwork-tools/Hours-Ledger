@@ -1179,14 +1179,14 @@ function refreshHint(){
 }
 
 /* ---------------- Drive connect flow & ongoing sync ---------------- */
-/* driveConnected lives INSIDE state (not a separate key like DEVICE_ID) on
-   purpose: undoing "before Drive connect" - the snapshot connectDrive()
-   takes as its very first action - should revert the whole operation,
-   connection status included, not leave a device half-connected with data
-   rolled back underneath it. It never gets pushed to Drive itself (the
-   payload syncEngine builds only ever contains categories/entries/verdicts/
-   closeouts); it just rides along through persist()/snapshot()/undo() like
-   any other field. */
+/* driveConnected lives INSIDE state (not a separate key like DEVICE_ID), so
+   it rides along through persist()/snapshot() - but undo/redo deliberately
+   do NOT restore it (applyState keeps the current value): it is device
+   state, not ledger state. This reverses the earlier design, where undoing
+   "before Drive connect" (the snapshot connectDrive() takes first) was meant
+   to disconnect; in practice that left the button saying "synced" with sync
+   off. It never gets pushed to Drive itself (the payload syncEngine builds
+   only ever contains categories/entries/verdicts/closeouts). */
 var driveSyncTimer=null,driveSyncInFlight=false,driveSyncApplyingRemote=false;
 /* driveSyncApplyingRemote is only ever set true right before persist(), set
    false right after - both call sites below wrap that in try/finally so a
@@ -1482,9 +1482,53 @@ function undoEntriesAsForwardEdits(snap,cur){
   });
   return {entries:entries,deletedEntries:tombs};
 }
+/* Undo/redo never change driveConnected: it is device state (is THIS device
+   syncing), not ledger state. Restoring it from a snapshot used to turn sync
+   off silently while the button and status line kept saying "synced" - and,
+   from the other side, undoing an import (whose snapshot says true) would
+   resume a sync the import deliberately turned off. So the current value
+   always wins, in both directions; a device that never had the key doesn't
+   get one. Settings stay as the snapshot has them (a display preference,
+   nothing silent depends on it).
+
+   The sync containers are carried the same way, but only the ones the
+   snapshot LACKS (a pre-connect snapshot predates them): without them the
+   gated writes (setVerdict, doDeleteCategory, the category recolor stamp)
+   stop writing tombstones, and a delete then reads to the next merge as an
+   absence - resurrected from Drive (hard rule 7). A snapshot that already
+   has a container keeps its own (known open gap: that can restore an older
+   tombstone set - see the backlog). A carried tombstone ALWAYS beats a
+   restored live record with the same key: categories and verdicts have no
+   forward-edit undo path, so reviving one would mean an old stamp on it and
+   no way to tell whose delete it overrides. Close-outs have no tombstones,
+   so nothing can collide there. Entries are untouched by this - they keep
+   undoEntriesAsForwardEdits's own guards. */
+function carrySyncContainers(prev,snap){
+  if(!prev) return;
+  if(prev.deletedCategories&&!snap.deletedCategories){
+    snap.deletedCategories=prev.deletedCategories;
+    snap.categories=(snap.categories||[]).filter(function(c){ return !snap.deletedCategories[c.id]; });
+  }
+  if(prev.verdictMeta&&!snap.verdictMeta) snap.verdictMeta=prev.verdictMeta;
+  if(prev.deletedVerdicts&&!snap.deletedVerdicts){
+    snap.deletedVerdicts=prev.deletedVerdicts;
+    Object.keys(snap.deletedVerdicts).forEach(function(key){
+      var sep=key.indexOf("|"),weekIso=key.slice(0,sep),catId=key.slice(sep+1);
+      var wv=snap.weeklyVerdicts&&snap.weeklyVerdicts[weekIso];
+      if(wv&&(catId in wv)){
+        delete wv[catId];
+        if(!Object.keys(wv).length) delete snap.weeklyVerdicts[weekIso];
+        if(snap.verdictMeta) delete snap.verdictMeta[key];
+      }
+    });
+  }
+}
 function applyState(json){
   var prev=state;
   state=JSON.parse(json);
+  if(prev&&("driveConnected" in prev)) state.driveConnected=prev.driveConnected;
+  else delete state.driveConnected;
+  carrySyncContainers(prev,state);
   if(prev&&prev.deletedEntries){
     var fwd=undoEntriesAsForwardEdits(state,prev);
     state.entries=fwd.entries;
@@ -3524,6 +3568,7 @@ if(TEST_MODE){
     runDriveSync:runDriveSync,
     scheduleDriveSync:scheduleDriveSync,
     reassignCategoryEntries:reassignCategoryEntries,
+    doDeleteCategory:doDeleteCategory,
     isDriveSyncInFlight:function(){ return driveSyncInFlight; },
     setDriveNeedsReconnect:function(v){ driveNeedsReconnect=v; },
     getDriveNeedsReconnect:function(){ return driveNeedsReconnect; },

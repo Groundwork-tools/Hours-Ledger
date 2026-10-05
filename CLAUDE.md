@@ -423,12 +423,16 @@ on purpose.
   (category name, surviving id, merged-away ids, entries reassigned) so a
   total that looks wrong can be traced without a UI.
 - **`driveConnected` (boolean) lives inside `state` itself, not a separate
-  key like `DEVICE_ID`** — so undoing "before Drive connect" (the snapshot
-  `connectDrive()` takes as its first action) reverts the whole operation,
-  connection status included, rather than leaving a device half-connected
-  with its data rolled back underneath it. It never travels to Drive; the
-  payload `syncEngine()` builds only ever contains categories, entries,
-  verdicts, and close-outs.
+  key like `DEVICE_ID`** — so it is saved and snapshotted with everything
+  else, **but undo/redo never restore it**: `applyState()` keeps the current
+  device's value, in both directions (decision 2026-10-05, see backlog item
+  22's follow-up). It is device state — "is *this* device syncing" — not
+  ledger state. The earlier design had undoing "before Drive connect" (the
+  snapshot `connectDrive()` takes first) disconnect the device, on the
+  theory that it should revert the whole operation; in practice it left the
+  button saying "Drive: synced" with sync silently off. It never travels to
+  Drive; the payload `syncEngine()` builds only ever contains categories,
+  entries, verdicts, and close-outs.
   An imported file's `driveConnected` is deliberately never honored on
   import, even if the file says `true` — see the import handler in
   `app.js` — so opening an arbitrary backup can never silently resume a
@@ -1958,41 +1962,79 @@ dashboard styling.
     covered: real devices, real Drive, and the interplay with an undo stack
     left over from before this fix on a connected device.
 
-    **Follow-up task: undo/redo must never change `driveConnected`. What
-    is known going in (observed 2026-10-05 in test mode against the fake
-    Drive, not on a real device; item 22's fix did not touch this):**
-    - Cause: `applyState()` replaces `state` with the snapshot, so
-      `driveConnected` comes back as whatever the snapshot had. Undoing the
-      "before Drive connect" snapshot (the first item on any connected
-      device's stack, taken by `connectDrive()`) therefore removes the key.
-      That was deliberate when written (see the comment above
-      `driveSyncTimer` and the data model's `driveConnected` entry, both of
-      which the follow-up will have to reword), and it is now the thing to
-      reverse. `applyState()` is only called from `undo()`/`redo()`.
-    - What the user sees today: `driveConnected` goes undefined, but the
-      Drive button still reads "Drive: synced" and the status line "Synced
-      with Drive" — both false, and nothing updates them (`applyState()`
-      never touches the button; `importBackupJson` is the only place that
-      does, for the same shape of problem). Edits made afterwards are not
-      pushed. Sync does NOT resume by itself. A reload shows "Connect
-      Drive", and reconnecting is one click plus the export-a-backup
-      confirm. Redo restores `driveConnected: true` and, since `applyState()`
-      now calls `persist()`, schedules a sync again.
-    - Not obvious, reasoned from the code and not tested: the snapshot also
-      lacks `deletedCategories`, `verdictMeta` and `deletedVerdicts` (they
-      only exist after the first sync), and the entries forward-edit keeps
-      only `deletedEntries` from the current state. So if the follow-up
-      simply keeps `driveConnected` true while restoring that snapshot, the
-      device ends up connected with the category/verdict sync containers
-      stripped — the half-connected state the old comment warned about,
-      from the other direction. Decide whether those containers (sync
-      metadata, not user data) should also be carried over from the current
-      state; `migrateSyncFields` recreates them lazily but would stamp
-      anything it finds as new.
-    - Tests: the `OLD-STACK` scenario's undo #4 is exactly this case and
-      currently asserts only that entries stay intact, not that Drive stays
-      connected. It will need an assertion for it. Scenarios that end on an
-      undo must `settle()` before the next one starts, because undo now
-      schedules its own sync into the shared fake Drive.
+    **Follow-up, built on `fix/undo-keeps-connection` (2026-10-05, not yet
+    merged): undo/redo never change `driveConnected`.**
+    Observed first in test mode against the fake Drive: connect, undo
+    through the "before Drive connect" snapshot, and `driveConnected`
+    became undefined while the button still read "Drive: synced" and the
+    status line "Synced with Drive". Sync off, new edits not pushed,
+    nothing on screen saying so — a silent not-syncing state.
+
+    **Decisions (Sebastian, 2026-10-05), each with its reason:**
+    1. **`applyState()` keeps the current `driveConnected`, both
+       directions.** It is device state, not ledger state. This *reverses*
+       the earlier documented behaviour (undoing "before Drive connect"
+       disconnects). Reason: a Ctrl+Z that silently turns sync off while the
+       label says synced costs more than a surprising non-revert. The other
+       direction matters too: a snapshot taken before an import says
+       `true`, and `importBackupJson` deliberately forces `false`; copying
+       the snapshot's value would let undo silently resume a sync the
+       import turned off. A device that never had the key doesn't get one.
+    2. **Sync containers the snapshot lacks are carried over from the
+       current state** (`carrySyncContainers()`): `deletedCategories`,
+       `deletedVerdicts`, `verdictMeta`. A pre-connect snapshot predates
+       them, and several writes are *gated on the container existing*
+       (`setVerdict`, `doDeleteCategory`, the category-recolor stamp): with
+       them stripped, a delete writes no tombstone, reads to the next merge
+       as an absence, and Drive resurrects the record (hard rule 7). Only
+       missing containers are carried; a snapshot's own container is left
+       alone. **Collision rule: a carried tombstone always wins over a
+       restored live category or verdict with the same key** — the live
+       record is dropped, no revive. Categories and verdicts have no
+       forward-edit undo path yet, and a revive would put an old stamp on
+       the record with no way to tell whose delete it overrides. Close-outs
+       have no tombstones, so nothing can collide. Entries are untouched:
+       they keep `undoEntriesAsForwardEdits()`'s guards.
+    3. **`settings` stay as the snapshot has them** (display preference;
+       nothing silent depends on it, and it never syncs).
+    4. **Left open on purpose, both the same class as the known category/
+       verdict/close-out undo gap above:**
+       - *The stamping gap.* A restored category or close-out from a
+         pre-connect snapshot has no `updatedAt`; the next sync stamps it
+         "now", so a stale name/colour can win last-write-wins over another
+         device's earlier rename. (Reconnecting after the old disconnect-on-
+         undo had the same exposure.)
+       - *A snapshot that already contains the containers* (taken after the
+         first sync) restores its own, older tombstone set, rather than the
+         current one.
+
+    **Changed expectation, said plainly:** the `OLD-STACK` scenario's undo
+    #4 pops "before Drive connect" and used to be commented "goes false, by
+    design". It now asserts Drive stays connected after every undo. That
+    changed because the decision above changed, not because a check went
+    green.
+
+    **Tests** (`selftest.html`, `runUndoKeepsConnectionTests()` plus the
+    `OLD-STACK` assertion), written first. Against the unchanged
+    `applyState()` (with only a test hook added to `app.js`): 29 failing /
+    105 in the two undo blocks, e.g. `driveConnected` observed `undefined`
+    after undoing the connect, "Drive: synced" shown while it was
+    undefined, the import undo observed `true`, containers `undefined`,
+    both category collisions and the verdict collision observed the record
+    still live. With the fix: 0 failing / 105; full `selftest.html` 0
+    failing / 474. Passing even before the fix, so regression guards rather
+    than fail-first: redo after a plain undo (the discriminating redo case
+    is the deliberate-disconnect one), Pre keeping its sync fields.
+    **Mutation-checked**, each failing alone and passing restored: removing
+    the `driveConnected` guard (23 failing), removing the container
+    carry-over (9), and flipping the collision rule for this-device
+    tombstones only (2) and other-device tombstones only (2; the other
+    device's records are back-dated so the 5s merge window can't mask it).
+    Two test-design notes worth keeping: the container checks must run
+    *before* `settle()` — the next sync re-creates missing containers
+    lazily via `migrateSyncFields`, which hid the gap in the first draft
+    (found by the mutation run, not by the fail-first run); and a test that
+    flips `driveConnected` directly can't assert the button, since only
+    import updates it. Not covered: real devices, real Drive.
 
 Feature creep is the known failure mode of this project.

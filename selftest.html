@@ -2970,7 +2970,8 @@ function runAsyncTests(H,d){
         });
     })
     .then(function(){ return results; })
-    .then(function(r){ return runUndoSyncTests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runUndoSyncTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runUndoKeepsConnectionTests().then(function(more){ return r.concat(more); }); });
 }
 
 /* ---------------------------------------------------------------------
@@ -3400,8 +3401,12 @@ function runUndoSyncTests(){
         }
         return delay(300).then(function(){ return settle(hh); }).then(function(){
           var p=Promise.resolve();
-          [1,2,3,4].forEach(function(n){ /* #4 pops "before Drive connect": undoes the connect itself (driveConnected goes false), by design */
-            p=p.then(function(){ hh.undo(); hh.scheduleDriveSync(); return settle(hh); }).then(function(){ intact(n); });
+          [1,2,3,4].forEach(function(n){ /* #4 pops "before Drive connect". It used to disconnect Drive "by design"; that expectation changed with the 2026-10-05 decision that undo/redo never touch driveConnected (device state, not ledger state) - not because a check went green */
+            p=p.then(function(){ hh.undo(); hh.scheduleDriveSync(); return settle(hh); }).then(function(){
+              intact(n);
+              check("OLD-STACK undo #"+n+": Drive stays connected (undo never changes driveConnected)",
+                hh.getState().driveConnected===true,String(hh.getState().driveConnected));
+            });
           });
           return p;
         }).then(function(){
@@ -3448,6 +3453,259 @@ function runUndoSyncTests(){
       });
     });
   }
+}
+/* ---------------------------------------------------------------------
+   Undo/redo must never change driveConnected (CLAUDE.md, item 22's
+   follow-up). driveConnected is device state, not ledger state: undoing
+   through the "before Drive connect" snapshot used to flip it to undefined
+   while the button still read "Drive: synced" and the status line "Synced
+   with Drive" - sync silently off, nothing on screen saying so. The same
+   restore also strips the sync containers (deletedCategories,
+   deletedVerdicts, verdictMeta) a pre-connect snapshot never had, which
+   switches off the tombstone writing that is gated on them.
+
+   Scenarios that end on an undo settle() before the next step: undo now
+   schedules its own sync into the shared fake Drive. */
+function runUndoKeepsConnectionTests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); }
+  var DATE="2026-04-20",WEEK="2026-04-20",UKEY="hours-ledger-selftest-undo-v1";
+  function remoteHas(h,label){
+    var r=h.fakeDriveRead();
+    return !!r&&r.entries.some(function(e){ return e.date===DATE&&!e.deleted&&e.label===label; });
+  }
+  function settle(h){
+    return delay(250).then(function(){ return waitFor(function(){ return !h.isDriveSyncInFlight(); },4000); }).then(function(){ return delay(50); });
+  }
+  function addEntry(h,label,start,end){
+    h.snapshot("add entry"); h.putEntry(DATE,label,h.getState().categories[0].id,start,end,null); h.persist();
+  }
+  function btn(f){ return f.d.getElementById("connectDrive").textContent; }
+  function stat(f){ return f.d.getElementById("statusText").textContent; }
+  function connectClick(f){
+    f.d.getElementById("connectDrive").click();
+    return waitFor(function(){ return btn(f)==="Drive: synced"; },4000).then(function(ok){
+      check("setup: fake Drive connect completed",ok);
+    });
+  }
+  function connectedSandbox(){
+    return freshSandbox(true).then(function(f){ return connectClick(f).then(function(){ return f; }); });
+  }
+  /* the label and the flag must agree: "synced" text is only acceptable if the device really is connected */
+  function truthful(f,tag){
+    var h=f.H,on=h.getState().driveConnected===true;
+    check(tag+": driveConnected is still true",on,String(h.getState().driveConnected));
+    check(tag+": button reads 'Drive: synced' and that is true",btn(f)==="Drive: synced"&&on,"button='"+btn(f)+"' driveConnected="+h.getState().driveConnected);
+    check(tag+": status line reads 'Synced with Drive' and that is true",stat(f)==="Synced with Drive"&&on,"status='"+stat(f)+"' driveConnected="+h.getState().driveConnected);
+  }
+  /* drop the page, keep only the first keep snapshots of the persisted undo stack, open a fresh page */
+  function reloadWithStack(f,keep){
+    f.el.parentNode.removeChild(f.el);
+    try{ localStorage.setItem(UKEY,JSON.stringify(JSON.parse(localStorage.getItem(UKEY)||"[]").slice(0,keep))); }catch(e){}
+    return freshSandbox().then(function(n){ return delay(300).then(function(){ return settle(n.H); }).then(function(){ return n; }); });
+  }
+  function remoteCat(h,id){ var r=h.fakeDriveRead(); return r&&r.categories.filter(function(c){ return c.id===id; })[0]; }
+  function hasCat(h,id){ return h.getState().categories.some(function(c){ return c.id===id; }); }
+
+  return Promise.resolve()
+    /* ---- 1: connect, undo through the connect snapshot */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      f.H.undo();
+      check("undo through 'before Drive connect': driveConnected is true immediately",f.H.getState().driveConnected===true,String(f.H.getState().driveConnected));
+      return settle(f.H).then(function(){ truthful(f,"undo through the connect snapshot"); });
+    })
+    /* ---- 2: same after a reload, undo stack restored from storage */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H;
+      addEntry(h,"E reload",540,600);
+      return waitFor(function(){ return remoteHas(h,"E reload"); },4000).then(function(){ return settle(h); })
+        .then(function(){ return reloadWithStack(f,25); })
+        .then(function(n){
+          var hh=n.H,pre=JSON.parse(localStorage.getItem(UKEY)||"[]");
+          check("reload setup: persisted stack is [before Drive connect, add entry]",pre.length===2&&pre[0].d==="before Drive connect",JSON.stringify(pre.map(function(x){ return x.d; })));
+          hh.undo(); hh.undo();
+          check("after reload, undoing every step keeps driveConnected true",hh.getState().driveConnected===true,String(hh.getState().driveConnected));
+          return settle(hh).then(function(){
+            truthful(n,"after reload + undo through connect");
+            var r=hh.fakeDriveRead();
+            check("after reload + undo through connect: the undone entry is deleted on Drive, no ghost",
+              !remoteHas(hh,"E reload")&&r.entries.some(function(e){ return e.label===null&&e.deleted; }),JSON.stringify(r.entries.map(function(e){ return e.label+":"+e.deleted; })));
+          });
+        });
+    })
+    /* ---- 3 + 4: redo keeps it, and a new edit after the undo still pushes */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H;
+      h.undo();
+      return settle(h).then(function(){
+        h.redo();
+        check("redo does not change driveConnected",h.getState().driveConnected===true,String(h.getState().driveConnected));
+        return settle(h);
+      }).then(function(){
+        h.undo();
+        addEntry(h,"After undo",840,900);
+        return waitFor(function(){ return remoteHas(h,"After undo"); },4000);
+      }).then(function(reached){
+        check("a new edit made after undoing through the connect snapshot still reaches the fake Drive",reached);
+        return settle(h);
+      });
+    })
+    /* ---- 5: pre-connect snapshot restored onto a connected device */
+    .then(function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        addEntry(h,"Pre",480,540);                       /* in the pre-connect snapshot, unstamped there */
+        return connectClick(f).then(function(){ return settle(h); }).then(function(){
+          addEntry(h,"Post",600,660);
+          return waitFor(function(){ return remoteHas(h,"Post"); },4000);
+        }).then(function(){ return settle(h); }).then(function(){
+          h.undo(); h.undo();                            /* the add of Post, then the connect */
+          /* checked BEFORE settle(): the next sync re-creates missing containers lazily (migrateSyncFields),
+             which would hide the gap - but the 2s debounce window before it is real, and edits made in it
+             must still write tombstones */
+          var s=h.getState();
+          check("restore: deletedCategories, deletedVerdicts, verdictMeta all exist right after the undo (not stripped)",
+            !!s.deletedCategories&&!!s.deletedVerdicts&&!!s.verdictMeta,
+            "deletedCategories="+typeof s.deletedCategories+" deletedVerdicts="+typeof s.deletedVerdicts+" verdictMeta="+typeof s.verdictMeta);
+          var cat=s.categories[1];
+          h.doDeleteCategory(cat,null);
+          check("right after the restore, deleting a category still writes a tombstone",!!(h.getState().deletedCategories||{})[cat.id],JSON.stringify(h.getState().deletedCategories));
+          var c0=h.getState().categories[0].id;
+          h.setVerdict(c0,WEEK,"keep"); h.setVerdict(c0,WEEK,null);
+          check("right after the restore, clearing a verdict still writes a tombstone",!!(h.getState().deletedVerdicts||{})[WEEK+"|"+c0],JSON.stringify(h.getState().deletedVerdicts));
+          return settle(h);
+        }).then(function(){
+          var l=h.entriesFor(DATE);
+          truthful(f,"pre-connect snapshot restored");
+          check("restore: Pre kept, Post gone locally",l.length===1&&l[0].label==="Pre",JSON.stringify(l.map(function(e){ return e.label; })));
+          check("restore: Pre still has sync fields (updatedAt/updatedBy)",!!(l[0]&&l[0].updatedAt&&l[0].updatedBy),JSON.stringify(l[0]));
+          check("restore: Post stays gone on Drive, no ghost",remoteHas(h,"Pre")&&!remoteHas(h,"Post"),"Pre="+remoteHas(h,"Pre")+" Post="+remoteHas(h,"Post"));
+        });
+      });
+    })
+    /* ---- 6: undoing an import must leave driveConnected false, nothing pushed */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H;
+      return settle(h).then(function(){
+        var backup={version:2,settings:{startHour:6,endHour:24},driveConnected:true,
+          categories:[{id:"imp1",name:"Imported",color:"#27864F"}],entries:{},weeklyVerdicts:{},weekCloseouts:{}};
+        h.importBackupJson(JSON.stringify(backup));
+        var before=JSON.stringify(h.fakeDriveRead());
+        check("import setup: the import disconnected Drive and says so on the button",
+          h.getState().driveConnected===false&&btn(f).toLowerCase().indexOf("disconnect")>-1,"driveConnected="+h.getState().driveConnected+" button='"+btn(f)+"'");
+        h.undo();
+        return settle(h).then(function(){
+          check("undoing the import leaves driveConnected false (undo never resumes a sync the import turned off)",h.getState().driveConnected===false,String(h.getState().driveConnected));
+          check("...and nothing was pushed to Drive",JSON.stringify(h.fakeDriveRead())===before);
+          check("...and the button does not claim 'Drive: synced'",btn(f)!=="Drive: synced"&&btn(f).toLowerCase().indexOf("disconnect")>-1,"button='"+btn(f)+"'");
+          check("...and the status line does not claim 'Synced with Drive'",stat(f)!=="Synced with Drive","status='"+stat(f)+"'");
+        });
+      });
+    })
+    /* ---- 7: deliberate disconnect, then undo and redo */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H;
+      addEntry(h,"Disc E",540,600);
+      return waitFor(function(){ return remoteHas(h,"Disc E"); },4000).then(function(){ return settle(h); }).then(function(){
+        h.getState().driveConnected=false; h.persist();
+        var before=JSON.stringify(h.fakeDriveRead());
+        h.undo();
+        check("deliberately disconnected, then undo: driveConnected stays false",h.getState().driveConnected===false,String(h.getState().driveConnected));
+        return settle(h).then(function(){
+          check("deliberately disconnected: the undo pushed nothing to Drive",JSON.stringify(h.fakeDriveRead())===before);
+          h.redo();
+          check("deliberately disconnected, then redo: driveConnected stays false",h.getState().driveConnected===false,String(h.getState().driveConnected));
+          return settle(h);
+        }).then(function(){
+          check("deliberately disconnected: the redo pushed nothing to Drive",JSON.stringify(h.fakeDriveRead())===before);
+          /* no button check here: the flag was flipped directly (there is no disconnect UI besides import, covered in 6), so nothing ever updated the button */
+        });
+      });
+    })
+    /* ---- 8: collision, this device's own tombstone vs a restored live category */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H,X=h.getState().categories[1].id,past=new Date(Date.now()-300000).toISOString();
+      h.doDeleteCategory(h.getState().categories[1],null);
+      return settle(h).then(function(){
+        var t=h.getState().deletedCategories[X]; t.updatedAt=past; t.deletedAt=past;
+        var r=h.fakeDriveRead(); r.categories.forEach(function(c){ if(c.id===X){ c.updatedAt=past; c.deletedAt=past; } }); h.fakeDriveWrite(r);
+        h.persist();
+        return settle(h);
+      }).then(function(){
+        check("this-device collision setup: X is tombstoned here by this device and on Drive",
+          !hasCat(h,X)&&!!remoteCat(h,X)&&remoteCat(h,X).deleted===true&&h.getState().deletedCategories[X].updatedBy===h.getDeviceId());
+        return reloadWithStack(f,1);
+      }).then(function(n){
+        var hh=n.H;
+        check("this-device collision setup: only the 'before Drive connect' snapshot (X live in it) is left",JSON.parse(localStorage.getItem(UKEY)).length===1);
+        hh.undo();
+        return settle(hh).then(function(){
+          check("this-device tombstone beats the restored live category: X stays deleted locally",!hasCat(hh,X)&&!!hh.getState().deletedCategories[X],"hasCat="+hasCat(hh,X));
+          check("...and X is still deleted on Drive (no revive)",!!remoteCat(hh,X)&&remoteCat(hh,X).deleted===true,JSON.stringify(remoteCat(hh,X)));
+          check("...and the device stayed connected",hh.getState().driveConnected===true);
+        });
+      });
+    })
+    /* ---- 9: collision, another device's tombstone vs a restored live category */
+    .then(function(){ return connectedSandbox(); })
+    .then(function(f){
+      var h=f.H,X=h.getState().categories[1].id,old=new Date(Date.now()-600000).toISOString(),mid=new Date(Date.now()-300000).toISOString();
+      return settle(h).then(function(){
+        h.getState().categories.forEach(function(c){ if(c.id===X){ c.updatedAt=old; } });
+        var r=h.fakeDriveRead(); r.categories.forEach(function(c){ if(c.id===X) c.updatedAt=old; }); h.fakeDriveWrite(r);
+        h.persist();
+        return settle(h);
+      }).then(function(){
+        var r=h.fakeDriveRead();
+        r.categories.forEach(function(c){ if(c.id===X){ c.name=null; c.color=null; c.deleted=true; c.deletedAt=mid; c.updatedAt=mid; c.updatedBy="dev-B"; } });
+        h.fakeDriveWrite(r); h.scheduleDriveSync();
+        return settle(h);
+      }).then(function(){
+        check("other-device collision setup: this device pulled B's (back-dated) tombstone of X",
+          !hasCat(h,X)&&!!h.getState().deletedCategories[X]&&h.getState().deletedCategories[X].updatedBy==="dev-B");
+        return reloadWithStack(f,1);
+      }).then(function(n){
+        var hh=n.H;
+        hh.undo();
+        return settle(hh).then(function(){
+          check("another device's tombstone beats the restored live category: X stays deleted locally",!hasCat(hh,X)&&!!hh.getState().deletedCategories[X],"hasCat="+hasCat(hh,X));
+          check("...and B's tombstone is still the one on Drive",!!remoteCat(hh,X)&&remoteCat(hh,X).deleted===true&&remoteCat(hh,X).updatedBy==="dev-B",JSON.stringify(remoteCat(hh,X)));
+          check("...and the device stayed connected",hh.getState().driveConnected===true);
+        });
+      });
+    })
+    /* ---- 10: collision, this device's verdict tombstone vs a restored live verdict */
+    .then(function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,c0=h.getState().categories[0].id,key=WEEK+"|"+c0;
+        h.setVerdict(c0,WEEK,"keep"); h.persist();       /* live in the pre-connect snapshot, unstamped */
+        return connectClick(f).then(function(){ return settle(h); }).then(function(){
+          h.snapshot("clear verdict"); h.setVerdict(c0,WEEK,null); h.persist();
+          return settle(h);
+        }).then(function(){
+          check("verdict collision setup: cleared here, tombstoned locally and on Drive",
+            !!h.getState().deletedVerdicts[key]&&h.getVerdict(c0,WEEK)===null&&h.fakeDriveRead().verdicts.some(function(v){ return v.id===key&&v.deleted; }));
+          return reloadWithStack(f,1);
+        }).then(function(n){
+          var hh=n.H;
+          hh.undo();
+          return settle(hh).then(function(){
+            check("verdict tombstone beats the restored live verdict: stays cleared",hh.getVerdict(c0,WEEK)===null&&!!hh.getState().deletedVerdicts[key],"verdict="+hh.getVerdict(c0,WEEK));
+            check("...and Drive still has it deleted",hh.fakeDriveRead().verdicts.some(function(v){ return v.id===key&&v.deleted; }));
+          });
+        });
+      });
+    })
+    .then(function(){ return results; });
 }
 })();
 </script>
