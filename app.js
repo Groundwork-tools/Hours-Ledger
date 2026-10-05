@@ -1383,7 +1383,7 @@ function runDriveSync(manual){
         driveSyncInFlight=false;
         document.getElementById("connectDrive").disabled=false;
         document.getElementById("connectDrive").textContent="Drive: sync failed";
-        setStatus("Drive sync failed, will retry",true);
+        setStatus("Drive sync failed — press the Drive button to sync again",true);
         return;
       }
       state=syncResult.newLocalState;
@@ -1407,7 +1407,7 @@ function runDriveSync(manual){
       driveSyncInFlight=false;
       document.getElementById("connectDrive").disabled=false;
       document.getElementById("connectDrive").textContent="Drive: sync failed";
-      setStatus("Drive sync failed, will retry",true);
+      setStatus("Drive sync failed — press the Drive button to sync again",true);
     });
   },manual);
 }

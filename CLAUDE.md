@@ -2233,4 +2233,89 @@ dashboard styling.
     - *Still not covered on a real device:* the entry guard (dead category
       id), the import → reconnect → Ctrl+Z path, and the pinned KNOWN GAP.
 
+23. **A sleep that synced late — investigated 2026-10-05, not reproduced,
+    nothing built beyond a wording fix; six open items recorded below.**
+    Reported (details uncertain, days old): a pre-logged midnight-crossing
+    sleep did not reach the laptop after its login popup and sync; it
+    appeared only after the phone was opened and the laptop reloaded. No
+    data was lost, only delayed. Which device it was logged on and what
+    the phone's Drive button said are unknown, so Hypothesis A (a push
+    failed or was deferred silently and sat pending on the originating
+    device) fits but is **not confirmed**. Hypothesis B (the two halves
+    syncing partly) is unlikely: the halves are separate records with
+    different ids and no link (`putEntry`), but `saveSheet` and
+    `syncEngine` are each synchronous, so one sync never sees half a save
+    (ran in test mode: both halves stamped identically, pushed in one
+    payload). They can diverge later (edit or delete one half on another
+    device; ran).
+
+    **Shipped:** the failed-push status said "Drive sync failed, will
+    retry" but no retry exists. It now reads "Drive sync failed — press the
+    Drive button to sync again" (both sites in `runDriveSync`).
+    `runFailedPushTests()` in `selftest.html` pins this: it failed against
+    the old wording (1 failing / 528) and passes after (0 failing / 528).
+    Its check is "if the status says retry, a retry happens", matched on the
+    word "retry" — the new wording avoids that word on purpose, so a future
+    wording that says "retry" again without a retry behind it fails the
+    test. `connectDrive`'s "it'll retry on the next change" toast was left:
+    it is true (the next change pushes everything).
+
+    **Decision (Sebastian, 2026-10-05): no retry, no pending indicator now.**
+    Reason: not reproduced, no data lost, and every later sync pushes the
+    whole state. **Trigger to revisit any of the below: a second
+    reproducible occurrence, or evidence that other people use sync.**
+
+    Open items, each with its reasoning:
+    - **(a) No retry after a failed push.** Ran: after a simulated failed
+      push, with the failure cleared and 3s of no action, the change stayed
+      off Drive; a tap anywhere did nothing; an unrelated edit pushed it.
+      Recovery needs an edit, a reload with a valid token, or the rail
+      button. Nothing is lost, only delayed.
+    - **(b) No pending-changes indicator.** Nothing records "local differs
+      from Drive"; `toPush` is rebuilt from full state each sync. A dirty
+      flag must be cleared only on a confirmed push and carry a timeout
+      (hard rule 9), or it becomes the same bug again. Options considered:
+      count near the logging UI, per-entry mark on the grid (conflicts with
+      "the grid stays plain"), moving the existing button up when not
+      synced.
+    - **(c) The Drive button and status line sit below the grid on
+      phones.** Both are inside `.rail`, which follows `main` and is one
+      column below 1000px. Read from the DOM order and CSS (ran: DOM order
+      confirmed; not seen on a device). It makes (a), (b) and (d) easy to
+      miss while logging.
+    - **(d) Expired token needs a user tap.** Read, not run: a non-
+      interactive sync with no cached token refuses (`getAccessToken`) and
+      shows "tap to resume syncing". The tap-anywhere reconnect is one-shot
+      per episode, so after a dismissed picker only the rail button works.
+      **Not testable in test mode:** `getAccessToken` returns a fake token
+      before reaching the refusal branch, so a probe of this path just
+      synced normally and proves nothing.
+    - **(e) Edit during an in-flight push is dropped (reasoned only).** If
+      the push is still running when the 2s debounce fires,
+      `runDriveSync` returns at its guard and nothing reschedules; the
+      button says "synced". Needs a push slower than 2s. No test seam
+      exists; the fake Drive resolves synchronously.
+    - **(f) Hung fetch leaves `driveSyncInFlight` true (reasoned only).**
+      The Drive fetches have no timeout, so a request that never settles
+      blocks every later sync silently until reload, with the button still
+      saying "synced". Same shape as hard rule 9; the earlier audit of
+      guard flags did not cover it. No test seam exists.
+    - **(g) The display hours range does not sync.** `settings` never leave
+      the device (by design, see item 22), so a laptop on 06:00–24:00 and a
+      phone on a full day show different slices of one midnight-split
+      sleep (the morning half is mostly hidden before 06:00). Not part of
+      the incident as far as known, but a possible confound for "I don't
+      see it".
+
+    **Ran vs. reasoned.** Ran (headless Chrome, test mode, fake Drive):
+    midnight split, ids and stamps, one-half divergence, the failed-push
+    sequence above, DOM order, the full suite. Reasoned from code only:
+    the production expired-token branch, tap-anywhere being one-shot after a
+    dismissal, (e), (f), the CSS layout on a real phone.
+    **For export analysis:** a new entry has no `updatedAt` until the first
+    sync stamps it (`migrateSyncFields`), and the stamp happens before the
+    push, so it can precede a failed push; `updatedBy` is the device that
+    first synced the record. `updatedAt` is not the time the entry was
+    logged.
+
 Feature creep is the known failure mode of this project.
