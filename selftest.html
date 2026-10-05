@@ -2971,7 +2971,8 @@ function runAsyncTests(H,d){
     })
     .then(function(){ return results; })
     .then(function(r){ return runUndoSyncTests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runUndoKeepsConnectionTests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runUndoKeepsConnectionTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runUndoStaleSnapshotTests().then(function(more){ return r.concat(more); }); });
 }
 
 /* ---------------------------------------------------------------------
@@ -3706,6 +3707,149 @@ function runUndoKeepsConnectionTests(){
       });
     })
     .then(function(){ return results; });
+}
+/* ---------------------------------------------------------------------
+   Entry restore must not put back a dead category id (CLAUDE.md item 22).
+   undoEntriesAsForwardEdits used to restore a snapshot entry's category even
+   when that category had since been tombstoned (name-dedup merged a starter
+   category away at connect, or another device deleted it), leaving the
+   entry on a category nobody can see and pushing that to Drive. The entry
+   now keeps its current category - or none, when it is being revived. */
+function runUndoStaleSnapshotTests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); }
+  var DATE="2026-04-20",UKEY="hours-ledger-selftest-undo-v1";
+  function settle(h){
+    return delay(250).then(function(){ return waitFor(function(){ return !h.isDriveSyncInFlight(); },4000); }).then(function(){ return delay(50); });
+  }
+  function btn(f){ return f.d.getElementById("connectDrive").textContent; }
+  function toast(f){ return f.d.getElementById("toastText").textContent; }
+  function stored(){ try{ return JSON.parse(localStorage.getItem(UKEY)||"[]"); }catch(e){ return null; } }
+  function descs(){ return JSON.stringify((stored()||[]).map(function(x){ return x.d; })); }
+  function addEntry(h,label,start,end,cat){
+    h.snapshot("add entry"); h.putEntry(DATE,label,cat||h.getState().categories[0].id,start,end,null); h.persist();
+  }
+  function connect(f){
+    f.d.getElementById("connectDrive").click();
+    return waitFor(function(){ return btn(f)==="Drive: synced"; },4000);
+  }
+  function remoteEntries(h){ var r=h.fakeDriveRead(); return (r&&r.entries)||[]; }
+  function deadCatOnDrive(h){
+    var r=h.fakeDriveRead(),dead={};
+    r.categories.forEach(function(c){ if(c.deleted) dead[c.id]=1; });
+    return remoteEntries(h).filter(function(e){ return !e.deleted&&e.cat&&dead[e.cat]; }).map(function(e){ return e.label+"->"+e.cat; });
+  }
+  function localDeadCat(h){
+    var s=h.getState(),live={};
+    s.categories.forEach(function(c){ live[c.id]=1; });
+    var out=[];
+    Object.keys(s.entries).forEach(function(d){ s.entries[d].forEach(function(e){ if(e.cat&&!live[e.cat]) out.push(e.label+"->"+e.cat); }); });
+    return out;
+  }
+  /* edit an entry's category the way saveSheet does: snapshot, then putEntry with replaceId (new id, old one tombstoned) */
+  function editCat(h,id,newCat){
+    var f=h.findEntry(id);
+    h.snapshot("edit entry"); h.putEntry(f.date,f.e.label,newCat,f.e.start,f.e.end,id); h.persist();
+  }
+  /* another device deletes category X on Drive, back-dated so the 5s merge window can't mask anything */
+  function otherDeviceDeletes(h,X){
+    var old=new Date(Date.now()-600000).toISOString(),mid=new Date(Date.now()-300000).toISOString();
+    h.getState().categories.forEach(function(c){ if(c.id===X) c.updatedAt=old; });
+    var r=h.fakeDriveRead(); r.categories.forEach(function(c){ if(c.id===X) c.updatedAt=old; }); h.fakeDriveWrite(r);
+    h.persist();
+    return settle(h).then(function(){
+      var r2=h.fakeDriveRead();
+      r2.categories.forEach(function(c){ if(c.id===X){ c.name=null; c.color=null; c.deleted=true; c.deletedAt=mid; c.updatedAt=mid; c.updatedBy="dev-B"; } });
+      h.fakeDriveWrite(r2); h.scheduleDriveSync();
+      return settle(h);
+    });
+  }
+  /* category X's stamp goes back 10 minutes, locally and on Drive, BEFORE any snapshot is taken: a restored
+     snapshot copy of X must be OLDER than the other device's later delete, or the restore just revives X
+     (the known category-undo gap) and the guard has nothing to guard */
+  function backdateCat(h,X){
+    var old=new Date(Date.now()-600000).toISOString();
+    h.getState().categories.forEach(function(c){ if(c.id===X) c.updatedAt=old; });
+    var r=h.fakeDriveRead(); r.categories.forEach(function(c){ if(c.id===X) c.updatedAt=old; }); h.fakeDriveWrite(r);
+    h.persist();
+    return settle(h);
+  }
+  function rec(id,name,color,when){ return {id:id,name:name,color:color,updatedAt:when,updatedBy:"dev-B",deleted:false,deletedAt:null}; }
+
+  return Promise.resolve()
+    /* ---- (b) 1: entry guard, the category was deleted by another device after an edit moved the entry */
+    .then(function(){ return freshSandbox(true); })
+    .then(function(f){
+      var h=f.H;
+      return connect(f).then(function(){ return settle(h); }).then(function(){
+        var A=h.getState().categories[1].id,B=h.getState().categories[0].id;
+        return backdateCat(h,A).then(function(){
+          addEntry(h,"Edited E",540,600,A);
+          return settle(h);
+        }).then(function(){
+          var id=h.entriesFor(DATE)[0].id;
+          editCat(h,id,B);                               /* the edit: A -> B (snapshot has the entry on A) */
+          return settle(h);
+        }).then(function(){ return otherDeviceDeletes(h,A); }).then(function(){
+          check("guard setup: category A is gone here (deleted by another device) and the entry sits on B",
+            !h.getState().categories.some(function(c){ return c.id===A; })&&h.entriesFor(DATE).length===1&&h.entriesFor(DATE)[0].cat===B,
+            JSON.stringify(h.entriesFor(DATE).map(function(e){ return e.label+"->"+e.cat; })));
+          h.undo();                                      /* undo the category edit */
+          return settle(h);
+        }).then(function(){
+          var l=h.entriesFor(DATE);
+          check("undoing the edit brings the entry back",l.length===1&&l[0].label==="Edited E",JSON.stringify(l.map(function(e){ return e.label+"->"+e.cat; })));
+          check("...and it does not point at the dead category A (kept off the tombstoned id)",localDeadCat(h).length===0,JSON.stringify(localDeadCat(h)));
+          check("...and nothing dead was pushed to the fake Drive",deadCatOnDrive(h).length===0,JSON.stringify(deadCatOnDrive(h)));
+        });
+      });
+    })
+    /* ---- (b) 2: entry guard, the carried-tombstone case from the real-device repro (name-dedup tombstoned the local seed id) */
+    .then(function(){ return freshSandbox(true); })
+    .then(function(f){
+      var h=f.H,T="2026-10-04T09:00:00.000Z";
+      var seeds=[["seed-studies","Studies"],["seed-work","Work / income"],["seed-side-projects","Side projects"],["seed-training","Training"],["seed-people","People"],["seed-admin","Admin & errands"],["seed-sleep","Sleep"],["seed-drift","Drift"]];
+      h.fakeDriveWrite({categories:seeds.map(function(s){ return rec("r-"+s[0],s[1],"#1D669A",T); }),
+        entries:[],verdicts:[],closeouts:[]});
+      addEntry(h,"Untitled-pre",480,540,"seed-studies");
+      return connect(f).then(function(){ return settle(h); }).then(function(){
+        check("dedup setup: the local seed id was merged away - the entry now sits on r-seed-studies",
+          h.entriesFor(DATE)[0].cat==="r-seed-studies"&&!!h.getState().deletedCategories["seed-studies"],JSON.stringify(h.entriesFor(DATE).map(function(e){ return e.cat; })));
+        h.undo();                                        /* the connect snapshot: it has the entry on the now-dead seed-studies */
+        return settle(h);
+      }).then(function(){
+        check("undo through the stale connect snapshot keeps the entry on its live category",h.entriesFor(DATE).length===1&&h.entriesFor(DATE)[0].cat==="r-seed-studies",JSON.stringify(h.entriesFor(DATE).map(function(e){ return e.cat; })));
+        check("...and nothing dead was pushed to the fake Drive",deadCatOnDrive(h).length===0,JSON.stringify(deadCatOnDrive(h)));
+      });
+    })
+    /* ---- (b) 3: the in-place branch (same entry id, category differs) */
+    .then(function(){ return connectedSandboxLegacy(); })
+    .then(function(f){
+      var h=f.H,A=h.getState().categories[1].id,B=h.getState().categories[0].id;
+      return backdateCat(h,A).then(function(){
+        addEntry(h,"In place",540,600,A);
+        return settle(h);
+      }).then(function(){
+        h.snapshot("in-place change");
+        h.entriesFor(DATE)[0].cat=B; h.persist();        /* same id, new category: not an edit-replace */
+        return settle(h);
+      }).then(function(){ return otherDeviceDeletes(h,A); }).then(function(){
+        h.undo();
+        return settle(h);
+      }).then(function(){
+        var l=h.entriesFor(DATE);
+        check("same-id category change undone while the old category is dead: the entry keeps its current live category",
+          l.length===1&&l[0].cat===B&&localDeadCat(h).length===0&&deadCatOnDrive(h).length===0,JSON.stringify(l.map(function(e){ return e.label+"->"+e.cat; }))+" drive-dead="+JSON.stringify(deadCatOnDrive(h)));
+      });
+    })
+    .then(function(){ return results; });
+
+  function connectedSandboxLegacy(){
+    return freshSandbox(true).then(function(f){ return connect(f).then(function(){ return f; }); });
+  }
 }
 })();
 </script>

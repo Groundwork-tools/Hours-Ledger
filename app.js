@@ -1462,15 +1462,31 @@ function undoEntriesAsForwardEdits(snap,cur){
     if(!entries[date]) entries[date]=[];
     entries[date].push({id:id,label:src.label,cat:src.cat,start:src.start,end:src.end,updatedAt:now,updatedBy:dev});
   }
+  /* A category the snapshot's entry points at may be dead by now: tombstoned in
+     the state being restored (carried over from the current one, e.g. name-dedup
+     merged a starter category away at connect), or deleted by another device.
+     Putting that id back would leave the entry on a category nobody can see,
+     and push it to Drive. The entry keeps its current category instead - or,
+     when it is being revived (there IS no current entry), none. A category
+     this device deleted itself is not dead here: the snapshot restore brings
+     it back along with the entry. */
+  function catDead(id){
+    if(!id) return false;
+    if(snap.deletedCategories&&snap.deletedCategories[id]) return true;
+    var t=cur.deletedCategories&&cur.deletedCategories[id];
+    return !!(t&&t.updatedBy&&t.updatedBy!==dev);
+  }
   Object.keys(curIdx).forEach(function(id){
     var c=curIdx[id],sn=snapIdx[id];
     if(!sn){                                             /* created after the snapshot -> tombstone it */
       if(!mine(c.e)) return;
       removeLive(id,c.date);
       tombs[id]={id:id,date:c.date,updatedAt:now,updatedBy:dev,deletedAt:now};
-    }else if(!sameEntryContent(c,sn)&&mine(c.e)){        /* changed since the snapshot -> put the snapshot's content back */
+    }else if(mine(c.e)){                                 /* changed since the snapshot -> put the snapshot's content back */
+      var want=catDead(sn.e.cat)?{date:sn.date,e:Object.assign({},sn.e,{cat:c.e.cat})}:sn;
+      if(sameEntryContent(c,want)) return;
       removeLive(id,c.date);
-      addLive(id,sn.date,sn.e);
+      addLive(id,want.date,want.e);
     }
   });
   Object.keys(snapIdx).forEach(function(id){
@@ -1478,7 +1494,8 @@ function undoEntriesAsForwardEdits(snap,cur){
     var t=tombs[id];
     if(t&&t.updatedBy&&t.updatedBy!==dev) return;        /* another device deleted it since - theirs to keep */
     delete tombs[id];
-    addLive(id,snapIdx[id].date,snapIdx[id].e);          /* deleted/edited-away after the snapshot -> revive */
+    var e=snapIdx[id].e;
+    addLive(id,snapIdx[id].date,catDead(e.cat)?Object.assign({},e,{cat:null}):e);  /* deleted/edited-away after the snapshot -> revive */
   });
   return {entries:entries,deletedEntries:tombs};
 }
