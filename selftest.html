@@ -2973,7 +2973,8 @@ function runAsyncTests(H,d){
     .then(function(r){ return runUndoSyncTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runUndoKeepsConnectionTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runUndoStaleSnapshotTests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runUndoConnectRuleTests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runUndoConnectRuleTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runFailedPushTests().then(function(more){ return r.concat(more); }); });
 }
 
 /* ---------------------------------------------------------------------
@@ -4089,6 +4090,80 @@ function runUndoConnectRuleTests(){
       });
     })
     .then(function(){ return results; });
+}
+
+/* ---------------------------------------------------------------------
+   A push that fails leaves the change only on this device (investigation
+   investigate/missing-sleep). A midnight-crossing sleep is the example
+   entry: it is stored as two unlinked records (one per day), and both are
+   local-only until some later sync succeeds.
+
+   The failure is simulated by making JSON.stringify throw for the push
+   payload only (the one with verdicts+closeouts arrays), inside the sandbox
+   iframe. driveWriteFile's TEST_MODE branch then throws inside runDriveSync's
+   promise chain, which is the same .catch branch a real network failure
+   takes ("Drive: sync failed" plus a status line that used to say "will retry").
+
+   The property pinned here is deliberately independent of how the gap gets
+   closed: whatever the app's own words promise has to be true. If the
+   status line says it will retry, a retry must happen once the failure
+   clears, with no tap, edit or reload from the user. A fix that retries
+   passes; a fix that stops promising a retry (and shows pending changes some
+   other way) passes too. It used to say "will retry" and nothing did; the wording now tells the
+   user to press the button instead, so this guards against the promise
+   coming back without a retry behind it. */
+function runFailedPushTests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); }
+  var DATE="2026-04-20",NEXT="2026-04-21";
+  function btn(f){ return f.d.getElementById("connectDrive").textContent; }
+  function status(f){ return f.d.getElementById("statusText").textContent; }
+  function onDrive(h,date,label){
+    var r=h.fakeDriveRead();
+    return !!r&&r.entries.some(function(e){ return e.date===date&&!e.deleted&&e.label===label; });
+  }
+  function settle(h){
+    return delay(250).then(function(){ return waitFor(function(){ return !h.isDriveSyncInFlight(); },4000); }).then(function(){ return delay(50); });
+  }
+  return freshSandbox(true).then(function(f){
+    var h=f.H,w=f.el.contentWindow;
+    f.d.getElementById("connectDrive").click();
+    return waitFor(function(){ return btn(f)==="Drive: synced"; },4000).then(function(ok){
+      check("setup: fake Drive connect completed",ok);
+      return settle(h);
+    }).then(function(){
+      var realStringify=w.JSON.stringify;
+      w.JSON.stringify=function(v){
+        if(v&&Array.isArray(v.verdicts)&&Array.isArray(v.closeouts)) throw new Error("simulated push failure");
+        return realStringify.apply(this,arguments);
+      };
+      var cat=h.getState().categories[0].id;
+      h.snapshot("add entry"); h.putEntry(DATE,"Sleep",cat,23*60,7*60,null); h.persist(); /* what saveSheet does for 23:00-07:00 */
+      return delay(600).then(function(){
+        check("failure setup: the push really failed - button reads 'Drive: sync failed'",btn(f)==="Drive: sync failed",btn(f));
+        check("failure setup: neither half of the sleep is on Drive",!onDrive(h,DATE,"Sleep")&&!onDrive(h,NEXT,"Sleep"));
+        check("failure setup: both halves exist locally, as two records with different ids",
+          h.entriesFor(DATE).length===1&&h.entriesFor(NEXT).length===1&&h.entriesFor(DATE)[0].id!==h.entriesFor(NEXT)[0].id);
+        var claimsRetry=/retry/i.test(status(f));
+        w.JSON.stringify=realStringify; /* the failure condition clears; the user does nothing at all */
+        return delay(3000).then(function(){
+          var reached=onDrive(h,DATE,"Sleep")&&onDrive(h,NEXT,"Sleep");
+          /* FAILS against current code: before the wording fix the status said "will retry" and no retry existed */
+          check("the app's own promise holds: if the status said it would retry, the sleep reaches Drive within 3s of the failure clearing, with no user action",
+            !claimsRetry||reached,"status said: "+JSON.stringify(claimsRetry?"will retry":"(no retry promise)")+"; both halves on Drive after 3s: "+reached+"; button: "+btn(f));
+        });
+      }).then(function(){
+        /* regression guards, pass today: the recovery that does exist */
+        h.snapshot("add entry"); h.putEntry("2026-04-22","Unrelated",cat,600,660,null); h.persist();
+        return waitFor(function(){ return onDrive(h,DATE,"Sleep")&&onDrive(h,NEXT,"Sleep"); },3000).then(function(ok){
+          check("control: once any later push succeeds, BOTH halves of the sleep reach Drive together",ok);
+        });
+      });
+    });
+  }).then(function(){ return results; });
 }
 })();
 </script>
