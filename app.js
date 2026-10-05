@@ -1179,14 +1179,14 @@ function refreshHint(){
 }
 
 /* ---------------- Drive connect flow & ongoing sync ---------------- */
-/* driveConnected lives INSIDE state (not a separate key like DEVICE_ID) on
-   purpose: undoing "before Drive connect" - the snapshot connectDrive()
-   takes as its very first action - should revert the whole operation,
-   connection status included, not leave a device half-connected with data
-   rolled back underneath it. It never gets pushed to Drive itself (the
-   payload syncEngine builds only ever contains categories/entries/verdicts/
-   closeouts); it just rides along through persist()/snapshot()/undo() like
-   any other field. */
+/* driveConnected lives INSIDE state (not a separate key like DEVICE_ID), so
+   it rides along through persist()/snapshot() - but undo/redo deliberately
+   do NOT restore it (applyState keeps the current value): it is device
+   state, not ledger state. This reverses the earlier design, where undoing
+   "before Drive connect" (the snapshot connectDrive() takes first) was meant
+   to disconnect; in practice that left the button saying "synced" with sync
+   off. It never gets pushed to Drive itself (the payload syncEngine builds
+   only ever contains categories/entries/verdicts/closeouts). */
 var driveSyncTimer=null,driveSyncInFlight=false,driveSyncApplyingRemote=false;
 /* driveSyncApplyingRemote is only ever set true right before persist(), set
    false right after - both call sites below wrap that in try/finally so a
@@ -1259,6 +1259,7 @@ function connectDrive(){
   var proceed=confirm("Before connecting, it's worth exporting a copy as a backup first - Your data → Export a copy.\n\nContinue connecting Google Drive now?");
   if(!proceed) return;
   snapshot("before Drive connect");
+  var connectSnap=undoStack[undoStack.length-1];
   setStatus("Connecting to Drive…");
   document.getElementById("connectDrive").disabled=true;
   getAccessToken(function(err,token){
@@ -1276,6 +1277,9 @@ function connectDrive(){
       state.driveConnected=true;
       driveSyncApplyingRemote=true;
       try{ persist(); } finally{ driveSyncApplyingRemote=false; }
+      /* the first merge is applied and saved: connect has succeeded, so every
+         snapshot taken before it is now stale against the merged state */
+      clearUndoHistoryAfterConnect(connectSnap);
       renderMaybeDeferred(); refreshHint();
       document.getElementById("connectDrive").disabled=false;
       document.getElementById("connectDrive").textContent="Drive: syncing…";
@@ -1411,8 +1415,51 @@ function runDriveSync(manual){
 /* ---------------- undo / redo ---------------- */
 var UKEY=TEST_MODE?"hours-ledger-selftest-undo-v1":"hours-ledger-undo-v1";
 var undoStack=[], redoStack=[];
+/* TEST_MODE only: keeps the pre-connect undo stack across a successful connect,
+   i.e. the behavior every device that connected BEFORE the clear-on-connect
+   change still has in its persisted stack. Tests that exercise "an existing
+   stack on an already-connected device" (OLD-STACK, the undo-through-connect
+   scenarios) turn it on so they can still build such a stack; it is never set
+   outside TEST_MODE, and nothing in the real app reads it. */
+var TEST_MODE_KEEP_UNDO_ON_CONNECT=false;
 try{ undoStack=JSON.parse(readStore(UKEY))||[]; }catch(e){ undoStack=[]; }
 
+/* A successful connect trims the undo history instead of emptying it. The rule:
+     (1) always drop the "before Drive connect" snapshot connectDrive() just
+         pushed (connectSnap), whatever it contains;
+     (2) drop every snapshot from before this device ever synced: its saved
+         state has neither deletedCategories nor deletedEntries (an empty {}
+         counts as present - a device that synced but deleted nothing has {});
+     (3) keep the rest. A snapshot that can't be parsed is dropped. Redo is
+         cleared.
+   Why: a pre-sync snapshot is stale against the merged state - its categories
+   are the device's own starter set, it has no sync containers. Restoring one
+   emptied the category list, greyed every entry, and wrote an entry's
+   category back as an id the merge had already tombstoned, then pushed that
+   to Drive (reproduced in test mode, first seen on a real device). A full
+   clear fixed that but also wiped the undo of an import: reconnecting after
+   an import runs this same first-connect path. Snapshots taken while the
+   device was synced (the import's own "open a copy", edits made after it)
+   have containers and are kept. Called only once connectDrive() has applied
+   and saved the first merge; a failed or cancelled connect never reaches it,
+   so that stack is kept whole.
+   Cost, accepted: undo for actions made before the device first synced is
+   lost, once, after the backup-export confirm - a narrow reading of hard
+   rule 5 (CLAUDE.md, backlog item 22).
+   KNOWN GAP: the predicate is "has containers", and an import of a backup
+   exported from a synced device gives a never-connected device those
+   containers, so a snapshot taken after such an import survives that
+   device's first connect. Pinned by a test; see CLAUDE.md item 22. */
+function clearUndoHistoryAfterConnect(connectSnap){
+  if(TEST_MODE&&TEST_MODE_KEEP_UNDO_ON_CONNECT) return;
+  function syncedBefore(item){
+    try{ var q=JSON.parse(item.s); return !!(q.deletedCategories||q.deletedEntries); }
+    catch(e){ return false; }
+  }
+  undoStack=undoStack.filter(function(x){ return x!==connectSnap&&syncedBefore(x); });
+  redoStack=[];
+  writeStore(UKEY,JSON.stringify(undoStack.slice(-12)));
+}
 function snapshot(desc){
   undoStack.push({s:JSON.stringify(state),d:desc||"change"});
   if(undoStack.length>25) undoStack.shift();
@@ -1462,15 +1509,31 @@ function undoEntriesAsForwardEdits(snap,cur){
     if(!entries[date]) entries[date]=[];
     entries[date].push({id:id,label:src.label,cat:src.cat,start:src.start,end:src.end,updatedAt:now,updatedBy:dev});
   }
+  /* A category the snapshot's entry points at may be dead by now: tombstoned in
+     the state being restored (carried over from the current one, e.g. name-dedup
+     merged a starter category away at connect), or deleted by another device.
+     Putting that id back would leave the entry on a category nobody can see,
+     and push it to Drive. The entry keeps its current category instead - or,
+     when it is being revived (there IS no current entry), none. A category
+     this device deleted itself is not dead here: the snapshot restore brings
+     it back along with the entry. */
+  function catDead(id){
+    if(!id) return false;
+    if(snap.deletedCategories&&snap.deletedCategories[id]) return true;
+    var t=cur.deletedCategories&&cur.deletedCategories[id];
+    return !!(t&&t.updatedBy&&t.updatedBy!==dev);
+  }
   Object.keys(curIdx).forEach(function(id){
     var c=curIdx[id],sn=snapIdx[id];
     if(!sn){                                             /* created after the snapshot -> tombstone it */
       if(!mine(c.e)) return;
       removeLive(id,c.date);
       tombs[id]={id:id,date:c.date,updatedAt:now,updatedBy:dev,deletedAt:now};
-    }else if(!sameEntryContent(c,sn)&&mine(c.e)){        /* changed since the snapshot -> put the snapshot's content back */
+    }else if(mine(c.e)){                                 /* changed since the snapshot -> put the snapshot's content back */
+      var want=catDead(sn.e.cat)?{date:sn.date,e:Object.assign({},sn.e,{cat:c.e.cat})}:sn;
+      if(sameEntryContent(c,want)) return;
       removeLive(id,c.date);
-      addLive(id,sn.date,sn.e);
+      addLive(id,want.date,want.e);
     }
   });
   Object.keys(snapIdx).forEach(function(id){
@@ -1478,13 +1541,58 @@ function undoEntriesAsForwardEdits(snap,cur){
     var t=tombs[id];
     if(t&&t.updatedBy&&t.updatedBy!==dev) return;        /* another device deleted it since - theirs to keep */
     delete tombs[id];
-    addLive(id,snapIdx[id].date,snapIdx[id].e);          /* deleted/edited-away after the snapshot -> revive */
+    var e=snapIdx[id].e;
+    addLive(id,snapIdx[id].date,catDead(e.cat)?Object.assign({},e,{cat:null}):e);  /* deleted/edited-away after the snapshot -> revive */
   });
   return {entries:entries,deletedEntries:tombs};
+}
+/* Undo/redo never change driveConnected: it is device state (is THIS device
+   syncing), not ledger state. Restoring it from a snapshot used to turn sync
+   off silently while the button and status line kept saying "synced" - and,
+   from the other side, undoing an import (whose snapshot says true) would
+   resume a sync the import deliberately turned off. So the current value
+   always wins, in both directions; a device that never had the key doesn't
+   get one. Settings stay as the snapshot has them (a display preference,
+   nothing silent depends on it).
+
+   The sync containers are carried the same way, but only the ones the
+   snapshot LACKS (a pre-connect snapshot predates them): without them the
+   gated writes (setVerdict, doDeleteCategory, the category recolor stamp)
+   stop writing tombstones, and a delete then reads to the next merge as an
+   absence - resurrected from Drive (hard rule 7). A snapshot that already
+   has a container keeps its own (known open gap: that can restore an older
+   tombstone set - see the backlog). A carried tombstone ALWAYS beats a
+   restored live record with the same key: categories and verdicts have no
+   forward-edit undo path, so reviving one would mean an old stamp on it and
+   no way to tell whose delete it overrides. Close-outs have no tombstones,
+   so nothing can collide there. Entries are untouched by this - they keep
+   undoEntriesAsForwardEdits's own guards. */
+function carrySyncContainers(prev,snap){
+  if(!prev) return;
+  if(prev.deletedCategories&&!snap.deletedCategories){
+    snap.deletedCategories=prev.deletedCategories;
+    snap.categories=(snap.categories||[]).filter(function(c){ return !snap.deletedCategories[c.id]; });
+  }
+  if(prev.verdictMeta&&!snap.verdictMeta) snap.verdictMeta=prev.verdictMeta;
+  if(prev.deletedVerdicts&&!snap.deletedVerdicts){
+    snap.deletedVerdicts=prev.deletedVerdicts;
+    Object.keys(snap.deletedVerdicts).forEach(function(key){
+      var sep=key.indexOf("|"),weekIso=key.slice(0,sep),catId=key.slice(sep+1);
+      var wv=snap.weeklyVerdicts&&snap.weeklyVerdicts[weekIso];
+      if(wv&&(catId in wv)){
+        delete wv[catId];
+        if(!Object.keys(wv).length) delete snap.weeklyVerdicts[weekIso];
+        if(snap.verdictMeta) delete snap.verdictMeta[key];
+      }
+    });
+  }
 }
 function applyState(json){
   var prev=state;
   state=JSON.parse(json);
+  if(prev&&("driveConnected" in prev)) state.driveConnected=prev.driveConnected;
+  else delete state.driveConnected;
+  carrySyncContainers(prev,state);
   if(prev&&prev.deletedEntries){
     var fwd=undoEntriesAsForwardEdits(state,prev);
     state.entries=fwd.entries;
@@ -3524,6 +3632,7 @@ if(TEST_MODE){
     runDriveSync:runDriveSync,
     scheduleDriveSync:scheduleDriveSync,
     reassignCategoryEntries:reassignCategoryEntries,
+    doDeleteCategory:doDeleteCategory,
     isDriveSyncInFlight:function(){ return driveSyncInFlight; },
     setDriveNeedsReconnect:function(v){ driveNeedsReconnect=v; },
     getDriveNeedsReconnect:function(){ return driveNeedsReconnect; },
@@ -3536,6 +3645,7 @@ if(TEST_MODE){
     surfaceDriveReconnectIfTokenLapsed:surfaceDriveReconnectIfTokenLapsed,
     recheckDriveToken:recheckDriveToken,
     setTestHangToken:function(v){ TEST_MODE_HANG_TOKEN=v; },
+    setKeepUndoOnConnectForTest:function(v){ TEST_MODE_KEEP_UNDO_ON_CONNECT=v; },
     setTestLateSuccessMs:function(v){ TEST_MODE_LATE_SUCCESS_MS=v; },
     loadGisScript:loadGisScript,
     resolveTestGisScriptLoad:resolveTestGisScriptLoad,
