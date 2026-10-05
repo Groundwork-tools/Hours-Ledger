@@ -165,6 +165,23 @@ a feature branch serves the real files uncached, so a fresh push is testable
 within moments — use it for this category of change specifically, not just
 whenever convenient.
 
+### Running `selftest.html` headless (what worked, 2026-10-05)
+
+Serve the repo (`python3 -m http.server 8765`) and run Chrome with
+`--headless=new --disable-gpu --no-sandbox --user-data-dir=<tmp>
+--virtual-time-budget=300000 --dump-dom http://localhost:8765/selftest.html`,
+redirected to a file, then read the `id="summary"` div and the
+`.row` divs from that file. A full run takes several minutes, so start it in
+the background. Chrome keeps running after it has written the dump, so a
+command that waits for it to exit never returns — poll for the output file
+instead and parse it directly (then `pkill` the leftover Chrome and server).
+macOS has no `timeout`. Do not use the desktop app's built-in browser pane for
+the full suite: it throttles timers while hidden and a run can stall for
+minutes. To iterate on one block, serve a scratch copy of `selftest.html`
+(untracked, delete it afterwards) with `runTests`/`runAsyncTests` swapped out
+for just that block; for a mutation check, serve one copy of the app per
+mutation on separate ports and run them in parallel.
+
 ## Deploy
 
 Push to `main`. GitHub Pages redeploys automatically, usually within a minute or
@@ -1865,8 +1882,8 @@ dashboard styling.
 
 22. **Undo vs. Drive sync — "ghost entries" — fix built and fail-first
     tested, merged to `main` 2026-10-05 after a real-device check on the
-    laptop against the real Drive file (as reported by Sebastian; the phone
-    was not separately reported).** Reported:
+    laptop against the real Drive file and on the phone on the live site (both
+    as reported by Sebastian).** Reported:
     with Drive connected, create an entry, Ctrl+Z, create another — the
     undone entry reappears as a live entry, once per cycle.
 
@@ -1940,5 +1957,42 @@ dashboard styling.
     before the fix — they're regression guards, not fail-first tests. Not
     covered: real devices, real Drive, and the interplay with an undo stack
     left over from before this fix on a connected device.
+
+    **Follow-up task: undo/redo must never change `driveConnected`. What
+    is known going in (observed 2026-10-05 in test mode against the fake
+    Drive, not on a real device; item 22's fix did not touch this):**
+    - Cause: `applyState()` replaces `state` with the snapshot, so
+      `driveConnected` comes back as whatever the snapshot had. Undoing the
+      "before Drive connect" snapshot (the first item on any connected
+      device's stack, taken by `connectDrive()`) therefore removes the key.
+      That was deliberate when written (see the comment above
+      `driveSyncTimer` and the data model's `driveConnected` entry, both of
+      which the follow-up will have to reword), and it is now the thing to
+      reverse. `applyState()` is only called from `undo()`/`redo()`.
+    - What the user sees today: `driveConnected` goes undefined, but the
+      Drive button still reads "Drive: synced" and the status line "Synced
+      with Drive" — both false, and nothing updates them (`applyState()`
+      never touches the button; `importBackupJson` is the only place that
+      does, for the same shape of problem). Edits made afterwards are not
+      pushed. Sync does NOT resume by itself. A reload shows "Connect
+      Drive", and reconnecting is one click plus the export-a-backup
+      confirm. Redo restores `driveConnected: true` and, since `applyState()`
+      now calls `persist()`, schedules a sync again.
+    - Not obvious, reasoned from the code and not tested: the snapshot also
+      lacks `deletedCategories`, `verdictMeta` and `deletedVerdicts` (they
+      only exist after the first sync), and the entries forward-edit keeps
+      only `deletedEntries` from the current state. So if the follow-up
+      simply keeps `driveConnected` true while restoring that snapshot, the
+      device ends up connected with the category/verdict sync containers
+      stripped — the half-connected state the old comment warned about,
+      from the other direction. Decide whether those containers (sync
+      metadata, not user data) should also be carried over from the current
+      state; `migrateSyncFields` recreates them lazily but would stamp
+      anything it finds as new.
+    - Tests: the `OLD-STACK` scenario's undo #4 is exactly this case and
+      currently asserts only that entries stay intact, not that Drive stays
+      connected. It will need an assertion for it. Scenarios that end on an
+      undo must `settle()` before the next one starts, because undo now
+      schedules its own sync into the shared fake Drive.
 
 Feature creep is the known failure mode of this project.
