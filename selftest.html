@@ -2974,7 +2974,10 @@ function runAsyncTests(H,d){
     .then(function(r){ return runUndoKeepsConnectionTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runUndoStaleSnapshotTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runUndoConnectRuleTests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runFailedPushTests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runFailedPushTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runQuotaSaveFailureTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runUndoCapTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runQuotaProbeTests().then(function(more){ return r.concat(more); }); });
 }
 
 /* ---------------------------------------------------------------------
@@ -4164,6 +4167,313 @@ function runFailedPushTests(){
       });
     });
   }).then(function(){ return results; });
+}
+
+/* ---------------------------------------------------------------------
+   A full localStorage. Hours Ledger and Money Ledger share ONE origin quota on
+   GitHub Pages; a real phone hit it (undo key ~4.3 MB). Found by running, not
+   reading: with setItem throwing QuotaExceededError, writeStore swallowed the
+   error into an in-memory object nothing reads, the status line still said
+   "Saved"/"Synced with Drive", and a pull from Drive was written nowhere
+   without a word.
+
+   Harness: selftest-quota-frame.html installs a quota-limited setItem (budget
+   in characters, a write that doesn't grow the total is allowed) BEFORE
+   index.html is written over it; the fake Drive's key is exempt, because it
+   stands in for a remote (app.js's fakeDrive* talk to localStorage directly
+   for the same reason). "headroom 0" = exactly full: every write that grows
+   the store throws, including the startup probe. "headroom 10" = the 3-char
+   probe fits, the ledger doesn't. Rows marked [control] pass before the fix
+   too and exist to catch a fix that breaks them. */
+function quotaTools(){
+  var T={DATE:"2026-04-20",KEY:"hours-ledger-selftest-v2",UKEY:"hours-ledger-selftest-undo-v1",results:[]};
+  T.check=function(name,cond,observed){
+    T.results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  };
+  T.delay=function(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); };
+  T.btn=function(f){ return f.d.getElementById("connectDrive").textContent; };
+  T.status=function(f){ return f.d.getElementById("statusText").textContent; };
+  T.warnShown=function(f){ var w=f.d.getElementById("warn"); return !!w&&w.style.display==="block"; };
+  T.warnText=function(f){ return f.d.getElementById("warn").textContent; };
+  T.cleanKeys=function(){
+    ["hours-ledger-selftest-v2","hours-ledger-device-id-TESTMODE","hours-ledger-selftest-undo-v1",
+     "hours-ledger-fakedrive-TESTMODE","hours-ledger-access-token-TESTMODE"].forEach(function(k){
+      try{ localStorage.removeItem(k); }catch(e){}
+    });
+  };
+  T.quotaFrame=function(seed){
+    window.__quotaSeed=seed||null;
+    return new Promise(function(resolve){
+      var el=document.createElement("iframe");
+      el.style.display="none";
+      el.src="selftest-quota-frame.html?hltest=1&v="+Date.now();
+      document.body.appendChild(el);
+      var start=Date.now();
+      (function poll(){
+        var w=el.contentWindow,ok=false;
+        try{ ok=!!(w&&w.__HL_TEST__&&el.contentDocument.readyState==="complete"); }catch(e){}
+        if(ok) return setTimeout(function(){ resolve({H:w.__HL_TEST__,d:el.contentDocument,el:el,w:w}); },150);
+        if(Date.now()-start>8000) return resolve({H:null,d:null,el:el,w:w});
+        setTimeout(poll,20);
+      })();
+    });
+  };
+  T.settle=function(h){
+    return T.delay(250).then(function(){ return waitFor(function(){ return !h.isDriveSyncInFlight(); },4000); }).then(function(){ return T.delay(50); });
+  };
+  T.remoteHas=function(h,label){
+    var r=h.fakeDriveRead();
+    return !!r&&r.entries.some(function(e){ return e.label===label&&!e.deleted; });
+  };
+  T.localHas=function(h,label){
+    var st=h.getState(),found=false;
+    Object.keys(st.entries).forEach(function(d){ st.entries[d].forEach(function(e){ if(e.label===label) found=true; }); });
+    return found;
+  };
+  T.count=function(st){ var n=0; Object.keys(st.entries).forEach(function(d){ n+=st.entries[d].length; }); return n; };
+  T.storedKeyHas=function(label){ return (localStorage.getItem(T.KEY)||"").indexOf(label)>-1; };
+  T.fill=function(f,headroom){ f.w.__quota.limit=f.w.__quotaUsed()+headroom; f.w.__quota.on=true; };
+  T.log=function(h,label,start,end){
+    h.snapshot("add entry"); h.putEntry(T.DATE,label,h.getState().categories[0].id,start,end,null); h.persist();
+  };
+  /* a connected frame with one entry ("Base") saved locally and on Drive, and a cached token */
+  T.connectedFrame=function(){
+    T.cleanKeys();
+    return T.quotaFrame(null).then(function(f){
+      if(!f.H){ T.check("setup: quota frame loaded",false); return null; }
+      f.d.getElementById("connectDrive").click();
+      return waitFor(function(){ return T.btn(f)==="Drive: synced"; },4000).then(function(ok){
+        T.check("setup: fake Drive connect completed",ok);
+        return T.settle(f.H);
+      }).then(function(){
+        f.H.cacheTokenForTest("tok-before-quota",3600);
+        T.log(f.H,"Base",540,600);
+        return waitFor(function(){ return T.remoteHas(f.H,"Base"); },4000);
+      }).then(function(ok){
+        T.check("setup: the baseline entry reached Drive",ok);
+        return T.settle(f.H);
+      }).then(function(){
+        T.check("setup: the baseline entry is in the saved ledger on this device",T.storedKeyHas("Base"));
+        return f;
+      });
+    });
+  };
+  return T;
+}
+
+/* Item 1 - a failed local save must be said out loud, push or pull. */
+function runQuotaSaveFailureTests(){
+  var T=quotaTools(),check=T.check;
+  var NOT_SAVED=/not saved/i,CLAIMS_OK=/^(saved|synced)/i;
+  return T.connectedFrame().then(function(f){
+    if(!f) return null;
+    var h=f.H;
+    /* ---- a local edit while the origin is exactly full ---- */
+    T.fill(f,0);
+    T.log(h,"Q1 edit",660,720);
+    check("Q1 setup: the local save really failed (the edit is not in localStorage)",!T.storedKeyHas("Q1 edit"));
+    check("Q1: right after the failed save, the status line does not say Saved",!CLAIMS_OK.test(T.status(f))&&NOT_SAVED.test(T.status(f)),"status='"+T.status(f)+"'");
+    check("Q1: a persistent warning is shown at once",T.warnShown(f),"warn visible="+T.warnShown(f));
+    return waitFor(function(){ return T.remoteHas(h,"Q1 edit"); },6000).then(function(onDrive){
+      return T.settle(h).then(function(){
+        check("Q1 [control]: the edit still reaches Drive after the failed local save",onDrive);
+        check("Q1: after the sync finishes, the status line does not say Synced or Saved while the local write failed",
+          !CLAIMS_OK.test(T.status(f))&&NOT_SAVED.test(T.status(f)),"status='"+T.status(f)+"' button='"+T.btn(f)+"'");
+        check("Q1: the warning is still up after the sync (persistent, not a toast)",T.warnShown(f));
+        check("Q1: the warning says it is memory-only and names what is using the storage (as Money Ledger's does)",
+          /memory/i.test(T.warnText(f))&&/KB/.test(T.warnText(f))&&/hours-ledger/.test(T.warnText(f)),"warn='"+T.warnText(f).slice(0,260)+"'");
+        /* ---- recovery: space comes back, the next save succeeds ---- */
+        f.w.__quota.on=false;
+        T.log(h,"After recovery",780,840);
+        check("Q1 [control]: once a save succeeds the status line says Saved again",/^Saved/.test(T.status(f)),"status='"+T.status(f)+"'");
+        check("Q1 [control]: ...and the warning is gone",!T.warnShown(f),"warn visible="+T.warnShown(f));
+        check("Q1 [control]: ...and the earlier unsaved edit is now in localStorage too",T.storedKeyHas("Q1 edit")&&T.storedKeyHas("After recovery"));
+      });
+    }).then(function(){
+      /* ---- the pull path (Q4): a connected device whose store can't take the merged ledger ---- */
+      var used=f.w.__quotaUsed();
+      f.el.parentNode.removeChild(f.el);
+      return T.quotaFrame({on:true,limit:used+10});
+    }).then(function(r){
+      var h3=r.H;
+      if(!h3){ check("Q4 setup: reloaded frame loaded",false); return null; }
+      return T.settle(h3).then(function(){
+        var rem=h3.fakeDriveRead();
+        rem.entries.push({id:"pulled-from-B",date:T.DATE,label:"Pulled",cat:null,start:900,end:960,
+          updatedAt:new Date(Date.now()-600000).toISOString(),updatedBy:"dev-B",deleted:false,deletedAt:null});
+        h3.fakeDriveWrite(rem);
+        h3.scheduleDriveSync();
+        return T.settle(h3).then(function(){ return T.delay(2500); }).then(function(){ return T.settle(h3); });
+      }).then(function(){
+        check("Q4 setup: the pulled entry could not be written locally",!T.storedKeyHas("Pulled"));
+        check("Q4 [control]: the pull is not reported as a failed sync",T.btn(r)!=="Drive: sync failed","button='"+T.btn(r)+"'");
+        check("Q4 [control]: the pulled entry is in the running app",T.localHas(h3,"Pulled"));
+        check("Q4 [control]: Drive still holds everything, including the pulled entry",
+          T.remoteHas(h3,"Base")&&T.remoteHas(h3,"Pulled"));
+        check("Q4: the status line does not say Synced or Saved when the merged ledger could not be written here",
+          !CLAIMS_OK.test(T.status(r))&&NOT_SAVED.test(T.status(r)),"status='"+T.status(r)+"'");
+        check("Q4: the persistent warning is shown",T.warnShown(r),"warn visible="+T.warnShown(r));
+        r.el.parentNode.removeChild(r.el);
+      });
+    });
+  }).catch(function(e){
+    check("the quota save-failure chain itself threw: "+(e&&e.message||e),false);
+  }).then(function(){ T.cleanKeys(); return T.results; });
+}
+
+/* Item 2 - the persisted undo stack is capped by size. Real case: a phone held
+   hours-ledger-undo-v1 at 4,340 KB (up to 12 full-state snapshots) against a
+   ~5 MB origin shared with Money Ledger. The cap applies to what is WRITTEN
+   (the newest snapshots that fit UNDO_PERSIST_MAX_CHARS, never fewer than 1);
+   the in-memory stack (25) is unchanged. An already-oversized key is shrunk at
+   load and again before the ledger itself is written, so it can't be what makes
+   the ledger's own save fail. Sizes are in characters (key not included). */
+function runUndoCapTests(){
+  var T=quotaTools(),check=T.check,CAP=500000;
+  function storedUndo(){ var r=localStorage.getItem(T.UKEY); return r===null?null:r; }
+  function storedSteps(){ try{ return JSON.parse(storedUndo()||"[]"); }catch(e){ return null; } }
+  function item(i,pad){
+    var st={version:2,settings:{startHour:6,endHour:24,pad:new Array(pad+1).join("x")},categories:[],entries:{},weeklyVerdicts:{},weekCloseouts:{}};
+    return {s:JSON.stringify(st),d:"step "+i};
+  }
+  function plant(n,pad){
+    var a=[]; for(var i=0;i<n;i++) a.push(item(i,pad));
+    localStorage.setItem(T.UKEY,JSON.stringify(a));
+    return storedUndo().length;
+  }
+  function lastD(){ var a=storedSteps(); return a&&a.length?a[a.length-1].d:null; }
+  return Promise.resolve().then(function(){
+    /* ---- U1: the real case - a pre-filled 4,340 KB key, shrunk on load ---- */
+    T.cleanKeys();
+    var planted=plant(12,361000);
+    T.check("U1 setup: planted a 12-snapshot undo key of about 4,340 KB ("+planted+" chars)",planted>4300000&&planted<4400000);
+    return T.quotaFrame(null).then(function(f){
+      if(!f.H){ check("U1 setup: frame loaded",false); return; }
+      var len=storedUndo()?storedUndo().length:0,steps=storedSteps()||[];
+      check("U1: after load the persisted undo key is at most "+CAP+" chars",len>0&&len<=CAP,"chars="+len);
+      check("U1: ...and still holds at least one snapshot, the newest ('step 11')",steps.length>=1&&lastD()==="step 11","steps="+steps.length+" newest="+lastD());
+      check("U1 [control]: the in-memory stack is unchanged (12 snapshots loaded)",f.H.undoDepthForTest()===12,"depth="+f.H.undoDepthForTest());
+      f.el.parentNode.removeChild(f.el);
+    });
+  }).then(function(){
+    /* ---- U2: a full origin whose undo key is the problem: the ledger must still save ---- */
+    T.cleanKeys();
+    plant(12,361000);
+    /* load with 10 chars of headroom: the probe fits, nothing else can grow */
+    return T.quotaFrame({on:true,limit:Infinity}).then(function(f){
+      if(!f.H){ check("U2 setup: frame loaded",false); return; }
+      f.w.__quota.limit=f.w.__quotaUsed()+10; /* the shrink at load has already run; now the origin is 'full' for growth */
+      /* put the oversized key back, as if another tab (or the older app version) wrote it after load */
+      localStorage.setItem(T.UKEY,JSON.stringify((function(){ var a=[]; for(var i=0;i<12;i++) a.push(item(i,361000)); return a; })()));
+      f.w.__quota.limit=f.w.__quotaUsed()+10;
+      f.H.putEntry(T.DATE,"U2 entry",f.H.getState().categories[0].id,540,600,null);
+      f.H.persist();
+      check("U2: with an oversized undo key and a full origin, the ledger's own save still lands (undo shrunk BEFORE the state write)",
+        T.storedKeyHas("U2 entry"),"stored="+T.storedKeyHas("U2 entry")+" status='"+T.status(f)+"'");
+      check("U2: ...so no warning is shown and the status line says Saved",!T.warnShown(f)&&/^Saved/.test(T.status(f)),"warn="+T.warnShown(f)+" status='"+T.status(f)+"'");
+      check("U2: the undo key is within the cap after that save",storedUndo().length<=CAP,"chars="+storedUndo().length);
+      f.el.parentNode.removeChild(f.el);
+    });
+  }).then(function(){
+    /* ---- U3: floor of 1 - one snapshot bigger than the whole cap is still kept ---- */
+    T.cleanKeys();
+    plant(3,600000);
+    return T.quotaFrame(null).then(function(f){
+      var steps=storedSteps()||[];
+      check("U3: three 600,000-char snapshots persist as exactly one (the newest), over the cap on purpose",
+        steps.length===1&&lastD()==="step 2"&&storedUndo().length>CAP,"steps="+steps.length+" newest="+lastD()+" chars="+(storedUndo()||"").length);
+      check("U3 [control]: the in-memory stack still has all three",f.H.undoDepthForTest()===3,"depth="+f.H.undoDepthForTest());
+      f.el.parentNode.removeChild(f.el);
+    });
+  }).then(function(){
+    /* ---- U4: every ordinary write is capped too; memory keeps its own limit; the newest step survives a reload ---- */
+    T.cleanKeys();
+    return T.quotaFrame(null).then(function(f){
+      var h=f.H;
+      h.getState().settings.pad=new Array(200001).join("x"); /* a ledger whose snapshots are ~200,000 chars each */
+      /* snapshot() alone, no persist(): persist() would shrink the key by itself and hide a snapshot() that writes it uncapped */
+      for(var i=0;i<5;i++){ h.snapshot("add entry"); }
+      var len=storedUndo().length;
+      check("U4: after five snapshots of a ~200,000-char ledger the persisted key is within the cap",len<=CAP,"chars="+len+" steps="+(storedSteps()||[]).length);
+      check("U4 [control]: ...while the in-memory stack holds all five",h.undoDepthForTest()===5,"depth="+h.undoDepthForTest());
+      check("U4: the persisted steps are the NEWEST ones",lastD()==="add entry"&&(storedSteps()||[]).length>=1);
+      T.log(h,"U4 last",540,600); /* a real, persisted edit with its snapshot */
+      f.el.parentNode.removeChild(f.el);
+      return T.quotaFrame(null).then(function(g){
+        var before=T.count(g.H.getState());
+        g.H.undo();
+        check("U4 [control]: after a reload, Ctrl+Z undoes the most recent entry",T.count(g.H.getState())===before-1,"entries before="+before+" after="+T.count(g.H.getState()));
+        g.el.parentNode.removeChild(g.el);
+      });
+    });
+  }).catch(function(e){
+    check("the undo cap chain itself threw: "+(e&&e.message||e),false);
+  }).then(function(){ T.cleanKeys(); return T.results; });
+}
+
+/* Item 3 - a failed startup probe must not hide data that is readable. app.js
+   probes localStorage with a tiny setItem at load; on a full origin that throws,
+   storageOK went false, and readStore then read only the empty in-memory
+   fallback: the app opened an EMPTY ledger, with driveConnected, DEVICE_ID and
+   the cached token all gone (the real data sat untouched in localStorage,
+   unread). Reading still works when writing doesn't. */
+function runQuotaProbeTests(){
+  var T=quotaTools(),check=T.check,base={};
+  return T.connectedFrame().then(function(f){
+    if(!f) return null;
+    var h=f.H;
+    /* the origin is exactly full: this edit reaches Drive but not this device */
+    T.fill(f,0);
+    T.log(h,"Q1 edit",660,720);
+    return waitFor(function(){ return T.remoteHas(h,"Q1 edit"); },6000).then(function(){
+      return T.settle(h);
+    }).then(function(){
+      var saved=JSON.parse(localStorage.getItem(T.KEY));
+      base.n=T.count(saved); base.dev=h.getDeviceId();
+      var used=f.w.__quotaUsed();
+      f.el.parentNode.removeChild(f.el);
+      /* ---- Q2: reload with the origin exactly full (the 3-char probe cannot fit) ---- */
+      return T.quotaFrame({on:true,limit:used});
+    }).then(function(r){
+      var h2=r.H;
+      if(!h2){ check("Q2 setup: reloaded frame loaded",false); return null; }
+      var st=h2.getState();
+      check("Q2 setup: the startup probe really did fail (nothing can be written, not even a new key)",
+        (function(){ try{ r.w.localStorage.setItem("zz-probe-check","1"); r.w.localStorage.removeItem("zz-probe-check"); return false; }catch(e){ return e.name==="QuotaExceededError"; } })());
+      check("Q2 [control]: the saved ledger in localStorage was not overwritten by the reload",T.storedKeyHas("Base"));
+      check("Q2: the reloaded app shows the saved ledger, not an empty one",T.count(st)>=base.n,"entries shown="+T.count(st)+" saved="+base.n);
+      check("Q2: driveConnected survives the reload",st.driveConnected===true,"driveConnected="+st.driveConnected);
+      check("Q2: DEVICE_ID survives the reload",h2.getDeviceId()===base.dev,"before="+base.dev+" after="+h2.getDeviceId());
+      check("Q2: the cached Drive token survives the reload",!!h2.getCachedToken(),"getCachedToken="+h2.getCachedToken());
+      check("Q2: the 'held in memory only / blocking automatic saving' banner is NOT what explains this (storage is readable, it is full)",
+        !/blocking automatic saving/i.test(T.warnText(r)),"warn='"+T.warnText(r).slice(0,120)+"'");
+      /* ---- Q3: the next sync, from the full-origin reload ---- */
+      r.d.getElementById("connectDrive").click();
+      return waitFor(function(){ return /Drive: (synced|sync failed)/.test(T.btn(r)); },5000).then(function(){
+        return T.settle(h2);
+      }).then(function(){
+        var remote=h2.fakeDriveRead();
+        check("Q3 [control]: the sync did not push an empty ledger over Drive (Base and Q1 edit still live there)",
+          T.remoteHas(h2,"Base")&&T.remoteHas(h2,"Q1 edit"),"live entries on Drive="+(remote?remote.entries.filter(function(e){ return !e.deleted; }).length:0));
+        check("Q3: the ledger shown after the sync includes what Drive holds (Base and Q1 edit)",T.localHas(h2,"Base")&&T.localHas(h2,"Q1 edit"),
+          "Base="+T.localHas(h2,"Base")+" Q1 edit="+T.localHas(h2,"Q1 edit")+" button='"+T.btn(r)+"'");
+        check("Q3: what the sync restored was saved on this device, or the user is told it was not",
+          T.storedKeyHas("Q1 edit")||(T.warnShown(r)&&!/^(saved|synced)/i.test(T.status(r))),"stored="+T.storedKeyHas("Q1 edit")+" warn="+T.warnShown(r)+" status='"+T.status(r)+"'");
+        r.el.parentNode.removeChild(r.el);
+      });
+    });
+  }).then(function(){
+    /* ---- control: storage that is genuinely unusable (nothing readable, nothing writable) is still treated as blocked ---- */
+    T.cleanKeys();
+    return T.quotaFrame({on:true,limit:0}).then(function(b){
+      check("blocked [control]: with nothing readable and nothing writable, the 'blocking automatic saving' banner is shown",
+        T.warnShown(b)&&/blocking automatic saving/i.test(T.warnText(b)),"warn visible="+T.warnShown(b)+" text='"+T.warnText(b).slice(0,80)+"'");
+      check("blocked [control]: ...and the app still opens a usable (default) ledger",b.H.getState().categories.length>0);
+      b.el.parentNode.removeChild(b.el);
+    });
+  }).catch(function(e){
+    check("the quota probe chain itself threw: "+(e&&e.message||e),false);
+  }).then(function(){ T.cleanKeys(); return T.results; });
 }
 })();
 </script>

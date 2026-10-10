@@ -20,7 +20,11 @@ try{
 var mem={}, storageOK=true;
 try{ localStorage.setItem("__t","1"); localStorage.removeItem("__t"); }catch(e){ storageOK=false; }
 function readStore(k){ try{ return storageOK?localStorage.getItem(k):(mem[k]||null); }catch(e){ return mem[k]||null; } }
-function writeStore(k,v){ try{ storageOK?localStorage.setItem(k,v):(mem[k]=v); }catch(e){ mem[k]=v; } }
+/* Returns true only when the value actually reached localStorage. Callers that
+   don't care can ignore it; persist() and applyState() use it to say so when a
+   save did not land (a full origin throws QuotaExceededError here, which used to
+   be swallowed into `mem` - an object nothing reads while storageOK is true). */
+function writeStore(k,v){ try{ if(storageOK){ localStorage.setItem(k,v); return true; } mem[k]=v; return false; }catch(e){ mem[k]=v; return false; } }
 
 /* hltest=1 is only ever set by selftest.html, so it can exercise real save/undo
    logic without ever touching the real saved weeks under KEY/UKEY below */
@@ -37,6 +41,17 @@ var KEY=TEST_MODE?"hours-ledger-selftest-v2":"hours-ledger-v2";
    real key-and-shape migration hard rule 1 asks for. v1 is read once here
    to carry existing verdicts forward as "this week"'s, then left untouched. */
 var OLD_KEY="hours-ledger-v1";
+/* The probe at the top of the file writes; a FULL origin refuses that write
+   but still reads fine. Treating "can't write" as "storage is blocked" sent
+   every read to the empty in-memory fallback: the app opened an empty ledger
+   and lost driveConnected, DEVICE_ID and the cached token, with the real data
+   sitting unread in localStorage. Existing data that reads back proves reading
+   works, so keep storageOK; the writes that then fail are reported by
+   persist()/noteLocalSave(), not by pretending the data isn't there. Storage
+   that is genuinely unusable has nothing readable and stays storageOK=false. */
+if(!storageOK){
+  try{ if(localStorage.getItem(KEY)!==null||localStorage.getItem(OLD_KEY)!==null) storageOK=true; }catch(e){}
+}
 /* validated categorical palette (picker redesign, 2026-08-20 - superseded
    its own first draft the same night: an earlier 19-color version, built
    around keeping the original 8 plus softer additions, is gone entirely -
@@ -753,18 +768,22 @@ function syncEngine(localStateIn,remoteFile,deviceId){
    at the top of every function, not just by convention at the call site - none
    of these can run for a real user by construction, because TEST_MODE itself
    only ever comes from selftest.html's own URL flag. */
+/* The fake Drive stands in for a REMOTE, so it talks to localStorage directly,
+   not through readStore/writeStore: those fall back to the in-memory `mem` when
+   the local store is unusable, and a remote must not degrade with the device
+   (quota-full tests, selftest-quota-frame.html, exempt this one key). */
 var FAKE_DRIVE_KEY="hours-ledger-fakedrive-TESTMODE";
 function fakeDriveRead(){
   if(!TEST_MODE) throw new Error("fakeDriveRead is TEST_MODE only");
-  try{ return JSON.parse(readStore(FAKE_DRIVE_KEY)); }catch(e){ return null; }
+  try{ return JSON.parse(localStorage.getItem(FAKE_DRIVE_KEY)); }catch(e){ return null; }
 }
 function fakeDriveWrite(data){
   if(!TEST_MODE) throw new Error("fakeDriveWrite is TEST_MODE only");
-  writeStore(FAKE_DRIVE_KEY,JSON.stringify(data));
+  localStorage.setItem(FAKE_DRIVE_KEY,JSON.stringify(data));
 }
 function fakeDriveReset(){
   if(!TEST_MODE) throw new Error("fakeDriveReset is TEST_MODE only");
-  writeStore(FAKE_DRIVE_KEY,JSON.stringify(null));
+  localStorage.setItem(FAKE_DRIVE_KEY,JSON.stringify(null));
 }
 
 /* ---------------- Google Drive OAuth (Google Identity Services token client) ----------------
@@ -1144,9 +1163,50 @@ function writeLinkedFile(){
   })();
 }
 
+/* ---- a local save that did not land ----
+   localSaveFailed is in-memory only (a fresh load starts clean, like the other
+   session flags) and is set by every write of the ledger key. While it is true
+   no status line may say Saved or Synced: Drive may hold the change, this
+   device does not. The persistent warning reuses #warn; the "blocked" message
+   shown at load (storageOK false) is left alone. */
+var localSaveFailed=false, storageFullWarned=false;
+function storageUsageText(){
+  var rows=[],total=0;
+  try{
+    for(var i=0;i<localStorage.length;i++){
+      var k=localStorage.key(i),n=k.length+(localStorage.getItem(k)||"").length;
+      rows.push({k:k,n:n}); total+=n;
+    }
+  }catch(e){}
+  rows.sort(function(a,b){ return b.n-a.n; });
+  function kb(n){ return Math.round(n*2/1024).toLocaleString("en-US")+" KB"; }
+  return kb(total)+" used: "+rows.slice(0,3).map(function(r){ return r.k+" "+kb(r.n); }).join(", ");
+}
+function noteLocalSave(ok){
+  localSaveFailed=!ok;
+  var w=document.getElementById("warn");
+  if(!ok){
+    setStatus("Not saved on this device — storage is full",true);
+    if(storageOK&&!storageFullWarned){
+      storageFullWarned=true;
+      w.textContent="Not saved on this device: this browser's storage for this site is full ("+storageUsageText()+
+        "). This change exists in memory only and will be lost if you close or reload the app. Export a copy now. If Drive sync is connected it still goes to Drive.";
+      w.style.display="block";
+    }
+  }else if(storageFullWarned){
+    storageFullWarned=false;
+    w.textContent=""; w.style.display="none";
+  }
+}
+/* what the sync paths may claim once a push has landed */
+function syncedStatusText(){
+  return localSaveFailed?"On Drive, but not saved on this device — storage is full":"Synced with Drive";
+}
 function persist(){
-  writeStore(KEY,JSON.stringify(state));
-  setStatus(fileHandle?("Saving to "+fileName+"…"):"Saved "+clockNow());
+  shrinkOversizedUndo();
+  var saved=writeStore(KEY,JSON.stringify(state));
+  noteLocalSave(saved);
+  if(saved) setStatus(fileHandle?("Saving to "+fileName+"…"):"Saved "+clockNow());
   if(fileHandle){
     clearTimeout(writeTimer);
     writeTimer=setTimeout(writeLinkedFile,1200);
@@ -1292,7 +1352,7 @@ function connectDrive(){
       var sweptNote=(syncResult.sweptCompress&&syncResult.sweptCompress.length)?
         " "+describeCompressSweep(syncResult.sweptCompress):"";
       driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts}).then(function(){
-        setStatus("Synced with Drive");
+        setStatus(syncedStatusText());
         document.getElementById("connectDrive").textContent="Drive: synced";
         showToast("Connected — your weeks are syncing."+sweptNote,false);
       }).catch(function(){
@@ -1399,7 +1459,7 @@ function runDriveSync(manual){
       if(syncResult.sweptCompress&&syncResult.sweptCompress.length) showToast(describeCompressSweep(syncResult.sweptCompress),false);
       return driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts}).then(function(){
         driveSyncInFlight=false;
-        setStatus("Synced with Drive");
+        setStatus(syncedStatusText());
         document.getElementById("connectDrive").disabled=false;
         document.getElementById("connectDrive").textContent="Drive: synced";
       });
@@ -1423,6 +1483,41 @@ var undoStack=[], redoStack=[];
    outside TEST_MODE, and nothing in the real app reads it. */
 var TEST_MODE_KEEP_UNDO_ON_CONNECT=false;
 try{ undoStack=JSON.parse(readStore(UKEY))||[]; }catch(e){ undoStack=[]; }
+
+/* The persisted undo stack is capped by size, the in-memory one (25) is not.
+   Every snapshot is a FULL copy of the state, so 12 of them are 12x the ledger:
+   a real phone held hours-ledger-undo-v1 at 4,340 KB against a ~5 MB origin
+   shared with Money Ledger, and neither app could save any more. What is
+   written is the newest snapshots that fit UNDO_PERSIST_MAX_CHARS (string
+   length, ~500 KB), and never fewer than one - so after a reload there is
+   always at least one step to undo, however large the ledger has grown.
+   Cost, accepted: with a ~350,000-character ledger that is ONE persisted step
+   across a reload (a narrow reading of hard rule 5: undo is whole inside a
+   session, shallower across a reload). shrinkOversizedUndo() also repairs a
+   key an older version (or another tab) already wrote oversized; it only ever
+   shrinks, so it can't fail on a full origin, and persist() calls it BEFORE
+   writing the ledger so the undo key can't be what makes that write fail. */
+var UNDO_PERSIST_MAX_CHARS=500000;
+function capUndoForStorage(stack){
+  var kept=[],total=2;
+  for(var i=stack.length-1;i>=0;i--){
+    var n=JSON.stringify(stack[i]).length+1;
+    if(kept.length&&total+n>UNDO_PERSIST_MAX_CHARS) break;
+    kept.unshift(stack[i]); total+=n;
+  }
+  return kept;
+}
+function persistUndo(){ writeStore(UKEY,JSON.stringify(capUndoForStorage(undoStack.slice(-12)))); }
+function shrinkOversizedUndo(){
+  if(typeof UKEY==="undefined") return; /* persist() can run before this section has executed */
+  var raw=readStore(UKEY);
+  if(!raw||raw.length<=UNDO_PERSIST_MAX_CHARS) return;
+  var st; try{ st=JSON.parse(raw); }catch(e){ return; }
+  if(!Array.isArray(st)) return;
+  var kept=capUndoForStorage(st);
+  if(kept.length<st.length) writeStore(UKEY,JSON.stringify(kept));
+}
+shrinkOversizedUndo();
 
 /* A successful connect trims the undo history instead of emptying it. The rule:
      (1) always drop the "before Drive connect" snapshot connectDrive() just
@@ -1458,13 +1553,13 @@ function clearUndoHistoryAfterConnect(connectSnap){
   }
   undoStack=undoStack.filter(function(x){ return x!==connectSnap&&syncedBefore(x); });
   redoStack=[];
-  writeStore(UKEY,JSON.stringify(undoStack.slice(-12)));
+  persistUndo();
 }
 function snapshot(desc){
   undoStack.push({s:JSON.stringify(state),d:desc||"change"});
   if(undoStack.length>25) undoStack.shift();
   redoStack=[];
-  writeStore(UKEY,JSON.stringify(undoStack.slice(-12)));
+  persistUndo();
 }
 /* Undo/redo used to replace state wholesale with the snapshot. With Drive
    connected that makes an undone record ABSENT locally rather than
@@ -1605,7 +1700,7 @@ function applyState(json){
   migrateVerdictScale(state);
   migrateVerdictTombstoneCollisions(state);
   migrateRecentColors(state);
-  writeStore(KEY,JSON.stringify(state));
+  noteLocalSave(writeStore(KEY,JSON.stringify(state)));
   if(fileHandle){ clearTimeout(writeTimer); writeTimer=setTimeout(writeLinkedFile,600); }
   /* an undo/redo that wrote tombstones is a real edit: it has to reach Drive
      like any other, not wait for some later edit or reload to carry it */
@@ -1616,7 +1711,7 @@ function undo(){
   if(!undoStack.length){ showToast("Nothing left to undo",false); return; }
   var step=undoStack.pop();
   redoStack.push({s:JSON.stringify(state),d:step.d});
-  writeStore(UKEY,JSON.stringify(undoStack.slice(-12)));
+  persistUndo();
   applyState(step.s);
   showToast("Undone: "+step.d,false);
 }
@@ -1624,7 +1719,7 @@ function redo(){
   if(!redoStack.length) return;
   var step=redoStack.pop();
   undoStack.push({s:JSON.stringify(state),d:step.d});
-  writeStore(UKEY,JSON.stringify(undoStack.slice(-12)));
+  persistUndo();
   applyState(step.s);
   showToast("Redone: "+step.d,false);
 }
@@ -3646,6 +3741,7 @@ if(TEST_MODE){
     recheckDriveToken:recheckDriveToken,
     setTestHangToken:function(v){ TEST_MODE_HANG_TOKEN=v; },
     setKeepUndoOnConnectForTest:function(v){ TEST_MODE_KEEP_UNDO_ON_CONNECT=v; },
+    undoDepthForTest:function(){ return undoStack.length; },
     setTestLateSuccessMs:function(v){ TEST_MODE_LATE_SUCCESS_MS=v; },
     loadGisScript:loadGisScript,
     resolveTestGisScriptLoad:resolveTestGisScriptLoad,
