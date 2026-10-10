@@ -2318,4 +2318,44 @@ dashboard styling.
     first synced the record. `updatedAt` is not the time the entry was
     logged.
 
+24. **A full localStorage — investigated, fixed on `investigate/quota-full`,
+    NOT merged (2026-10-10).** Reported: on a phone the shared origin
+    (`groundwork-tools.github.io`, Hours Ledger + Money Ledger) was full at
+    5,169 KB: `hours-ledger-undo-v1` 4,340 KB, `hours-ledger-v2` 679 KB,
+    `money-ledger-v1` 143 KB; Money Ledger could no longer save. (DevTools
+    counts UTF-16, so those are about half as many characters.)
+
+    **Found by running, in `selftest.html` against a quota-limited
+    `setItem`, not by reading:** (1) `writeStore` swallowed
+    `QuotaExceededError` into `mem`, which nothing reads while `storageOK` is
+    true: the status line said "Saved", then "Synced with Drive", and a pull
+    from Drive was written nowhere, without a word; the edit did reach
+    Drive. (2) At exactly full, the startup probe throws, `storageOK` went
+    false, and the app opened an EMPTY ledger with `driveConnected`,
+    `DEVICE_ID` and the cached token gone (the data stayed in localStorage,
+    unread). (3) A sync from that state did not push an empty ledger over
+    Drive; it restored the ledger in memory only. (4) A pull on a connected
+    device fails silently on the local write (same as 1).
+
+    **Fixed, three commits, each tests-first:** `writeStore` returns whether
+    the value landed; `noteLocalSave()` sets "Not saved on this device" and a
+    persistent `#warn` (memory-only, names the biggest keys, as Money Ledger's
+    does) and clears both on the next save that lands; both sync paths use
+    `syncedStatusText()`. The persisted undo stack is capped at
+    `UNDO_PERSIST_MAX_CHARS` (500,000 characters, floor 1 snapshot, in-memory
+    stack unchanged) and an oversized key is shrunk at load and at the top of
+    `persist()`, before the ledger is written. A failed probe keeps
+    `storageOK` when `KEY`/`OLD_KEY` read back. `selftest.html`: 575, tests in
+    `runQuotaSaveFailureTests`/`runUndoCapTests`/`runQuotaProbeTests`, harness
+    `selftest-quota-frame.html`, fake Drive talks to localStorage directly.
+
+    **Cost, said plainly (hard rule 5):** with a ~350,000-character ledger the
+    cap keeps ONE undo step across a reload; within a session undo is whole.
+    **Not done:** `hours-ledger-v2` itself still grows (tombstones, item 15,
+    ~60 a week; entries) toward the shared quota; nothing prunes it. Money
+    Ledger's write-failure path was only tested for an edit's push
+    (`money-ledger-selftest.html`, branch `investigate/quota-full`, uncommitted
+    there). Not verified on a real phone/WebKit; the quota model counts
+    characters, Chrome headless only.
+
 Feature creep is the known failure mode of this project.
