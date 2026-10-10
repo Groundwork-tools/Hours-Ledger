@@ -2442,6 +2442,31 @@ dashboard styling.
     Money Ledger's export was complete on both builds. Run in headless Chrome;
     how a phone presents the downloaded file was not tested.
 
+    **Phone verification (reported by Sebastian, 2026-10-10; written down here
+    on his word, not observed from this tool).** A real iPhone, Chrome (so
+    WebKit), over plain http from the laptop (`192.168.1.69:8000`, serving
+    `~/Desktop/hl-staging`), Drive never connected, the synthetic prefill data.
+    - *Ran, pre-fix build, presets 1 and 3, both apps:* failed exactly as
+      predicted. Hours Ledger showed SAVED and lost the entry on reload (preset
+      1 also showed the red box and the default categories). Money Ledger
+      showed "Expense logged" and lost the entry on reload. That the
+      empty-ledger case (preset 1) reproduces on a real iPhone is the point:
+      it is not only a Chrome-headless artefact. Whether his own phone was ever
+      in that state is still unknown. One earlier first attempt did NOT fail;
+      unexplained, not investigated.
+    - *Ran, fix build, undo key at phone size (B1), presets 1 and 3:* no red
+      box, real data loads, the undo key shrank from 4,339 KB to 785 KB (the
+      same figure as the headless run), entries survive reload in both apps,
+      Hours export 519 KB, Money export about 100 KB.
+    - *Ran, fix build, undo key already small (B2), preset 1:* both apps showed
+      "Not saved on this device" instead of success; the entries were gone
+      after reload, as expected; Hours export 519 KB, Money export 101 KB. The
+      Hours export, opened on the laptop, contains "Phone test" (the unsaved
+      entry; one match).
+    - ***Not covered:*** preset 2; Safari; the real origin
+      (`groundwork-tools.github.io`); the Drive-connected path; the contents of
+      the Money export's unsaved entry (only its size was checked).
+
 25. **No in-app way for a local-only user to free space.** When the red
     banner appears the only thing it tells them to do is "Export a copy now".
     Nothing in the app frees space: there is no "clear undo history", and the
