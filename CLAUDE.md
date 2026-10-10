@@ -42,6 +42,38 @@ Teaching matters here as much as shipping.
 5. **Every destructive action must be undoable.** Deleting an entry, deleting a
    category, clearing a week, importing over existing data — all go through
    `snapshot()` before mutating. New destructive features do too.
+
+   **Narrow reading since 2026-10-10 (Sebastian's decision, backlog 24):** the
+   *persisted* undo stack (`hours-ledger-undo-v1`) is capped at
+   `UNDO_PERSIST_MAX_CHARS` = 500,000 characters (string length): the newest
+   snapshots that fit are written, never fewer than 1. The in-memory stack (25)
+   is not capped. Within a session every destructive action is undoable exactly
+   as before. Across a reload, undo is as deep as the cap allows, and with the
+   ledger at ~349,000 characters one stored snapshot is ~403,000, so the cap
+   keeps exactly ONE step. Why this reading and not a wider one:
+   - Every snapshot is a full copy of the ledger, so N persisted steps cost N x
+     the ledger, and the cost grows as the ledger does. Uncapped, the key had
+     reached 4,340 KB of a 5,169 KB origin shared with another app (hard rule
+     10), and neither app could save any more.
+   - Options weighed: (A) a size cap on what is written - **chosen**: about ten
+     lines, the key's name and shape are unchanged (hard rule 1 untouched, old
+     stacks still load), in-session undo stays whole. (B) fewer persisted
+     snapshots - rejected: the bound still scales with the ledger (3 x 403,000
+     is ~1.2 MB). (C) per-action diffs - would keep every step across a reload
+     at a few KB each, but it is a new stack shape and rewrites
+     `undoEntriesAsForwardEdits` and the sync-container carry-over (backlog
+     22): the largest and riskiest change, for a case nobody has reported
+     missing. (D) IndexedDB - makes snapshot/undo/redo async, adds a failure
+     mode of the hard-rule-9 kind, and does nothing for the ledger key itself.
+   - The floor of 1 is deliberate: a reload must never leave nothing to undo.
+     The price is that the cap is a target, not a guarantee: a single snapshot
+     larger than 500,000 characters (a ledger over ~430,000) is still stored.
+   - An oversized key written by an older version, or by another tab, is shrunk
+     at load and again at the top of `persist()`, before the ledger is written,
+     so the undo key can never be the reason the ledger's own save fails. The
+     shrink only ever makes the value smaller, so it cannot itself hit the quota.
+   - **Revisit trigger:** if losing undo-across-reload is felt in real use,
+     option C is the next step, as its own design discussion (hard rule 6).
 6. **Ask before restructuring.** Propose the change and wait. Do not refactor
    broadly in a session that was asked for a small fix.
 7. **No sync operation may remove or overwrite an unacknowledged record.** Every
@@ -131,6 +163,39 @@ Teaching matters here as much as shipping.
    trigger the next sync. Every new async resolution path added to this
    flow needs this same question asked of it: not just "does the data
    end up correct" but "does anything visible ever go stale in between."
+
+10. **Every app on this origin shares ONE localStorage quota, and a new tool on
+    this domain inherits it.** An origin is scheme + host + port; the path is
+    not part of it, so `/Hours-Ledger/`, `/Money-Ledger/` and any tool added
+    later under `groundwork-tools.github.io` read and write the same ~5 MiB
+    store. (Measured in headless Chrome: 5,242,880 characters, key + value.
+    The phone that reported the bug read 5,169 KB when full in DevTools units
+    of 2 bytes per character, i.e. roughly half as many characters as Chrome's
+    limit; that is the phone's report, not something re-measured in WebKit.)
+    Why this is a rule: one app filling the store breaks the others. On
+    2026-10-10 Hours Ledger's undo key (4,340 KB of that 5,169 KB) left Money
+    Ledger unable to save, and neither app said so (backlog 24). What follows:
+    - **Size the worst case before persisting anything new**: how big can it
+      get, and who else pays for it? Anything that grows with use (history,
+      logs, caches, tombstones) needs a cap or a pruning rule *when it is
+      written*, not afterwards. The undo stack was exactly this: up to 12
+      full-state copies, no bound.
+    - **A write can fail, so failure is a code path**: handle
+      `QuotaExceededError` on every localStorage write, and no status line may
+      say Saved or Synced when the local write did not land
+      (`noteLocalSave()`, `syncedStatusText()`).
+    - **A full store still reads.** A failed write probe is not evidence that
+      storage is unusable; treating it so opened an empty ledger over readable
+      data (backlog 24, the startup probe).
+    - **A new tool is not isolated by its own path or repo.** To get its own
+      quota it needs its own origin (another host or a custom domain). Until
+      then it shares this budget and can starve, or be starved by, the others.
+      Keep the matching rule in Money Ledger's `CLAUDE.md` (its rule 11) in step.
+    - **Current spend** (2026-10-05 export, characters): Hours Ledger state
+      ~349,000; ONE persisted undo snapshot ~403,000 (1.16 x the state); Money
+      Ledger ~73,000 (the phone: 143 KB in DevTools units). No per-app
+      allotment has been decided; the only enforced cap is the undo cap in the
+      narrow reading of rule 5.
 
 ## Testing before you claim it works
 
@@ -370,7 +435,9 @@ on purpose.
   current one can ever be opened for close-out (see `openCloseout()` in
   `app.js`) — the ritual looks back at a finished week, never judges one still
   in progress.
-- Undo history lives separately under `hours-ledger-undo-v1`, last 12 states.
+- Undo history lives separately under `hours-ledger-undo-v1`: up to 12 states are
+  written, but only the newest that fit 500,000 characters (never fewer than 1) -
+  see the narrow reading under hard rule 5. The in-memory stack holds 25.
 - **Sync fields exist only once a device has connected Google Drive sync at
   least once — a device that never does sees none of this, ever.** Once
   connected, every entry and category gains `updatedAt` (ISO string) and
@@ -663,7 +730,8 @@ dashboard styling.
     field), but it affects Add to Home Screen, which needs a resolvable
     `start_url` to install as anything more than a bookmark. Not urgent —
     noted from real usage on the live site.
-15. **Tombstone accumulation.** `deletedCategories`/`deletedVerdicts` (and
+15. **Tombstone accumulation.** *(Dated follow-up with growth numbers and a
+    runway estimate: item 27.)* `deletedCategories`/`deletedVerdicts` (and
     to a lesser extent `deletedEntries`) only ever grow — nothing currently
     prunes an old tombstone. Observed for real: one real Drive file holds
     roughly 40 tombstones against 14 live categories after phase 1 and
@@ -2352,10 +2420,85 @@ dashboard styling.
     **Cost, said plainly (hard rule 5):** with a ~350,000-character ledger the
     cap keeps ONE undo step across a reload; within a session undo is whole.
     **Not done:** `hours-ledger-v2` itself still grows (tombstones, item 15,
-    ~60 a week; entries) toward the shared quota; nothing prunes it. Money
-    Ledger's write-failure path was only tested for an edit's push
-    (`money-ledger-selftest.html`, branch `investigate/quota-full`, uncommitted
-    there). Not verified on a real phone/WebKit; the quota model counts
-    characters, Chrome headless only.
+    ~60 a week; entries) toward the shared quota; nothing prunes it (item 27).
+    Money Ledger's side is in its own `CLAUDE.md` ("General fixes 2026-10-10"
+    and Backlog 5-6; committed on its `investigate/quota-full`). Not verified
+    on a real phone/WebKit; the quota model counts characters, Chrome headless
+    only.
+
+    **Found later, 2026-10-10 (ran, headless Chrome, staging rig, prefill
+    preset 1): on the pre-fix build, "Export a copy" writes an EMPTY ledger when
+    storage is full at load.** Hours Ledger `main` (`414b033`): the startup
+    probe fails, `storageOK` goes false, the app opens the default ledger (8
+    default categories, 0 entries) while the real ledger sits unread in
+    localStorage, and the export button then writes a 928-byte file with no
+    entries. The pre-fix banner told the person to "export a copy before
+    closing" - advice that produced a file without their data. Anyone who
+    exported in that state and then cleared or overwrote anything has no backup
+    of the real ledger in that file. **Live `main` still has this until this
+    branch merges.** On this branch (the probe fix, `07b918f`) the same export on
+    a full origin wrote the complete ledger: 1,571 of 1,571 entries,
+    byte-identical, and with an edit that failed to save included (1,572).
+    Money Ledger's export was complete on both builds. Run in headless Chrome;
+    how a phone presents the downloaded file was not tested.
+
+25. **No in-app way for a local-only user to free space.** When the red
+    banner appears the only thing it tells them to do is "Export a copy now".
+    Nothing in the app frees space: there is no "clear undo history", and the
+    usage list in the banner names storage keys (`hours-ledger-undo-v1`,
+    `money-ledger-v1`) that mean nothing to a non-developer. Once the undo key
+    is already at or under its cap, the origin can be full because of the
+    ledger itself or because of another app on the origin (hard rule 10), and
+    the person has no move except exporting. Options, none chosen: a "Clear
+    undo history" button (costs the undo depth that hard rule 5's narrow
+    reading kept); a plain-language usage line ("Undo history 0.4 MB, Hours
+    Ledger 0.35 MB, other apps 0.07 MB"); pointing them at the other app when
+    it is the biggest user. Revisit when item 27's 2026-11-10 re-measure is in:
+    if the runway there is under three months, do this first.
+26. **The banner mentions Drive to people who don't use it.** `noteLocalSave()`
+    always ends with "If Drive sync is connected it still goes to Drive." For a
+    local-only user that sentence is noise about a feature they never turned
+    on, and it sits next to the one instruction that matters. Show it only when
+    `state.driveConnected`. Small change; the test is the banner text with and
+    without `driveConnected`, written first and watched failing like the rest of
+    item 24. (The same sentence is in Money Ledger's toast, which is its
+    Backlog 5-6 to decide.)
+27. **Tombstone cleanup and entry growth - re-measure on 2026-11-10, decide by
+    2026-12-10 (proposed dates).** Extends item 15.
+    - *Measured* (compact JSON characters, two real exports): 2026-08-31
+      186,063 -> 2026-10-05 348,903, i.e. +162,840 in 35 days, about 4,650 a
+      day or 140,000 a month. Entries 820 -> 1,567 (about 95,000 a month),
+      tombstones 302 -> 593 (about 38,000 a month, 27% of the growth), the rest
+      (verdict metadata and so on) about 6,000 a month.
+    - *ESTIMATE, not a measurement - runway until the origin is full again with
+      the item 24 fixes in place:* assume the phone's limit is 5 MiB at 2
+      bytes per character (about 2,621,440 characters; inferred from the 5,169
+      KB full reading, unverified in WebKit) and that the spend is the state +
+      ONE undo snapshot (1.16 x the state) + Money Ledger (~73,000, held
+      constant) + ~5,000 of small keys. Then the state can reach about
+      1,180,000 characters. At the observed 140,000 a month that is **about 6
+      months from 2026-10-05 (April 2027)**; if growth doubles, **about 3 months
+      (January 2027)**; for "worse than doubling" (Money Ledger also
+      grows, or the phone's limit is lower than assumed), **about 2 months
+      (December 2026)** - that end is a judgement, not an arithmetic result;
+      the arithmetic above gives 6 and 3. So "2 to 6 months" is a range with
+      an optimistic and a pessimistic end, not a forecast. Weak points: only two data points five weeks apart; the
+      tombstone share included heavy testing and sync churn that may not
+      continue; entry growth is real use and will. (With Chrome's larger limit
+      the same arithmetic gives 7 to 15 months, but the phone is the binding
+      case.)
+    - *Dates:* **2026-11-10** - export again, measure the compact size the same
+      way, compare with 348,903 characters / 1,567 entries / 593 tombstones on
+      2026-10-05, and redo the runway; the re-measure also settles which end of
+      the range is real. **2026-12-10** - the pessimistic end of the runway;
+      the chosen approach must be built and verified before it, or the
+      re-measure must have shown the optimistic end and moved this date.
+    - *What can and cannot be done:* live entries are the user's data and are
+      never pruned. Tombstones can only go once every device sharing the file
+      has seen them, which hard rule 7 makes a design question with no known
+      answer yet (item 15). So for entry growth the levers are *where and how*
+      the state is stored, not deletion: a more compact stored shape (needs a
+      `-vN` migration, hard rule 1) or moving the state out of localStorage.
+      Needs its own design discussion before any code (hard rule 6).
 
 Feature creep is the known failure mode of this project.
