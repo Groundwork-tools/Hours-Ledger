@@ -41,6 +41,17 @@ var KEY=TEST_MODE?"hours-ledger-selftest-v2":"hours-ledger-v2";
    real key-and-shape migration hard rule 1 asks for. v1 is read once here
    to carry existing verdicts forward as "this week"'s, then left untouched. */
 var OLD_KEY="hours-ledger-v1";
+/* The probe at the top of the file writes; a FULL origin refuses that write
+   but still reads fine. Treating "can't write" as "storage is blocked" sent
+   every read to the empty in-memory fallback: the app opened an empty ledger
+   and lost driveConnected, DEVICE_ID and the cached token, with the real data
+   sitting unread in localStorage. Existing data that reads back proves reading
+   works, so keep storageOK; the writes that then fail are reported by
+   persist()/noteLocalSave(), not by pretending the data isn't there. Storage
+   that is genuinely unusable has nothing readable and stays storageOK=false. */
+if(!storageOK){
+  try{ if(localStorage.getItem(KEY)!==null||localStorage.getItem(OLD_KEY)!==null) storageOK=true; }catch(e){}
+}
 /* validated categorical palette (picker redesign, 2026-08-20 - superseded
    its own first draft the same night: an earlier 19-color version, built
    around keeping the original 8 plus softer additions, is gone entirely -

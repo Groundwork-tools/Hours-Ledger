@@ -2976,7 +2976,8 @@ function runAsyncTests(H,d){
     .then(function(r){ return runUndoConnectRuleTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runFailedPushTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runQuotaSaveFailureTests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runUndoCapTests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runUndoCapTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runQuotaProbeTests().then(function(more){ return r.concat(more); }); });
 }
 
 /* ---------------------------------------------------------------------
@@ -4407,6 +4408,71 @@ function runUndoCapTests(){
     });
   }).catch(function(e){
     check("the undo cap chain itself threw: "+(e&&e.message||e),false);
+  }).then(function(){ T.cleanKeys(); return T.results; });
+}
+
+/* Item 3 - a failed startup probe must not hide data that is readable. app.js
+   probes localStorage with a tiny setItem at load; on a full origin that throws,
+   storageOK went false, and readStore then read only the empty in-memory
+   fallback: the app opened an EMPTY ledger, with driveConnected, DEVICE_ID and
+   the cached token all gone (the real data sat untouched in localStorage,
+   unread). Reading still works when writing doesn't. */
+function runQuotaProbeTests(){
+  var T=quotaTools(),check=T.check,base={};
+  return T.connectedFrame().then(function(f){
+    if(!f) return null;
+    var h=f.H;
+    /* the origin is exactly full: this edit reaches Drive but not this device */
+    T.fill(f,0);
+    T.log(h,"Q1 edit",660,720);
+    return waitFor(function(){ return T.remoteHas(h,"Q1 edit"); },6000).then(function(){
+      return T.settle(h);
+    }).then(function(){
+      var saved=JSON.parse(localStorage.getItem(T.KEY));
+      base.n=T.count(saved); base.dev=h.getDeviceId();
+      var used=f.w.__quotaUsed();
+      f.el.parentNode.removeChild(f.el);
+      /* ---- Q2: reload with the origin exactly full (the 3-char probe cannot fit) ---- */
+      return T.quotaFrame({on:true,limit:used});
+    }).then(function(r){
+      var h2=r.H;
+      if(!h2){ check("Q2 setup: reloaded frame loaded",false); return null; }
+      var st=h2.getState();
+      check("Q2 setup: the startup probe really did fail (nothing can be written, not even a new key)",
+        (function(){ try{ r.w.localStorage.setItem("zz-probe-check","1"); r.w.localStorage.removeItem("zz-probe-check"); return false; }catch(e){ return e.name==="QuotaExceededError"; } })());
+      check("Q2 [control]: the saved ledger in localStorage was not overwritten by the reload",T.storedKeyHas("Base"));
+      check("Q2: the reloaded app shows the saved ledger, not an empty one",T.count(st)>=base.n,"entries shown="+T.count(st)+" saved="+base.n);
+      check("Q2: driveConnected survives the reload",st.driveConnected===true,"driveConnected="+st.driveConnected);
+      check("Q2: DEVICE_ID survives the reload",h2.getDeviceId()===base.dev,"before="+base.dev+" after="+h2.getDeviceId());
+      check("Q2: the cached Drive token survives the reload",!!h2.getCachedToken(),"getCachedToken="+h2.getCachedToken());
+      check("Q2: the 'held in memory only / blocking automatic saving' banner is NOT what explains this (storage is readable, it is full)",
+        !/blocking automatic saving/i.test(T.warnText(r)),"warn='"+T.warnText(r).slice(0,120)+"'");
+      /* ---- Q3: the next sync, from the full-origin reload ---- */
+      r.d.getElementById("connectDrive").click();
+      return waitFor(function(){ return /Drive: (synced|sync failed)/.test(T.btn(r)); },5000).then(function(){
+        return T.settle(h2);
+      }).then(function(){
+        var remote=h2.fakeDriveRead();
+        check("Q3 [control]: the sync did not push an empty ledger over Drive (Base and Q1 edit still live there)",
+          T.remoteHas(h2,"Base")&&T.remoteHas(h2,"Q1 edit"),"live entries on Drive="+(remote?remote.entries.filter(function(e){ return !e.deleted; }).length:0));
+        check("Q3: the ledger shown after the sync includes what Drive holds (Base and Q1 edit)",T.localHas(h2,"Base")&&T.localHas(h2,"Q1 edit"),
+          "Base="+T.localHas(h2,"Base")+" Q1 edit="+T.localHas(h2,"Q1 edit")+" button='"+T.btn(r)+"'");
+        check("Q3: what the sync restored was saved on this device, or the user is told it was not",
+          T.storedKeyHas("Q1 edit")||(T.warnShown(r)&&!/^(saved|synced)/i.test(T.status(r))),"stored="+T.storedKeyHas("Q1 edit")+" warn="+T.warnShown(r)+" status='"+T.status(r)+"'");
+        r.el.parentNode.removeChild(r.el);
+      });
+    });
+  }).then(function(){
+    /* ---- control: storage that is genuinely unusable (nothing readable, nothing writable) is still treated as blocked ---- */
+    T.cleanKeys();
+    return T.quotaFrame({on:true,limit:0}).then(function(b){
+      check("blocked [control]: with nothing readable and nothing writable, the 'blocking automatic saving' banner is shown",
+        T.warnShown(b)&&/blocking automatic saving/i.test(T.warnText(b)),"warn visible="+T.warnShown(b)+" text='"+T.warnText(b).slice(0,80)+"'");
+      check("blocked [control]: ...and the app still opens a usable (default) ledger",b.H.getState().categories.length>0);
+      b.el.parentNode.removeChild(b.el);
+    });
+  }).catch(function(e){
+    check("the quota probe chain itself threw: "+(e&&e.message||e),false);
   }).then(function(){ T.cleanKeys(); return T.results; });
 }
 })();
