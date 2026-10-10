@@ -2975,7 +2975,8 @@ function runAsyncTests(H,d){
     .then(function(r){ return runUndoStaleSnapshotTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runUndoConnectRuleTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runFailedPushTests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runQuotaSaveFailureTests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runQuotaSaveFailureTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runUndoCapTests().then(function(more){ return r.concat(more); }); });
 }
 
 /* ---------------------------------------------------------------------
@@ -4316,6 +4317,96 @@ function runQuotaSaveFailureTests(){
     });
   }).catch(function(e){
     check("the quota save-failure chain itself threw: "+(e&&e.message||e),false);
+  }).then(function(){ T.cleanKeys(); return T.results; });
+}
+
+/* Item 2 - the persisted undo stack is capped by size. Real case: a phone held
+   hours-ledger-undo-v1 at 4,340 KB (up to 12 full-state snapshots) against a
+   ~5 MB origin shared with Money Ledger. The cap applies to what is WRITTEN
+   (the newest snapshots that fit UNDO_PERSIST_MAX_CHARS, never fewer than 1);
+   the in-memory stack (25) is unchanged. An already-oversized key is shrunk at
+   load and again before the ledger itself is written, so it can't be what makes
+   the ledger's own save fail. Sizes are in characters (key not included). */
+function runUndoCapTests(){
+  var T=quotaTools(),check=T.check,CAP=500000;
+  function storedUndo(){ var r=localStorage.getItem(T.UKEY); return r===null?null:r; }
+  function storedSteps(){ try{ return JSON.parse(storedUndo()||"[]"); }catch(e){ return null; } }
+  function item(i,pad){
+    var st={version:2,settings:{startHour:6,endHour:24,pad:new Array(pad+1).join("x")},categories:[],entries:{},weeklyVerdicts:{},weekCloseouts:{}};
+    return {s:JSON.stringify(st),d:"step "+i};
+  }
+  function plant(n,pad){
+    var a=[]; for(var i=0;i<n;i++) a.push(item(i,pad));
+    localStorage.setItem(T.UKEY,JSON.stringify(a));
+    return storedUndo().length;
+  }
+  function lastD(){ var a=storedSteps(); return a&&a.length?a[a.length-1].d:null; }
+  return Promise.resolve().then(function(){
+    /* ---- U1: the real case - a pre-filled 4,340 KB key, shrunk on load ---- */
+    T.cleanKeys();
+    var planted=plant(12,361000);
+    T.check("U1 setup: planted a 12-snapshot undo key of about 4,340 KB ("+planted+" chars)",planted>4300000&&planted<4400000);
+    return T.quotaFrame(null).then(function(f){
+      if(!f.H){ check("U1 setup: frame loaded",false); return; }
+      var len=storedUndo()?storedUndo().length:0,steps=storedSteps()||[];
+      check("U1: after load the persisted undo key is at most "+CAP+" chars",len>0&&len<=CAP,"chars="+len);
+      check("U1: ...and still holds at least one snapshot, the newest ('step 11')",steps.length>=1&&lastD()==="step 11","steps="+steps.length+" newest="+lastD());
+      check("U1 [control]: the in-memory stack is unchanged (12 snapshots loaded)",f.H.undoDepthForTest()===12,"depth="+f.H.undoDepthForTest());
+      f.el.parentNode.removeChild(f.el);
+    });
+  }).then(function(){
+    /* ---- U2: a full origin whose undo key is the problem: the ledger must still save ---- */
+    T.cleanKeys();
+    plant(12,361000);
+    /* load with 10 chars of headroom: the probe fits, nothing else can grow */
+    return T.quotaFrame({on:true,limit:Infinity}).then(function(f){
+      if(!f.H){ check("U2 setup: frame loaded",false); return; }
+      f.w.__quota.limit=f.w.__quotaUsed()+10; /* the shrink at load has already run; now the origin is 'full' for growth */
+      /* put the oversized key back, as if another tab (or the older app version) wrote it after load */
+      localStorage.setItem(T.UKEY,JSON.stringify((function(){ var a=[]; for(var i=0;i<12;i++) a.push(item(i,361000)); return a; })()));
+      f.w.__quota.limit=f.w.__quotaUsed()+10;
+      f.H.putEntry(T.DATE,"U2 entry",f.H.getState().categories[0].id,540,600,null);
+      f.H.persist();
+      check("U2: with an oversized undo key and a full origin, the ledger's own save still lands (undo shrunk BEFORE the state write)",
+        T.storedKeyHas("U2 entry"),"stored="+T.storedKeyHas("U2 entry")+" status='"+T.status(f)+"'");
+      check("U2: ...so no warning is shown and the status line says Saved",!T.warnShown(f)&&/^Saved/.test(T.status(f)),"warn="+T.warnShown(f)+" status='"+T.status(f)+"'");
+      check("U2: the undo key is within the cap after that save",storedUndo().length<=CAP,"chars="+storedUndo().length);
+      f.el.parentNode.removeChild(f.el);
+    });
+  }).then(function(){
+    /* ---- U3: floor of 1 - one snapshot bigger than the whole cap is still kept ---- */
+    T.cleanKeys();
+    plant(3,600000);
+    return T.quotaFrame(null).then(function(f){
+      var steps=storedSteps()||[];
+      check("U3: three 600,000-char snapshots persist as exactly one (the newest), over the cap on purpose",
+        steps.length===1&&lastD()==="step 2"&&storedUndo().length>CAP,"steps="+steps.length+" newest="+lastD()+" chars="+(storedUndo()||"").length);
+      check("U3 [control]: the in-memory stack still has all three",f.H.undoDepthForTest()===3,"depth="+f.H.undoDepthForTest());
+      f.el.parentNode.removeChild(f.el);
+    });
+  }).then(function(){
+    /* ---- U4: every ordinary write is capped too; memory keeps its own limit; the newest step survives a reload ---- */
+    T.cleanKeys();
+    return T.quotaFrame(null).then(function(f){
+      var h=f.H;
+      h.getState().settings.pad=new Array(200001).join("x"); /* a ledger whose snapshots are ~200,000 chars each */
+      /* snapshot() alone, no persist(): persist() would shrink the key by itself and hide a snapshot() that writes it uncapped */
+      for(var i=0;i<5;i++){ h.snapshot("add entry"); }
+      var len=storedUndo().length;
+      check("U4: after five snapshots of a ~200,000-char ledger the persisted key is within the cap",len<=CAP,"chars="+len+" steps="+(storedSteps()||[]).length);
+      check("U4 [control]: ...while the in-memory stack holds all five",h.undoDepthForTest()===5,"depth="+h.undoDepthForTest());
+      check("U4: the persisted steps are the NEWEST ones",lastD()==="add entry"&&(storedSteps()||[]).length>=1);
+      T.log(h,"U4 last",540,600); /* a real, persisted edit with its snapshot */
+      f.el.parentNode.removeChild(f.el);
+      return T.quotaFrame(null).then(function(g){
+        var before=T.count(g.H.getState());
+        g.H.undo();
+        check("U4 [control]: after a reload, Ctrl+Z undoes the most recent entry",T.count(g.H.getState())===before-1,"entries before="+before+" after="+T.count(g.H.getState()));
+        g.el.parentNode.removeChild(g.el);
+      });
+    });
+  }).catch(function(e){
+    check("the undo cap chain itself threw: "+(e&&e.message||e),false);
   }).then(function(){ T.cleanKeys(); return T.results; });
 }
 })();

@@ -1192,6 +1192,7 @@ function syncedStatusText(){
   return localSaveFailed?"On Drive, but not saved on this device — storage is full":"Synced with Drive";
 }
 function persist(){
+  shrinkOversizedUndo();
   var saved=writeStore(KEY,JSON.stringify(state));
   noteLocalSave(saved);
   if(saved) setStatus(fileHandle?("Saving to "+fileName+"…"):"Saved "+clockNow());
@@ -1472,6 +1473,41 @@ var undoStack=[], redoStack=[];
 var TEST_MODE_KEEP_UNDO_ON_CONNECT=false;
 try{ undoStack=JSON.parse(readStore(UKEY))||[]; }catch(e){ undoStack=[]; }
 
+/* The persisted undo stack is capped by size, the in-memory one (25) is not.
+   Every snapshot is a FULL copy of the state, so 12 of them are 12x the ledger:
+   a real phone held hours-ledger-undo-v1 at 4,340 KB against a ~5 MB origin
+   shared with Money Ledger, and neither app could save any more. What is
+   written is the newest snapshots that fit UNDO_PERSIST_MAX_CHARS (string
+   length, ~500 KB), and never fewer than one - so after a reload there is
+   always at least one step to undo, however large the ledger has grown.
+   Cost, accepted: with a ~350,000-character ledger that is ONE persisted step
+   across a reload (a narrow reading of hard rule 5: undo is whole inside a
+   session, shallower across a reload). shrinkOversizedUndo() also repairs a
+   key an older version (or another tab) already wrote oversized; it only ever
+   shrinks, so it can't fail on a full origin, and persist() calls it BEFORE
+   writing the ledger so the undo key can't be what makes that write fail. */
+var UNDO_PERSIST_MAX_CHARS=500000;
+function capUndoForStorage(stack){
+  var kept=[],total=2;
+  for(var i=stack.length-1;i>=0;i--){
+    var n=JSON.stringify(stack[i]).length+1;
+    if(kept.length&&total+n>UNDO_PERSIST_MAX_CHARS) break;
+    kept.unshift(stack[i]); total+=n;
+  }
+  return kept;
+}
+function persistUndo(){ writeStore(UKEY,JSON.stringify(capUndoForStorage(undoStack.slice(-12)))); }
+function shrinkOversizedUndo(){
+  if(typeof UKEY==="undefined") return; /* persist() can run before this section has executed */
+  var raw=readStore(UKEY);
+  if(!raw||raw.length<=UNDO_PERSIST_MAX_CHARS) return;
+  var st; try{ st=JSON.parse(raw); }catch(e){ return; }
+  if(!Array.isArray(st)) return;
+  var kept=capUndoForStorage(st);
+  if(kept.length<st.length) writeStore(UKEY,JSON.stringify(kept));
+}
+shrinkOversizedUndo();
+
 /* A successful connect trims the undo history instead of emptying it. The rule:
      (1) always drop the "before Drive connect" snapshot connectDrive() just
          pushed (connectSnap), whatever it contains;
@@ -1506,13 +1542,13 @@ function clearUndoHistoryAfterConnect(connectSnap){
   }
   undoStack=undoStack.filter(function(x){ return x!==connectSnap&&syncedBefore(x); });
   redoStack=[];
-  writeStore(UKEY,JSON.stringify(undoStack.slice(-12)));
+  persistUndo();
 }
 function snapshot(desc){
   undoStack.push({s:JSON.stringify(state),d:desc||"change"});
   if(undoStack.length>25) undoStack.shift();
   redoStack=[];
-  writeStore(UKEY,JSON.stringify(undoStack.slice(-12)));
+  persistUndo();
 }
 /* Undo/redo used to replace state wholesale with the snapshot. With Drive
    connected that makes an undone record ABSENT locally rather than
@@ -1664,7 +1700,7 @@ function undo(){
   if(!undoStack.length){ showToast("Nothing left to undo",false); return; }
   var step=undoStack.pop();
   redoStack.push({s:JSON.stringify(state),d:step.d});
-  writeStore(UKEY,JSON.stringify(undoStack.slice(-12)));
+  persistUndo();
   applyState(step.s);
   showToast("Undone: "+step.d,false);
 }
@@ -1672,7 +1708,7 @@ function redo(){
   if(!redoStack.length) return;
   var step=redoStack.pop();
   undoStack.push({s:JSON.stringify(state),d:step.d});
-  writeStore(UKEY,JSON.stringify(undoStack.slice(-12)));
+  persistUndo();
   applyState(step.s);
   showToast("Redone: "+step.d,false);
 }
@@ -3694,6 +3730,7 @@ if(TEST_MODE){
     recheckDriveToken:recheckDriveToken,
     setTestHangToken:function(v){ TEST_MODE_HANG_TOKEN=v; },
     setKeepUndoOnConnectForTest:function(v){ TEST_MODE_KEEP_UNDO_ON_CONNECT=v; },
+    undoDepthForTest:function(){ return undoStack.length; },
     setTestLateSuccessMs:function(v){ TEST_MODE_LATE_SUCCESS_MS=v; },
     loadGisScript:loadGisScript,
     resolveTestGisScriptLoad:resolveTestGisScriptLoad,
