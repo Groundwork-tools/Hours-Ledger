@@ -2974,7 +2974,8 @@ function runAsyncTests(H,d){
     .then(function(r){ return runUndoKeepsConnectionTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runUndoStaleSnapshotTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runUndoConnectRuleTests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runFailedPushTests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runFailedPushTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runQuotaSaveFailureTests().then(function(more){ return r.concat(more); }); });
 }
 
 /* ---------------------------------------------------------------------
@@ -4164,6 +4165,158 @@ function runFailedPushTests(){
       });
     });
   }).then(function(){ return results; });
+}
+
+/* ---------------------------------------------------------------------
+   A full localStorage. Hours Ledger and Money Ledger share ONE origin quota on
+   GitHub Pages; a real phone hit it (undo key ~4.3 MB). Found by running, not
+   reading: with setItem throwing QuotaExceededError, writeStore swallowed the
+   error into an in-memory object nothing reads, the status line still said
+   "Saved"/"Synced with Drive", and a pull from Drive was written nowhere
+   without a word.
+
+   Harness: selftest-quota-frame.html installs a quota-limited setItem (budget
+   in characters, a write that doesn't grow the total is allowed) BEFORE
+   index.html is written over it; the fake Drive's key is exempt, because it
+   stands in for a remote (app.js's fakeDrive* talk to localStorage directly
+   for the same reason). "headroom 0" = exactly full: every write that grows
+   the store throws, including the startup probe. "headroom 10" = the 3-char
+   probe fits, the ledger doesn't. Rows marked [control] pass before the fix
+   too and exist to catch a fix that breaks them. */
+function quotaTools(){
+  var T={DATE:"2026-04-20",KEY:"hours-ledger-selftest-v2",UKEY:"hours-ledger-selftest-undo-v1",results:[]};
+  T.check=function(name,cond,observed){
+    T.results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  };
+  T.delay=function(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); };
+  T.btn=function(f){ return f.d.getElementById("connectDrive").textContent; };
+  T.status=function(f){ return f.d.getElementById("statusText").textContent; };
+  T.warnShown=function(f){ var w=f.d.getElementById("warn"); return !!w&&w.style.display==="block"; };
+  T.warnText=function(f){ return f.d.getElementById("warn").textContent; };
+  T.cleanKeys=function(){
+    ["hours-ledger-selftest-v2","hours-ledger-device-id-TESTMODE","hours-ledger-selftest-undo-v1",
+     "hours-ledger-fakedrive-TESTMODE","hours-ledger-access-token-TESTMODE"].forEach(function(k){
+      try{ localStorage.removeItem(k); }catch(e){}
+    });
+  };
+  T.quotaFrame=function(seed){
+    window.__quotaSeed=seed||null;
+    return new Promise(function(resolve){
+      var el=document.createElement("iframe");
+      el.style.display="none";
+      el.src="selftest-quota-frame.html?hltest=1&v="+Date.now();
+      document.body.appendChild(el);
+      var start=Date.now();
+      (function poll(){
+        var w=el.contentWindow,ok=false;
+        try{ ok=!!(w&&w.__HL_TEST__&&el.contentDocument.readyState==="complete"); }catch(e){}
+        if(ok) return setTimeout(function(){ resolve({H:w.__HL_TEST__,d:el.contentDocument,el:el,w:w}); },150);
+        if(Date.now()-start>8000) return resolve({H:null,d:null,el:el,w:w});
+        setTimeout(poll,20);
+      })();
+    });
+  };
+  T.settle=function(h){
+    return T.delay(250).then(function(){ return waitFor(function(){ return !h.isDriveSyncInFlight(); },4000); }).then(function(){ return T.delay(50); });
+  };
+  T.remoteHas=function(h,label){
+    var r=h.fakeDriveRead();
+    return !!r&&r.entries.some(function(e){ return e.label===label&&!e.deleted; });
+  };
+  T.localHas=function(h,label){
+    var st=h.getState(),found=false;
+    Object.keys(st.entries).forEach(function(d){ st.entries[d].forEach(function(e){ if(e.label===label) found=true; }); });
+    return found;
+  };
+  T.count=function(st){ var n=0; Object.keys(st.entries).forEach(function(d){ n+=st.entries[d].length; }); return n; };
+  T.storedKeyHas=function(label){ return (localStorage.getItem(T.KEY)||"").indexOf(label)>-1; };
+  T.fill=function(f,headroom){ f.w.__quota.limit=f.w.__quotaUsed()+headroom; f.w.__quota.on=true; };
+  T.log=function(h,label,start,end){
+    h.snapshot("add entry"); h.putEntry(T.DATE,label,h.getState().categories[0].id,start,end,null); h.persist();
+  };
+  /* a connected frame with one entry ("Base") saved locally and on Drive, and a cached token */
+  T.connectedFrame=function(){
+    T.cleanKeys();
+    return T.quotaFrame(null).then(function(f){
+      if(!f.H){ T.check("setup: quota frame loaded",false); return null; }
+      f.d.getElementById("connectDrive").click();
+      return waitFor(function(){ return T.btn(f)==="Drive: synced"; },4000).then(function(ok){
+        T.check("setup: fake Drive connect completed",ok);
+        return T.settle(f.H);
+      }).then(function(){
+        f.H.cacheTokenForTest("tok-before-quota",3600);
+        T.log(f.H,"Base",540,600);
+        return waitFor(function(){ return T.remoteHas(f.H,"Base"); },4000);
+      }).then(function(ok){
+        T.check("setup: the baseline entry reached Drive",ok);
+        return T.settle(f.H);
+      }).then(function(){
+        T.check("setup: the baseline entry is in the saved ledger on this device",T.storedKeyHas("Base"));
+        return f;
+      });
+    });
+  };
+  return T;
+}
+
+/* Item 1 - a failed local save must be said out loud, push or pull. */
+function runQuotaSaveFailureTests(){
+  var T=quotaTools(),check=T.check;
+  var NOT_SAVED=/not saved/i,CLAIMS_OK=/^(saved|synced)/i;
+  return T.connectedFrame().then(function(f){
+    if(!f) return null;
+    var h=f.H;
+    /* ---- a local edit while the origin is exactly full ---- */
+    T.fill(f,0);
+    T.log(h,"Q1 edit",660,720);
+    check("Q1 setup: the local save really failed (the edit is not in localStorage)",!T.storedKeyHas("Q1 edit"));
+    check("Q1: right after the failed save, the status line does not say Saved",!CLAIMS_OK.test(T.status(f))&&NOT_SAVED.test(T.status(f)),"status='"+T.status(f)+"'");
+    check("Q1: a persistent warning is shown at once",T.warnShown(f),"warn visible="+T.warnShown(f));
+    return waitFor(function(){ return T.remoteHas(h,"Q1 edit"); },6000).then(function(onDrive){
+      return T.settle(h).then(function(){
+        check("Q1 [control]: the edit still reaches Drive after the failed local save",onDrive);
+        check("Q1: after the sync finishes, the status line does not say Synced or Saved while the local write failed",
+          !CLAIMS_OK.test(T.status(f))&&NOT_SAVED.test(T.status(f)),"status='"+T.status(f)+"' button='"+T.btn(f)+"'");
+        check("Q1: the warning is still up after the sync (persistent, not a toast)",T.warnShown(f));
+        check("Q1: the warning says it is memory-only and names what is using the storage (as Money Ledger's does)",
+          /memory/i.test(T.warnText(f))&&/KB/.test(T.warnText(f))&&/hours-ledger/.test(T.warnText(f)),"warn='"+T.warnText(f).slice(0,260)+"'");
+        /* ---- recovery: space comes back, the next save succeeds ---- */
+        f.w.__quota.on=false;
+        T.log(h,"After recovery",780,840);
+        check("Q1 [control]: once a save succeeds the status line says Saved again",/^Saved/.test(T.status(f)),"status='"+T.status(f)+"'");
+        check("Q1 [control]: ...and the warning is gone",!T.warnShown(f),"warn visible="+T.warnShown(f));
+        check("Q1 [control]: ...and the earlier unsaved edit is now in localStorage too",T.storedKeyHas("Q1 edit")&&T.storedKeyHas("After recovery"));
+      });
+    }).then(function(){
+      /* ---- the pull path (Q4): a connected device whose store can't take the merged ledger ---- */
+      var used=f.w.__quotaUsed();
+      f.el.parentNode.removeChild(f.el);
+      return T.quotaFrame({on:true,limit:used+10});
+    }).then(function(r){
+      var h3=r.H;
+      if(!h3){ check("Q4 setup: reloaded frame loaded",false); return null; }
+      return T.settle(h3).then(function(){
+        var rem=h3.fakeDriveRead();
+        rem.entries.push({id:"pulled-from-B",date:T.DATE,label:"Pulled",cat:null,start:900,end:960,
+          updatedAt:new Date(Date.now()-600000).toISOString(),updatedBy:"dev-B",deleted:false,deletedAt:null});
+        h3.fakeDriveWrite(rem);
+        h3.scheduleDriveSync();
+        return T.settle(h3).then(function(){ return T.delay(2500); }).then(function(){ return T.settle(h3); });
+      }).then(function(){
+        check("Q4 setup: the pulled entry could not be written locally",!T.storedKeyHas("Pulled"));
+        check("Q4 [control]: the pull is not reported as a failed sync",T.btn(r)!=="Drive: sync failed","button='"+T.btn(r)+"'");
+        check("Q4 [control]: the pulled entry is in the running app",T.localHas(h3,"Pulled"));
+        check("Q4 [control]: Drive still holds everything, including the pulled entry",
+          T.remoteHas(h3,"Base")&&T.remoteHas(h3,"Pulled"));
+        check("Q4: the status line does not say Synced or Saved when the merged ledger could not be written here",
+          !CLAIMS_OK.test(T.status(r))&&NOT_SAVED.test(T.status(r)),"status='"+T.status(r)+"'");
+        check("Q4: the persistent warning is shown",T.warnShown(r),"warn visible="+T.warnShown(r));
+        r.el.parentNode.removeChild(r.el);
+      });
+    });
+  }).catch(function(e){
+    check("the quota save-failure chain itself threw: "+(e&&e.message||e),false);
+  }).then(function(){ T.cleanKeys(); return T.results; });
 }
 })();
 </script>

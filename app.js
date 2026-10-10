@@ -20,7 +20,11 @@ try{
 var mem={}, storageOK=true;
 try{ localStorage.setItem("__t","1"); localStorage.removeItem("__t"); }catch(e){ storageOK=false; }
 function readStore(k){ try{ return storageOK?localStorage.getItem(k):(mem[k]||null); }catch(e){ return mem[k]||null; } }
-function writeStore(k,v){ try{ storageOK?localStorage.setItem(k,v):(mem[k]=v); }catch(e){ mem[k]=v; } }
+/* Returns true only when the value actually reached localStorage. Callers that
+   don't care can ignore it; persist() and applyState() use it to say so when a
+   save did not land (a full origin throws QuotaExceededError here, which used to
+   be swallowed into `mem` - an object nothing reads while storageOK is true). */
+function writeStore(k,v){ try{ if(storageOK){ localStorage.setItem(k,v); return true; } mem[k]=v; return false; }catch(e){ mem[k]=v; return false; } }
 
 /* hltest=1 is only ever set by selftest.html, so it can exercise real save/undo
    logic without ever touching the real saved weeks under KEY/UKEY below */
@@ -753,18 +757,22 @@ function syncEngine(localStateIn,remoteFile,deviceId){
    at the top of every function, not just by convention at the call site - none
    of these can run for a real user by construction, because TEST_MODE itself
    only ever comes from selftest.html's own URL flag. */
+/* The fake Drive stands in for a REMOTE, so it talks to localStorage directly,
+   not through readStore/writeStore: those fall back to the in-memory `mem` when
+   the local store is unusable, and a remote must not degrade with the device
+   (quota-full tests, selftest-quota-frame.html, exempt this one key). */
 var FAKE_DRIVE_KEY="hours-ledger-fakedrive-TESTMODE";
 function fakeDriveRead(){
   if(!TEST_MODE) throw new Error("fakeDriveRead is TEST_MODE only");
-  try{ return JSON.parse(readStore(FAKE_DRIVE_KEY)); }catch(e){ return null; }
+  try{ return JSON.parse(localStorage.getItem(FAKE_DRIVE_KEY)); }catch(e){ return null; }
 }
 function fakeDriveWrite(data){
   if(!TEST_MODE) throw new Error("fakeDriveWrite is TEST_MODE only");
-  writeStore(FAKE_DRIVE_KEY,JSON.stringify(data));
+  localStorage.setItem(FAKE_DRIVE_KEY,JSON.stringify(data));
 }
 function fakeDriveReset(){
   if(!TEST_MODE) throw new Error("fakeDriveReset is TEST_MODE only");
-  writeStore(FAKE_DRIVE_KEY,JSON.stringify(null));
+  localStorage.setItem(FAKE_DRIVE_KEY,JSON.stringify(null));
 }
 
 /* ---------------- Google Drive OAuth (Google Identity Services token client) ----------------
@@ -1144,9 +1152,49 @@ function writeLinkedFile(){
   })();
 }
 
+/* ---- a local save that did not land ----
+   localSaveFailed is in-memory only (a fresh load starts clean, like the other
+   session flags) and is set by every write of the ledger key. While it is true
+   no status line may say Saved or Synced: Drive may hold the change, this
+   device does not. The persistent warning reuses #warn; the "blocked" message
+   shown at load (storageOK false) is left alone. */
+var localSaveFailed=false, storageFullWarned=false;
+function storageUsageText(){
+  var rows=[],total=0;
+  try{
+    for(var i=0;i<localStorage.length;i++){
+      var k=localStorage.key(i),n=k.length+(localStorage.getItem(k)||"").length;
+      rows.push({k:k,n:n}); total+=n;
+    }
+  }catch(e){}
+  rows.sort(function(a,b){ return b.n-a.n; });
+  function kb(n){ return Math.round(n*2/1024).toLocaleString("en-US")+" KB"; }
+  return kb(total)+" used: "+rows.slice(0,3).map(function(r){ return r.k+" "+kb(r.n); }).join(", ");
+}
+function noteLocalSave(ok){
+  localSaveFailed=!ok;
+  var w=document.getElementById("warn");
+  if(!ok){
+    setStatus("Not saved on this device — storage is full",true);
+    if(storageOK&&!storageFullWarned){
+      storageFullWarned=true;
+      w.textContent="Not saved on this device: this browser's storage for this site is full ("+storageUsageText()+
+        "). This change exists in memory only and will be lost if you close or reload the app. Export a copy now. If Drive sync is connected it still goes to Drive.";
+      w.style.display="block";
+    }
+  }else if(storageFullWarned){
+    storageFullWarned=false;
+    w.textContent=""; w.style.display="none";
+  }
+}
+/* what the sync paths may claim once a push has landed */
+function syncedStatusText(){
+  return localSaveFailed?"On Drive, but not saved on this device — storage is full":"Synced with Drive";
+}
 function persist(){
-  writeStore(KEY,JSON.stringify(state));
-  setStatus(fileHandle?("Saving to "+fileName+"…"):"Saved "+clockNow());
+  var saved=writeStore(KEY,JSON.stringify(state));
+  noteLocalSave(saved);
+  if(saved) setStatus(fileHandle?("Saving to "+fileName+"…"):"Saved "+clockNow());
   if(fileHandle){
     clearTimeout(writeTimer);
     writeTimer=setTimeout(writeLinkedFile,1200);
@@ -1292,7 +1340,7 @@ function connectDrive(){
       var sweptNote=(syncResult.sweptCompress&&syncResult.sweptCompress.length)?
         " "+describeCompressSweep(syncResult.sweptCompress):"";
       driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts}).then(function(){
-        setStatus("Synced with Drive");
+        setStatus(syncedStatusText());
         document.getElementById("connectDrive").textContent="Drive: synced";
         showToast("Connected — your weeks are syncing."+sweptNote,false);
       }).catch(function(){
@@ -1399,7 +1447,7 @@ function runDriveSync(manual){
       if(syncResult.sweptCompress&&syncResult.sweptCompress.length) showToast(describeCompressSweep(syncResult.sweptCompress),false);
       return driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts}).then(function(){
         driveSyncInFlight=false;
-        setStatus("Synced with Drive");
+        setStatus(syncedStatusText());
         document.getElementById("connectDrive").disabled=false;
         document.getElementById("connectDrive").textContent="Drive: synced";
       });
@@ -1605,7 +1653,7 @@ function applyState(json){
   migrateVerdictScale(state);
   migrateVerdictTombstoneCollisions(state);
   migrateRecentColors(state);
-  writeStore(KEY,JSON.stringify(state));
+  noteLocalSave(writeStore(KEY,JSON.stringify(state)));
   if(fileHandle){ clearTimeout(writeTimer); writeTimer=setTimeout(writeLinkedFile,600); }
   /* an undo/redo that wrote tombstones is a real edit: it has to reach Drive
      like any other, not wait for some later edit or reload to carry it */
