@@ -398,6 +398,15 @@ on purpose.
   OAuth only works from the live origin, not a branch preview) — the
   localhost real-browser check on the same code paths was accepted as
   sufficient. `selftest.html`: 369/369.
+- **Full localStorage incident** (2026-10-10): merged to `main` (`03355d9`) and
+  live; **closed**. Verified by Sebastian on a real iPhone (Chrome) on the real
+  origin with Drive connected: Hours Ledger loads real data with no red box and
+  a new entry saves and survives reload; Money Ledger logs an expense with no
+  "Not saved" toast and it survives reload (the original symptom); sync reached
+  the laptop in both directions. Not verified: the undo key shrinking on the
+  real phone, local-only users on the real origin, preset 2, Safari. Full
+  diagnosis, the fixes and the ran-versus-not record: backlog item 24.
+  `selftest.html`: 0 failing / 575. Open follow-ups: items 25, 26 and 27.
 
 ---
 
@@ -2386,8 +2395,11 @@ dashboard styling.
     first synced the record. `updatedAt` is not the time the entry was
     logged.
 
-24. **A full localStorage — investigated, fixed on `investigate/quota-full`,
-    NOT merged (2026-10-10).** Reported: on a phone the shared origin
+24. **A full localStorage — CLOSED 2026-10-10: investigated, fixed, merged to
+    `main` (`03355d9`) and on a real phone on the real origin the symptom is gone
+    (undo shrink not measured there, see below).** (Built
+    on `investigate/quota-full`. The incident is closed; its follow-ups, items
+    25-27, are not.) Reported: on a phone the shared origin
     (`groundwork-tools.github.io`, Hours Ledger + Money Ledger) was full at
     5,169 KB: `hours-ledger-undo-v1` 4,340 KB, `hours-ledger-v2` 679 KB,
     `money-ledger-v1` 143 KB; Money Ledger could no longer save. (DevTools
@@ -2422,9 +2434,9 @@ dashboard styling.
     **Not done:** `hours-ledger-v2` itself still grows (tombstones, item 15,
     ~60 a week; entries) toward the shared quota; nothing prunes it (item 27).
     Money Ledger's side is in its own `CLAUDE.md` ("General fixes 2026-10-10"
-    and Backlog 5-6; committed on its `investigate/quota-full`). Not verified
-    on a real phone/WebKit; the quota model counts characters, Chrome headless
-    only.
+    and Backlog 5-6; merged there too). The tests' quota model counts characters
+    in headless Chrome; the phone verification records below are the WebKit
+    evidence.
 
     **Found later, 2026-10-10 (ran, headless Chrome, staging rig, prefill
     preset 1): on the pre-fix build, "Export a copy" writes an EMPTY ledger when
@@ -2465,7 +2477,29 @@ dashboard styling.
       entry; one match).
     - ***Not covered:*** preset 2; Safari; the real origin
       (`groundwork-tools.github.io`); the Drive-connected path; the contents of
-      the Money export's unsaved entry (only its size was checked).
+      the Money export's unsaved entry (only its size was checked). (The
+      real-origin and Drive-connected gaps are partly closed by the next
+      record.)
+
+    **Real phone, real origin, after the merge (observed by Sebastian himself,
+    2026-10-10; written down here on his report, not observed from this
+    tool).** iPhone, Chrome (WebKit), `groundwork-tools.github.io` itself,
+    Drive connected, running the merged `main`.
+    - *Ran:* Hours Ledger - no red box, real categories and entries loaded, a
+      new entry saved and survived a reload. Money Ledger - an expense logged
+      with no "Not saved" toast, and it survived a reload; this was the
+      original symptom and it is gone. Sync worked in both directions: both new
+      entries arrived on the laptop. He deleted his test entries afterwards.
+    - ***Not verified:*** the undo key shrinking on the real phone (that check
+      was skipped; working saves are indirect evidence only); local-only users
+      on the real origin (Drive was connected for this run); preset 2; Safari.
+      The first pre-fix attempt on the staging rig that did not fail is still
+      unexplained.
+    - **Incident closed, 2026-10-10.** What stays open is the follow-up
+      backlog, not the incident: item 25 (a way to free space in the app),
+      item 26 (the banner's Drive sentence) and item 27 (the 2026-11-10
+      re-measure of `hours-ledger-v2` growth and the 2026-12-10 deadline).
+      None of those is done.
 
 25. **No in-app way for a local-only user to free space.** When the red
     banner appears the only thing it tells them to do is "Export a copy now".
@@ -2489,7 +2523,8 @@ dashboard styling.
     item 24. (The same sentence is in Money Ledger's toast, which is its
     Backlog 5-6 to decide.)
 27. **Tombstone cleanup and entry growth - re-measure on 2026-11-10, decide by
-    2026-12-10 (proposed dates).** Extends item 15.
+    2026-12-10 (proposed dates).** Extends item 15. **Status: OPEN** (as of
+    2026-10-10 neither date has passed and nothing below is done).
     - *Measured* (compact JSON characters, two real exports): 2026-08-31
       186,063 -> 2026-10-05 348,903, i.e. +162,840 in 35 days, about 4,650 a
       day or 140,000 a month. Entries 820 -> 1,567 (about 95,000 a month),
