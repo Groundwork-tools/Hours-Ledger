@@ -413,6 +413,32 @@ on purpose.
   real phone, local-only users on the real origin, preset 2, Safari. Full
   diagnosis, the fixes and the ran-versus-not record: backlog item 24.
   `selftest.html`: 0 failing / 575. Open follow-ups: items 25, 26 and 27.
+- **Export week** (2026-10-12): merged to `main` (`4e073b8`) and live; full
+  design, schema and mutation record: backlog item 28. `selftest.html`:
+  `PASS - 0 failing / 647 total` on the merged `main` before the push.
+  - *Verified on the live site (ran, this session):* the new code was served
+    (checked with cache-busting requests, then in a fresh browser-pane profile
+    with empty storage, not a literal incognito window); the "Export week" button
+    sits next to "Export a copy"; the click produced
+    `hours-ledger-week-2026-10-12.json`; the file has exactly the nine agreed
+    top-level keys; `definitions.verdict` ends "Any other stored value is
+    exported as null." and `definitions.dst` is the date-free wording; no
+    `fetch` call fired during the click. The download was intercepted to read
+    it, so this run did not test a browser writing the file to disk.
+  - *Real phone (reported by Sebastian, 2026-10-12; recorded on his word, not
+    observed from this tool):* on the live site the Export week button saved a
+    downloadable file on his phone.
+  - *First real use, as reported by Sebastian (not observed from this tool):*
+    the export of week 2026-10-05 (162 entries) was recounted independently with
+    a per-minute oracle and matched with zero mismatches in entries, per-day
+    totals, week totals and all 19 category totals. He also checked the app's
+    category panel against the file by hand and it matched, and an agent audit
+    of the file reproduced the same totals. This is the first evidence on real
+    data, as opposed to the suite's fixtures.
+  - *NOT verified:* the midnight, overlap and verdict cases against live data
+    (the suite covers them with fixtures; the real week above is evidence for
+    totals and counts, not for those cases); the two daylight-saving days; a
+    literal incognito window.
 
 ---
 
@@ -2572,7 +2598,8 @@ dashboard styling.
       Needs its own design discussion before any code (hard rule 6).
 
 28. **Export week - a data-only JSON file for the week on screen. Built on
-    `feature/export-week` (2026-10-11); NOT merged.** Purpose (Sebastian): hand
+    `feature/export-week` (2026-10-11); merged to `main` as `4e073b8` and live
+    since 2026-10-12.** Purpose (Sebastian): hand
     one file to an agent that audits the week, instead of screenshotting the
     grid, which gets misread. Data and static definitions only, no conclusions.
     A button "Export week" in the "Your data" tools, next to "Export a copy";
@@ -2745,9 +2772,21 @@ dashboard styling.
       preconditions and controls (E01 "builder exists", E15/E16 setup, E17
       connect/precondition/"state keeps its sync fields"); an empty-file
       pass would show there as a failing row, not a green one.
-    - **Not covered:** a real browser saving the file on a real phone (the test
-      spies on `createObjectURL` and the anchor's `click`; it proves the
-      wiring, not that Safari downloads it); an agent actually reading the file;
-      the two DST days themselves.
+    - **Not covered (updated 2026-10-12):** the suite spies on
+      `createObjectURL` and the anchor's `click`, so it proves the wiring, not
+      that a browser saves the file; that part was checked on a real phone after
+      the merge (see "What's live and verified" and the decision below). Still
+      not covered anywhere: the two daylight-saving days themselves, and
+      midnight, overlap and verdict cases against live data (the suite only).
+    - **Phone check moved from before the merge to after it (Sebastian,
+      2026-10-12).** The standing rule asks for a real-device preview of anything
+      touching touch or mobile layout before merging. Here the check was done on
+      the live site after the merge instead. Why: the feature is read-only (no
+      state write, no storage key, no sync), so the worst case is a button that
+      does nothing or a file that does not download, and a revert means
+      reverting one merge commit. The LAN preview suggested at the time (serving
+      the branch from the laptop) would have cost a setup for a risk that small.
+      The phone check passed. This narrows the rule for read-only additions; it
+      is not a precedent for anything that writes state.
 
 Feature creep is the known failure mode of this project.
