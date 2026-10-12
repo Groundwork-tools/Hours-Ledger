@@ -2068,12 +2068,12 @@ var WEEKDAY_FULL=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday",
 var WEEK_EXPORT_DEFINITIONS={
   logged:"loggedMinutes is the union of all entries' time: a minute covered by two or more entries is counted once.",
   categoryTotals:"Each categoryTotals minutes value is a plain sum of entry durations, so the rows together can exceed loggedMinutes. The excess is the overlap, summary.doubleBookedMinutes: sumOfEntryMinutes - loggedMinutes.",
-  doubleBookedMinutes:"In summary and per day: sum of entry durations minus the union, including overlap inside one category. Per category: minutes of that category's time also covered by an entry of another category or an uncategorised entry (as the app's on-screen 'overlaps' line); overlap between two entries of the same category is not counted there.",
+  doubleBookedMinutes:"In summary and per day: sum of entry durations minus the union, including overlap inside one category. Per category: minutes of that category's time also covered by an entry of another category or an uncategorised entry (as the app's on-screen 'overlaps' line); overlap between two entries of the same category is not counted there. Per-category values are not additive: they do not sum to the week's doubleBookedMinutes (a minute shared by two categories appears in both rows but once in the week figure, and same-category overlap appears in no row).",
   unlogged:"unloggedMinutes is 10080 minus loggedMinutes, over all 24 hours of all 7 days. The app's visible hours range is a display setting and does not change anything in this file.",
   uncategorised:"Entries with no category, and entries whose category no longer exists (categoryMissing: true, id kept, name null), are all counted in the row with id null.",
   weekMembership:"Entries belong to the week of their calendar date. An entry that crosses midnight is stored as two entries, one per date, with no link between them; an overnight Sunday entry's tail is on the next Monday and is in the next week's file.",
   time:"All dates and times are local. exportedAt is UTC. Times are minutes since midnight and HH:MM; an end of 24:00 means midnight at the end of that date.",
-  dst:"The app assumes 1440 minutes in every day. On a daylight-saving change day (next: Sun 25 Oct 2026) the real day is 23 or 25 hours, so that day's unlogged figure is off by 60 minutes.",
+  dst:"The app assumes every day has 1440 minutes (24 hours). On a daylight-saving change day the real day is 23 or 25 hours, so that day's unlogged figure is off by 60 minutes.",
   verdict:"verdict is the value set on that category for this week (increase, keep or cut), or null if none was set."
 };
 function round2(x){ return Math.round(x*100)/100; }

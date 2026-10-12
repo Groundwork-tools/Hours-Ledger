@@ -236,7 +236,13 @@ Serve the repo (`python3 -m http.server 8765`) and run Chrome with
 `--headless=new --disable-gpu --no-sandbox --user-data-dir=<tmp>
 --virtual-time-budget=300000 --dump-dom http://localhost:8765/selftest.html`,
 redirected to a file, then read the `id="summary"` div and the
-`.row` divs from that file. A full run takes several minutes, so start it in
+`.row` divs from that file. The summary reads `PASS - 0 failing / N total`,
+`FAIL - ...`, or `RUNNING - ... so far`; **only a line starting `PASS` counts**
+(2026-10-12 guard: a page whose test chain never started used to print
+`0 failing / 0 total`). The page appends a failing `GUARD` row if the finished
+run has fewer rows than `EXPECTED_MIN_ROWS` in `selftest.html` (639 when this
+was written); raise it in the same commit that adds tests, lower it only on
+purpose. A scratch copy that runs only one block will trip the guard by design. A full run takes several minutes, so start it in
 the background. Chrome keeps running after it has written the dump, so a
 command that waits for it to exit never returns — poll for the output file
 instead and parse it directly (then `pkill` the leftover Chrome and server).
@@ -2571,7 +2577,7 @@ dashboard styling.
     The week is `weekStart`, also in day view (E16 pins this). Code:
     `buildWeekExport(ws, exportedAt)` and the click handler in `app.js`,
     `privacy.html` has the one-line note, tests are `runExportWeekTests()` in
-    `selftest.html` (E01-E18, 62 rows).
+    `selftest.html` (E01-E18, 64 rows).
     - **Reuse, not reimplementation.** Week figures come from `weekTotals(ws)`;
       per-day logged/unlogged from `dayGaps(dateStr)`. **Checked by running,
       not only reading:** `dayGaps` does not depend on `settings.startHour/
@@ -2610,6 +2616,20 @@ dashboard styling.
       A deleted category: id kept, name null, `categoryMissing: true`, counted
       in the uncategorised row, as on the screen. A static definitions block, no
       conclusions. One line in `privacy.html`. Nothing else.
+    - **Per-category overlap is not additive, and no same-category overlap field
+      (Sebastian, 2026-10-12).** `definitions.doubleBookedMinutes` now says so in
+      words: per-category values do not sum to the week's. **Why no extra
+      field:** adding a per-category "overlap within the same category" number
+      would not make the figures reconcile, so it would add a column and
+      promise a reconciliation it cannot deliver. Worked on the test fixture:
+      Work/Admin (A) 60 cross-category + 30 same-category, Deep (B) 60
+      cross-category. The week's double-booked is 90. Per-category cross values
+      sum to 120, because the 60 minutes A and B share appear in BOTH rows but
+      once in the week figure. Adding A's same-category 30 gives 150, further
+      from 90, not closer. Reconciling would need a per-minute breakdown, a
+      different and much larger file. **Reopen only if an agent actually
+      misreads the file** (for example, sums the per-category values and
+      reports the total as the week's double-booking).
     - **Midnight and week edges.** `putEntry` splits at write time, so the
       export just reads two ordinary entries (first ends `1440` / `"24:00"`,
       second starts `0`). Entries belong to the week of their calendar date: a
@@ -2629,12 +2649,13 @@ dashboard styling.
       builder and handler source for them. 1, 5, 10: read-only - no state write,
       no snapshot (E09), no storage key. 2, 3: no dependency, no build step.
     - **Known limitation: daylight saving.** The app assumes 1440 minutes in
-      every day (minutes-from-midnight model). On a change day (next: Sun 25 Oct
-      2026, a 25-hour day) the real day is 23 or 25 hours, so that day's
-      "unlogged" is off by 60 minutes, in the app and in the file. Stated in the
-      file's `definitions.dst`, which is static text and names that one date:
-      update it after 2026-10-25 (or make the sentence date-free) or it will go
-      stale.
+      every day (minutes-from-midnight model). On a daylight-saving change day
+      the real day is 23 or 25 hours, so that day's "unlogged" is off by 60
+      minutes, in the app and in the file. Stated in the file's
+      `definitions.dst`. **The wording is date-free on purpose (2026-10-12):** the
+      first version named "Sun 25 Oct 2026", static text that would have gone
+      stale the day after and needed someone to remember to edit it. E11 now
+      fails if the note contains a year or a month name.
     - **Tests, fail-first and mutation-checked.** Written first: against the
       code with no builder, 53 of the 62 rows failed (the 9 that passed were
       setup rows and controls; four of those passed vacuously on an empty file
@@ -2645,7 +2666,10 @@ dashboard styling.
       together. 44 mutations, at least one per check group (E01-E18), each applied to a
       scratch copy of the repo and run against the final tests: every one
       makes the rows it targets fail (table below; "n failing / 62" is the
-      block's own count). **Two weaknesses in my own tests were found
+      block's own count; the table below was produced with the 62-row block, the
+      two E11 rows added on 2026-10-12 were mutation-checked separately: date
+      put back, vague "23 or 25 hours", "not additive" sentence removed, "do not
+      sum" weakened - each failed exactly its own row). **Two weaknesses in my own tests were found
       by the mutation run, not by reading:** flooring hours instead of rounding
       passed because the fixture's totals were whole hours (fixed: an entry
       making logged 970 minutes = 16.17 h); sorting `state.entries` in place

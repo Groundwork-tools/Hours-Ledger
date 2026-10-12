@@ -29,18 +29,43 @@ This file is never linked from the real app; open it by hand before deploying.</
 var out=document.getElementById("out");
 var allResults=[];
 
+/* A page that renders no rows must never read green. Before this guard a run
+   whose test chain never started (or silently stopped) printed "0 failing /
+   0 total" - indistinguishable from a clean run to anyone skimming, or to a
+   script looking for "0 failing". Now:
+   - until the async continuation has finished (or thrown) the summary says
+     RUNNING, never PASS;
+   - when it has finished, a total below EXPECTED_MIN_ROWS (including 0) adds
+     a failing GUARD row and the summary says FAIL.
+   EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
+   the same commit that adds tests. Deleting tests on purpose means lowering
+   it on purpose - that is the point. */
+var EXPECTED_MIN_ROWS=639;
+var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
+  var verdict=!finished?"RUNNING":(failing?"FAIL":"PASS");
   out.innerHTML=allResults.map(function(r){
     return '<div class="row"><span class="'+(r.pass?"pass":"fail")+'">'+(r.pass?"PASS":"FAIL")+'</span>  '+r.name+'</div>';
-  }).join("")+'<div id="summary">'+failing+' failing / '+allResults.length+' total</div>';
+  }).join("")+'<div id="summary" class="'+(verdict==="PASS"?"pass":verdict==="FAIL"?"fail":"")+'">'+verdict+' - '+failing+' failing / '+allResults.length+' total'+
+    (finished?'':' so far (async tests not finished)')+'</div>';
+}
+/* called exactly once, when the whole chain has settled (success or throw) */
+function finish(){
+  if(finished) return;
+  if(allResults.length<EXPECTED_MIN_ROWS){
+    allResults=allResults.concat([{name:"GUARD: the run produced "+allResults.length+" rows, expected at least "+EXPECTED_MIN_ROWS+" - tests did not all run (or were removed without lowering EXPECTED_MIN_ROWS)",pass:false}]);
+  }
+  finished=true;
+  renderResults();
 }
 function report(results,error){
   if(error){
     out.innerHTML='<p class="fail">Could not run tests: '+error+'</p>'+
       '<p>If this is a cross-origin error, you\'re probably opening this file '+
       'directly as <code>file://</code>. Serve the folder over a local server instead, e.g.:<br>'+
-      '<code>python3 -m http.server</code> — then open <code>http://localhost:8000/selftest.html</code>.</p>';
+      '<code>python3 -m http.server</code> — then open <code>http://localhost:8000/selftest.html</code>.</p>'+
+      '<div id="summary" class="fail">FAIL - could not run the tests (0 rows)</div>';
     return;
   }
   allResults=results;
@@ -72,8 +97,10 @@ document.getElementById("sandbox").addEventListener("load",function(){
      a handful of new ones */
   runAsyncTests(hook,doc).then(function(moreResults){
     appendResults(moreResults);
+    finish();
   }).catch(function(e){
     appendResults([{name:"the async test continuation itself threw: "+(e&&e.message||e),pass:false}]);
+    finish();
   });
 });
 document.getElementById("sandbox").src="index.html?hltest=1&v="+Date.now();
@@ -4703,7 +4730,11 @@ function runExportWeekTests(){
     check("E11 category totals can exceed logged by the overlap",/exceed/i.test(D.categoryTotals||"")&&/doubleBookedMinutes/.test(D.categoryTotals||""));
     check("E11 week membership: calendar date, and an overnight Sunday entry's tail is in the next week's file",/calendar date/i.test(D.weekMembership||"")&&/next week's file/i.test(D.weekMembership||""));
     check("E11 times are local",/local/i.test(D.time||""));
-    check("E11 the 1440-minute assumption and the next DST day (Sun 25 Oct 2026) are stated",/1440/.test(D.dst||"")&&/Sun 25 Oct 2026/.test(D.dst||""));
+    check("E11 the 1440-minute assumption and the 23-or-25-hour reality of a DST change day are stated",/1440/.test(D.dst||"")&&/23 or 25 hours/.test(D.dst||""),D.dst);
+    check("E11 ...and the DST note names no calendar date or year (date-free, so it cannot go stale)",
+      typeof D.dst==="string"&&D.dst.length>20&&!/\b20\d\d\b/.test(D.dst)&&!/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b/.test(D.dst),D.dst);
+    check("E11 per-category doubleBookedMinutes are stated as not additive: they do not sum to the week's doubleBookedMinutes",
+      /not additive/i.test(D.doubleBookedMinutes||"")&&/do not sum to the week's doubleBookedMinutes/i.test(D.doubleBookedMinutes||""),D.doubleBookedMinutes);
     check("E11 unlogged is measured over all 24 hours, independent of the hours setting",/10080/.test(D.unlogged||"")&&/hours range/i.test(D.unlogged||""));
     check("E11 definitions are identical for every week (static)",!!build(h,"2026-10-19")&&JSON.stringify(build(h,"2026-10-19").definitions)===JSON.stringify(D));
 
