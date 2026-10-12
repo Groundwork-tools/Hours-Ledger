@@ -29,18 +29,43 @@ This file is never linked from the real app; open it by hand before deploying.</
 var out=document.getElementById("out");
 var allResults=[];
 
+/* A page that renders no rows must never read green. Before this guard a run
+   whose test chain never started (or silently stopped) printed "0 failing /
+   0 total" - indistinguishable from a clean run to anyone skimming, or to a
+   script looking for "0 failing". Now:
+   - until the async continuation has finished (or thrown) the summary says
+     RUNNING, never PASS;
+   - when it has finished, a total below EXPECTED_MIN_ROWS (including 0) adds
+     a failing GUARD row and the summary says FAIL.
+   EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
+   the same commit that adds tests. Deleting tests on purpose means lowering
+   it on purpose - that is the point. */
+var EXPECTED_MIN_ROWS=647;
+var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
+  var verdict=!finished?"RUNNING":(failing?"FAIL":"PASS");
   out.innerHTML=allResults.map(function(r){
     return '<div class="row"><span class="'+(r.pass?"pass":"fail")+'">'+(r.pass?"PASS":"FAIL")+'</span>  '+r.name+'</div>';
-  }).join("")+'<div id="summary">'+failing+' failing / '+allResults.length+' total</div>';
+  }).join("")+'<div id="summary" class="'+(verdict==="PASS"?"pass":verdict==="FAIL"?"fail":"")+'">'+verdict+' - '+failing+' failing / '+allResults.length+' total'+
+    (finished?'':' so far (async tests not finished)')+'</div>';
+}
+/* called exactly once, when the whole chain has settled (success or throw) */
+function finish(){
+  if(finished) return;
+  if(allResults.length<EXPECTED_MIN_ROWS){
+    allResults=allResults.concat([{name:"GUARD: the run produced "+allResults.length+" rows, expected at least "+EXPECTED_MIN_ROWS+" - tests did not all run (or were removed without lowering EXPECTED_MIN_ROWS)",pass:false}]);
+  }
+  finished=true;
+  renderResults();
 }
 function report(results,error){
   if(error){
     out.innerHTML='<p class="fail">Could not run tests: '+error+'</p>'+
       '<p>If this is a cross-origin error, you\'re probably opening this file '+
       'directly as <code>file://</code>. Serve the folder over a local server instead, e.g.:<br>'+
-      '<code>python3 -m http.server</code> — then open <code>http://localhost:8000/selftest.html</code>.</p>';
+      '<code>python3 -m http.server</code> — then open <code>http://localhost:8000/selftest.html</code>.</p>'+
+      '<div id="summary" class="fail">FAIL - could not run the tests (0 rows)</div>';
     return;
   }
   allResults=results;
@@ -72,8 +97,10 @@ document.getElementById("sandbox").addEventListener("load",function(){
      a handful of new ones */
   runAsyncTests(hook,doc).then(function(moreResults){
     appendResults(moreResults);
+    finish();
   }).catch(function(e){
     appendResults([{name:"the async test continuation itself threw: "+(e&&e.message||e),pass:false}]);
+    finish();
   });
 });
 document.getElementById("sandbox").src="index.html?hltest=1&v="+Date.now();
@@ -2977,7 +3004,8 @@ function runAsyncTests(H,d){
     .then(function(r){ return runFailedPushTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runQuotaSaveFailureTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runUndoCapTests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runQuotaProbeTests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runQuotaProbeTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runExportWeekTests().then(function(more){ return r.concat(more); }); });
 }
 
 /* ---------------------------------------------------------------------
@@ -4475,6 +4503,422 @@ function runQuotaProbeTests(){
     check("the quota probe chain itself threw: "+(e&&e.message||e),false);
   }).then(function(){ T.cleanKeys(); return T.results; });
 }
+/* ---------------------------------------------------------------------
+   Export week: a data-only JSON file for the week on screen, for an outside
+   reader (an agent auditing the week) instead of screenshots of the grid.
+
+   Every number in the file is checked against ORACLE below, which does not
+   call weekTotals/dayGaps/toHM or any other app function: it rebuilds the
+   week as a per-minute coverage array straight from state.entries. That is
+   what makes the checks able to flip - a test that compared the export with
+   weekTotals() would pass if the builder and the screen were wrong together.
+
+   Each check's name starts with a tag (E01...). The mutation table that
+   proves each one flips is recorded in CLAUDE.md. */
+function runExportWeekTests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); }
+  var WEEK="2026-10-05", NOW="2026-10-11T12:00:00.000Z";
+  var WEEKDAYS=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
+  function dateOf(ws,di){ var p=ws.split("-"); var x=new Date(+p[0],+p[1]-1,+p[2]+di);
+    return x.getFullYear()+"-"+String(x.getMonth()+1).padStart(2,"0")+"-"+String(x.getDate()).padStart(2,"0"); }
+  function hm(m){ return (m<600?"0":"")+Math.floor(m/60)+":"+(m%60<10?"0":"")+(m%60); }
+  function r2(x){ return Math.round(x*100)/100; }
+
+  /* the export, or null if the builder is missing/throws - so a missing
+     builder shows up as failing checks, not as one crash that hides them all */
+  function build(h,ws,now){
+    try{ return h.buildWeekExport(h.parseIso(ws||WEEK),now||NOW); }
+    catch(e){ return null; }
+  }
+
+  /* independent oracle: per-minute coverage rebuilt from raw state.entries */
+  function oracle(h,ws){
+    var st=h.getState(), known={}, cov=new Array(10080).fill(0), none=new Array(10080).fill(0), cat={};
+    st.categories.forEach(function(c){ known[c.id]=true; });
+    var days=[], S=0, count=0;
+    for(var di=0;di<7;di++){
+      var date=dateOf(ws,di), dc=new Array(1440).fill(0), sum=0, n=0;
+      (st.entries[date]||[]).forEach(function(e){
+        n++;
+        for(var m=e.start;m<e.end;m++){
+          dc[m]++; sum++; cov[di*1440+m]++;
+          if(e.cat&&known[e.cat]) (cat[e.cat]=cat[e.cat]||new Array(10080).fill(0))[di*1440+m]++;
+          else none[di*1440+m]++;
+        }
+      });
+      var logged=dc.filter(function(x){ return x>0; }).length;
+      days.push({date:date,weekday:WEEKDAYS[di],logged:logged,unlogged:1440-logged,doubleBooked:sum-logged,count:n});
+      S+=sum; count+=n;
+    }
+    var logged=cov.filter(function(x){ return x>0; }).length;
+    var perCat={}; 
+    function bucket(arr,others){
+      var minutes=0, cross=0;
+      for(var m=0;m<10080;m++){
+        minutes+=arr[m];
+        if(arr[m]>0){ for(var i=0;i<others.length;i++){ if(others[i][m]>0){ cross++; break; } } }
+      }
+      return {minutes:minutes,cross:cross};
+    }
+    Object.keys(cat).forEach(function(id){
+      var others=[none]; Object.keys(cat).forEach(function(o){ if(o!==id) others.push(cat[o]); });
+      perCat[id]=bucket(cat[id],others);
+    });
+    var allCats=Object.keys(cat).map(function(id){ return cat[id]; });
+    return {S:S,logged:logged,unlogged:10080-logged,doubleBooked:S-logged,days:days,count:count,perCat:perCat,none:bucket(none,allCats)};
+  }
+
+  function allKeys(o,set){
+    set=set||{};
+    if(Array.isArray(o)) o.forEach(function(x){ allKeys(x,set); });
+    else if(o&&typeof o==="object") Object.keys(o).forEach(function(k){ set[k]=true; allKeys(o[k],set); });
+    return set;
+  }
+  function sameKeys(o,list){
+    if(!o||typeof o!=="object") return false;
+    var a=Object.keys(o).sort().join(","), b=list.slice().sort().join(",");
+    return a===b;
+  }
+  var K_TOP=["schemaVersion","weekStart","weekEnd","exportedAt","definitions","summary","categoryTotals","closeout","entries"];
+  var K_SUMMARY=["totalMinutes","totalHours","loggedMinutes","loggedHours","unloggedMinutes","unloggedHours","sumOfEntryMinutes","doubleBookedMinutes","entryCount","days"];
+  var K_DAY=["date","weekday","loggedMinutes","unloggedMinutes","doubleBookedMinutes","entryCount"];
+  var K_CAT=["id","name","uncategorised","minutes","hours","doubleBookedMinutes","verdict"];
+  var K_ENTRY=["date","weekday","label","category","uncategorised","categoryMissing","startMinutes","endMinutes","start","end","durationMinutes"];
+  var K_DEFS=["logged","categoryTotals","doubleBookedMinutes","unlogged","uncategorised","weekMembership","time","dst","verdict"];
+
+  /* the standard fixture. Every feature the file must get right is in it once:
+     cross-category overlap, same-category overlap, an uncategorised entry, a
+     deleted-category entry, a midnight split inside the week, and midnight
+     splits that straddle each end of the week. */
+  function loadFixture(h){
+    var st=h.getState();
+    st.entries={}; st.weeklyVerdicts={}; st.weekCloseouts={};
+    h.setState(st);
+    h.setWeekStart(h.parseIso(WEEK));
+    var A=st.categories[0], B=st.categories[1], C=st.categories[2];
+    h.putEntry("2026-10-05","Work",A.id,540,720,null);          /* 09:00-12:00 */
+    h.putEntry("2026-10-05","Deep",B.id,600,660,null);          /* 10:00-11:00, 60 min inside Work (cross-category) */
+    h.putEntry("2026-10-05","Admin",A.id,780,840,null);         /* 13:00-14:00 */
+    h.putEntry("2026-10-05","Admin2",A.id,810,870,null);        /* 13:30-14:30, 30 min inside Admin (SAME category) */
+    h.putEntry("2026-10-05","Errand",null,1200,1270,null);      /* 20:00-21:10, uncategorised; 70 min so that logged is NOT a whole number of hours (E04 must tell rounding from flooring) */
+    h.putEntry("2026-10-04","Late",C.id,1320,60,null);          /* Sun 22:00 -> Mon 01:00: Sunday half is the PREVIOUS week */
+    h.putEntry("2026-10-06","Sleep",C.id,1410,420,null);        /* Tue 23:30 -> Wed 07:00, split inside the week */
+    st.entries["2026-10-11"]=(st.entries["2026-10-11"]||[]).concat([{id:"dangling1",label:"Lost",cat:"deleted-cat-id",start:480,end:540}]);
+    h.putEntry("2026-10-11","NightOut",B.id,1380,120,null);     /* Sun 23:00 -> Mon 02:00: Monday half is the NEXT week */
+    h.putEntry("2026-10-12","NextWeek",A.id,600,660,null);      /* next week, must not appear */
+    h.setVerdict(A.id,WEEK,"increase");
+    h.setVerdict(B.id,WEEK,"cut");
+    h.setVerdict(A.id,"2026-10-12","keep");                     /* another week's verdict must not leak in */
+    st.weekCloseouts[WEEK]={note:"Fixture note",closedAt:"2026-10-12T08:00:00.000Z"};
+    return {A:A,B:B,C:C};
+  }
+
+  return freshSandbox(true).then(function(f){
+    var h=f.H, fx=loadFixture(h);
+    var pristine=JSON.stringify(h.getState()), depth0=h.undoDepthForTest();   /* before ANY build, so an in-place sort on the first build is visible */
+    var x=build(h), o=oracle(h,WEEK);
+
+    /* ---- E01 header and exact key set of every level (this also pins "no break flag", no extra fields) ---- */
+    check("E01 the builder exists and returns an object",!!x);
+    if(!x) x={};
+    check("E01 schemaVersion is 1, weekStart is the Monday, weekEnd the Sunday, exportedAt as passed",
+      x.schemaVersion===1&&x.weekStart===WEEK&&x.weekEnd==="2026-10-11"&&x.exportedAt===NOW,
+      JSON.stringify([x.schemaVersion,x.weekStart,x.weekEnd,x.exportedAt]));
+    check("E01 the top level has exactly the agreed keys",sameKeys(x,K_TOP),Object.keys(x).join(","));
+    check("E01 summary has exactly the agreed keys",sameKeys(x.summary,K_SUMMARY),x.summary&&Object.keys(x.summary).join(","));
+    check("E01 every day has exactly the agreed keys",x.summary&&x.summary.days&&x.summary.days.length===7&&x.summary.days.every(function(d){ return sameKeys(d,K_DAY); }));
+    check("E01 every category row has exactly the agreed keys",Array.isArray(x.categoryTotals)&&x.categoryTotals.length>0&&x.categoryTotals.every(function(c){ return sameKeys(c,K_CAT); }));
+    check("E01 every entry has exactly the agreed keys (no break flag, no link between midnight halves, no sync fields)",
+      Array.isArray(x.entries)&&x.entries.length>0&&x.entries.every(function(e){ return sameKeys(e,K_ENTRY)&&sameKeys(e.category,["id","name"]); }));
+
+    /* ---- E02 entries: membership of the week, order, fields ---- */
+    var got=(x.entries||[]).map(function(e){ return e.date+" "+e.start+"-"+e.end+" "+e.label; });
+    var want=["2026-10-05 00:00-01:00 Late","2026-10-05 09:00-12:00 Work","2026-10-05 10:00-11:00 Deep","2026-10-05 13:00-14:00 Admin",
+      "2026-10-05 13:30-14:30 Admin2","2026-10-05 20:00-21:10 Errand","2026-10-06 23:30-24:00 Sleep","2026-10-07 00:00-07:00 Sleep",
+      "2026-10-11 08:00-09:00 Lost","2026-10-11 23:00-24:00 NightOut"];
+    check("E02 the week's entries are exactly the ten stored for these dates, sorted by date then start; the previous Sunday's half and next Monday's half are not in it",
+      JSON.stringify(got)===JSON.stringify(want),JSON.stringify(got));
+    check("E02 midnight split as stored: Tuesday half ends at 1440 / '24:00', Wednesday half starts at 0 / '00:00', same label, no link field",
+      (function(){ var a=(x.entries||[]).filter(function(e){ return e.label==="Sleep"; });
+        return a.length===2&&a[0].endMinutes===1440&&a[0].end==="24:00"&&a[1].startMinutes===0&&a[1].start==="00:00"&&a[0].durationMinutes===30&&a[1].durationMinutes===420; })());
+    check("E02 weekday is spelled out and derived from the date",(x.entries||[]).length>0&&(x.entries||[]).every(function(e){
+      for(var di=0;di<7;di++) if(dateOf(WEEK,di)===e.date) return e.weekday===WEEKDAYS[di]; return false; }));
+    check("E02 start/end strings agree with the minutes, and duration = end - start, for every entry",(x.entries||[]).length>0&&(x.entries||[]).every(function(e){
+      return e.start===hm(e.startMinutes)&&e.end===hm(e.endMinutes)&&e.durationMinutes===e.endMinutes-e.startMinutes; }));
+
+    /* ---- E03 category fields on entries ---- */
+    function ent(label){ return (x.entries||[]).filter(function(e){ return e.label===label; })[0]||{category:{}}; }
+    check("E03 a categorised entry carries category id AND name and is not marked uncategorised",
+      ent("Work").category.id===fx.A.id&&ent("Work").category.name===fx.A.name&&ent("Work").uncategorised===false&&ent("Work").categoryMissing===false,
+      JSON.stringify(ent("Work")));
+    check("E03 an entry with no category is present and explicitly marked: id null, name null, uncategorised true, categoryMissing false",
+      ent("Errand").category.id===null&&ent("Errand").category.name===null&&ent("Errand").uncategorised===true&&ent("Errand").categoryMissing===false,
+      JSON.stringify(ent("Errand")));
+    check("E03 an entry whose category was deleted keeps its id, name null, categoryMissing true, and counts as uncategorised",
+      ent("Lost").category.id==="deleted-cat-id"&&ent("Lost").category.name===null&&ent("Lost").categoryMissing===true&&ent("Lost").uncategorised===true,
+      JSON.stringify(ent("Lost")));
+
+    /* ---- E04 the 168-hour summary against the oracle ---- */
+    var s=x.summary||{};
+    check("E04 total is 10080 minutes / 168 hours",s.totalMinutes===10080&&s.totalHours===168);
+    check("E04 logged (union) matches the oracle",s.loggedMinutes===o.logged,s.loggedMinutes+" vs oracle "+o.logged);
+    check("E04 unlogged matches the oracle and logged + unlogged = 10080",s.unloggedMinutes===o.unlogged&&s.loggedMinutes+s.unloggedMinutes===10080,s.unloggedMinutes+" vs oracle "+o.unlogged);
+    check("E04 sum of entry durations and entry count match the oracle",s.sumOfEntryMinutes===o.S&&s.entryCount===o.count&&s.entryCount===(x.entries||[]).length,
+      s.sumOfEntryMinutes+"/"+s.entryCount+" vs oracle "+o.S+"/"+o.count);
+    check("E04 hours are minutes/60 rounded to 2 decimals",s.loggedHours===r2(o.logged/60)&&s.unloggedHours===r2(o.unlogged/60),s.loggedHours+"/"+s.unloggedHours);
+
+    /* ---- E05 per-day logged / unlogged / double-booked ---- */
+    var dayOk=(s.days||[]).length===7&&s.days.every(function(d,i){ var w=o.days[i];
+      return d.date===w.date&&d.weekday===w.weekday&&d.loggedMinutes===w.logged&&d.unloggedMinutes===w.unlogged&&d.doubleBookedMinutes===w.doubleBooked&&d.entryCount===w.count; });
+    check("E05 all seven days (date, weekday, logged, unlogged, double-booked, entry count) match the oracle",dayOk,JSON.stringify(s.days));
+    check("E05 the seven per-day logged values add up to the week's logged value",(s.days||[]).reduce(function(a,d){ return a+d.loggedMinutes; },0)===s.loggedMinutes);
+
+    /* ---- E06 double-booked: the equation, and the same-category case ---- */
+    check("E06 week double-booked = sum of entry durations - logged, and equals the oracle (includes the same-category overlap)",
+      s.doubleBookedMinutes===s.sumOfEntryMinutes-s.loggedMinutes&&s.doubleBookedMinutes===o.doubleBooked&&o.doubleBooked===90,
+      s.doubleBookedMinutes+" vs oracle "+o.doubleBooked+" (fixture: 60 cross-category + 30 same-category)");
+    var rows={}; (x.categoryTotals||[]).forEach(function(c){ rows[c.id===null?"none":c.id]=c; });
+    ["none",fx.A.id,fx.B.id,fx.C.id].forEach(function(k){ rows[k]=rows[k]||{}; }); /* a missing row fails its checks instead of crashing the chain */
+    check("E06 per-category double-booked is the cross-category overlap the screen shows: Work/Admin (A) 60, Deep (B) 60, sleep (C) 0",
+      rows[fx.A.id]&&rows[fx.A.id].doubleBookedMinutes===o.perCat[fx.A.id].cross&&rows[fx.B.id]&&rows[fx.B.id].doubleBookedMinutes===o.perCat[fx.B.id].cross
+        &&o.perCat[fx.A.id].cross===60&&rows[fx.C.id].doubleBookedMinutes===0,
+      rows[fx.A.id]&&rows[fx.A.id].doubleBookedMinutes+"/"+rows[fx.B.id].doubleBookedMinutes+"/"+rows[fx.C.id].doubleBookedMinutes);
+
+    /* ---- E07 category totals, uncategorised row, the equation ---- */
+    var st=h.getState();
+    check("E07 every category in the app has a row, in app order, including ones with zero minutes",
+      (x.categoryTotals||[]).slice(0,st.categories.length).every(function(c,i){ return c.id===st.categories[i].id&&c.name===st.categories[i].name; })
+        &&(x.categoryTotals||[]).length===st.categories.length+1);
+    check("E07 each category's minutes and hours match the oracle",st.categories.every(function(c){
+      var w=o.perCat[c.id]?o.perCat[c.id].minutes:0, r=rows[c.id];
+      return r&&r.minutes===w&&r.hours===r2(w/60)&&r.uncategorised===false; }),JSON.stringify((x.categoryTotals||[]).filter(function(c){ return c.minutes; }).map(function(c){ return c.name+"="+c.minutes; })));
+    check("E07 one uncategorised row (id null, name null) counts the null-category AND the deleted-category entry: 70 + 60 = 130",
+      rows.none&&rows.none.name===null&&rows.none.uncategorised===true&&rows.none.minutes===o.none.minutes&&o.none.minutes===130,
+      rows.none&&rows.none.minutes);
+    check("E07 the equation: sum of every row's minutes = sum of entry durations = logged + week double-booked",
+      (x.categoryTotals||[]).reduce(function(a,c){ return a+c.minutes; },0)===s.sumOfEntryMinutes&&s.sumOfEntryMinutes===s.loggedMinutes+s.doubleBookedMinutes);
+
+    /* ---- E08 verdicts and close-out ---- */
+    check("E08 the verdict set that week appears on its category, null elsewhere, and another week's verdict does not leak in",
+      rows[fx.A.id].verdict==="increase"&&rows[fx.B.id].verdict==="cut"&&rows[fx.C.id].verdict===null&&rows.none.verdict===null,
+      [rows[fx.A.id].verdict,rows[fx.B.id].verdict,rows[fx.C.id].verdict].join("/"));
+    check("E08 the close-out appears with note and closedAt, and nothing else",
+      x.closeout&&sameKeys(x.closeout,["note","closedAt"])&&x.closeout.note==="Fixture note"&&x.closeout.closedAt==="2026-10-12T08:00:00.000Z",JSON.stringify(x.closeout));
+    var y=build(h,"2026-10-12");
+    check("E08 a week with no close-out has closeout null, and its own verdict is read from its own week key",
+      !!y&&!!build(h,"2026-10-19")&&build(h,"2026-10-19").closeout===null&&y.closeout===null&&y.categoryTotals.filter(function(c){ return c.id===fx.A.id; })[0].verdict==="keep");
+
+    /* ---- E09 the builder changes nothing ---- */
+    var b1=build(h), b2=build(h,"2026-10-12");
+    check("E09 building the export leaves state byte-identical (no in-place sort, no stamp) and pushes no undo snapshot",
+      !!b1&&!!b2&&JSON.stringify(h.getState())===pristine&&h.undoDepthForTest()===depth0);
+
+    /* ---- E10 deterministic ---- */
+    var sx=h.getState(); sx.entries["2026-10-05"].reverse();
+    var again=build(h);
+    check("E10 the same week built after the stored order is reversed is byte-identical (sorted, not insertion order)",
+      JSON.stringify(again)===JSON.stringify(x));
+
+    /* ---- E11 static definitions ---- */
+    var D=x.definitions||{};
+    check("E11 definitions has exactly the agreed keys, all non-empty strings",sameKeys(D,K_DEFS)&&K_DEFS.every(function(k){ return typeof D[k]==="string"&&D[k].length>20; }),Object.keys(D).join(","));
+    check("E11 logged is defined as the union of entries",/union/i.test(D.logged||""));
+    check("E11 category totals can exceed logged by the overlap",/exceed/i.test(D.categoryTotals||"")&&/doubleBookedMinutes/.test(D.categoryTotals||""));
+    check("E11 week membership: calendar date, and an overnight Sunday entry's tail is in the next week's file",/calendar date/i.test(D.weekMembership||"")&&/next week's file/i.test(D.weekMembership||""));
+    check("E11 the verdict definition says any other stored value is exported as null",/any other stored value is exported as null/i.test(D.verdict||""),D.verdict);
+    check("E11 times are local",/local/i.test(D.time||""));
+    check("E11 the 1440-minute assumption and the 23-or-25-hour reality of a DST change day are stated",/1440/.test(D.dst||"")&&/23 or 25 hours/.test(D.dst||""),D.dst);
+    check("E11 ...and the DST note names no calendar date or year (date-free, so it cannot go stale)",
+      typeof D.dst==="string"&&D.dst.length>20&&!/\b20\d\d\b/.test(D.dst)&&!/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b/.test(D.dst),D.dst);
+    check("E11 per-category doubleBookedMinutes are stated as not additive: they do not sum to the week's doubleBookedMinutes",
+      /not additive/i.test(D.doubleBookedMinutes||"")&&/do not sum to the week's doubleBookedMinutes/i.test(D.doubleBookedMinutes||""),D.doubleBookedMinutes);
+    check("E11 unlogged is measured over all 24 hours, independent of the hours setting",/10080/.test(D.unlogged||"")&&/hours range/i.test(D.unlogged||""));
+    check("E11 definitions are identical for every week (static)",!!build(h,"2026-10-19")&&JSON.stringify(build(h,"2026-10-19").definitions)===JSON.stringify(D));
+
+    /* ---- E12 week boundary ---- */
+    check("E12 every exported entry's date lies in the Monday..Sunday window, and the next week's entry is absent",
+      (x.entries||[]).length>0&&(x.entries||[]).every(function(e){ return e.date>=WEEK&&e.date<="2026-10-11"; })&&!(x.entries||[]).some(function(e){ return e.label==="NextWeek"; }));
+    h.getState().entries["2026-10-05"].reverse();
+
+    /* ---- E13 a week with zero entries ---- */
+    var st2=h.getState(); var keep=st2.entries; st2.entries={}; st2.weeklyVerdicts={}; st2.weekCloseouts={};
+    h.setVerdict(fx.A.id,"2026-10-05","cut");
+    var z=build(h);
+    check("E13 an empty week still produces a full file: entries [], logged 0, unlogged 10080, 168h, entryCount 0",
+      z&&Array.isArray(z.entries)&&z.entries.length===0&&z.summary.loggedMinutes===0&&z.summary.unloggedMinutes===10080&&z.summary.unloggedHours===168
+        &&z.summary.entryCount===0&&z.summary.doubleBookedMinutes===0&&z.summary.days.length===7&&z.summary.days.every(function(d){ return d.unloggedMinutes===1440&&d.loggedMinutes===0; }),
+      z&&JSON.stringify(z.summary).slice(0,160));
+    check("E13 ...every category and the uncategorised row are listed at 0, and a verdict set on an empty week is still reported",
+      z&&z.categoryTotals.length===st2.categories.length+1&&z.categoryTotals.every(function(c){ return c.minutes===0; })&&z.categoryTotals[0].verdict==="cut"&&z.closeout===null);
+    st2.entries=keep;
+
+    /* ---- E14 randomised: the whole file against the oracle, 40 weeks ---- */
+    var seed=987654; function rnd(){ seed=(seed*1103515245+12345)&0x7fffffff; return seed/0x7fffffff; }
+    var cats=st2.categories.map(function(c){ return c.id; }), bad=[], t;
+    for(t=0;t<40;t++){
+      var se=h.getState(); se.entries={}; var n=Math.floor(rnd()*16);
+      for(var i=0;i<n;i++){
+        var di=Math.floor(rnd()*7), a=Math.floor(rnd()*47)*30, b=Math.min(a+(1+Math.floor(rnd()*8))*30,1440), q=rnd();
+        var cat=q<0.2?null:q<0.3?"gone-"+t:cats[Math.floor(rnd()*cats.length)], dt=dateOf(WEEK,di);
+        (se.entries[dt]=se.entries[dt]||[]).push({id:"r"+t+"_"+i,label:"L"+i,cat:cat,start:a,end:b});
+      }
+      var e=build(h), w=oracle(h,WEEK), good=!!e;
+      if(good){
+        var sum=e.categoryTotals.reduce(function(acc,c){ return acc+c.minutes; },0);
+        good=e.summary.loggedMinutes===w.logged&&e.summary.unloggedMinutes===w.unlogged&&e.summary.sumOfEntryMinutes===w.S&&e.summary.doubleBookedMinutes===w.doubleBooked
+          &&sum===w.S&&w.S-w.logged===e.summary.doubleBookedMinutes&&e.entries.length===w.count
+          &&e.summary.days.every(function(d,k){ return d.loggedMinutes===w.days[k].logged&&d.doubleBookedMinutes===w.days[k].doubleBooked; })
+          &&e.categoryTotals.every(function(c){ if(c.id===null) return c.minutes===w.none.minutes&&c.doubleBookedMinutes===w.none.cross;
+            var p=w.perCat[c.id]||{minutes:0,cross:0}; return c.minutes===p.minutes&&c.doubleBookedMinutes===p.cross; });
+      }
+      if(!good) bad.push(t);
+    }
+    check("E14 40 random weeks (overlaps, nulls, deleted categories, up to 15 entries): summary, per-day, per-category and the equations all match the oracle",bad.length===0,"failing trials: "+bad.join(","));
+    h.getState().entries=keep;
+    f.el.parentNode.removeChild(f.el);
+  }).then(function(){
+    /* ---- E15 the hours range setting does not touch the file ---- */
+    return freshSandbox(true).then(function(f){
+      var h=f.H, st=h.getState();
+      h.setWeekStart(h.parseIso(WEEK));
+      check("E15 setup: the app is on the 06:00-24:00 display range",st.settings.startHour===6&&st.settings.endHour===24);
+      var cat=st.categories[0];
+      h.putEntry("2026-10-07","Early",cat.id,180,240,null);       /* Wed 03:00-04:00, outside the visible range */
+      var x=build(h), w=oracle(h,WEEK);
+      var e=x&&x.entries.filter(function(q){ return q.label==="Early"; })[0];
+      check("E15 an entry at 03:00-04:00 is included in the file",!!e&&e.start==="03:00"&&e.end==="04:00"&&e.durationMinutes===60,JSON.stringify(e));
+      check("E15 week logged is 60 and unlogged is 10020 (measured against 10080, not against the 18 visible hours a day)",
+        x&&x.summary.loggedMinutes===60&&x.summary.unloggedMinutes===10020&&x.summary.unloggedMinutes===w.unlogged,x&&x.summary.unloggedMinutes);
+      check("E15 per day: Wednesday unlogged 1380, Monday (empty) unlogged 1440 - not 1080",
+        x&&x.summary.days[2].unloggedMinutes===1380&&x.summary.days[0].unloggedMinutes===1440,x&&x.summary.days.map(function(d){ return d.unloggedMinutes; }).join(","));
+      check("E15 the display setting is untouched by exporting",!!x&&st.settings.startHour===6&&st.settings.endHour===24);
+      f.el.parentNode.removeChild(f.el);
+    });
+  }).then(function(){
+    /* ---- E16 the button: filename, content, week on screen even in day view, no network ---- */
+    return freshSandbox(true).then(function(f){
+      var h=f.H, w=f.el.contentWindow, d=f.d, fx=loadFixture(h);
+      var calls=[], blobs=[], net=[];
+      var origCreate=w.URL.createObjectURL, origClick=w.HTMLAnchorElement.prototype.click;
+      w.URL.createObjectURL=function(b){ blobs.push(b); return "blob:test"; };
+      w.HTMLAnchorElement.prototype.click=function(){ calls.push({download:this.download,href:this.href}); };
+      var origFetch=w.fetch, OrigXHR=w.XMLHttpRequest, origBeacon=w.navigator.sendBeacon;
+      w.fetch=function(){ net.push("fetch"); return Promise.reject(new Error("blocked")); };
+      w.XMLHttpRequest=function(){ net.push("xhr"); throw new Error("blocked"); };
+      try{ w.navigator.sendBeacon=function(){ net.push("beacon"); return false; }; }catch(e){}
+      var btn=d.getElementById("exportWeek");
+      check("E16 an 'Export week' button exists in the Your data tools, next to 'Export a copy'",
+        !!btn&&/export week/i.test(btn.textContent)&&btn.parentNode===d.getElementById("save").parentNode,btn&&btn.textContent);
+      if(!d.getElementById("dayswitch").classList.contains("on")) d.getElementById("viewToggle").click();
+      check("E16 setup: the app is in day view (one day on screen)",d.getElementById("dayswitch").classList.contains("on"));
+      if(btn) btn.click();
+      var sawBlob=blobs[0];
+      return (sawBlob?sawBlob.text():Promise.resolve("null")).then(function(text){
+        var parsed; try{ parsed=JSON.parse(text); }catch(e){ parsed=null; }
+        check("E16 one click downloads one file named hours-ledger-week-YYYY-MM-DD.json (not the full-backup name)",
+          calls.length===1&&calls[0].download==="hours-ledger-week-"+WEEK+".json",JSON.stringify(calls));
+        check("E16 the file is the week export for the week on screen, with all seven days even in day view",
+          parsed&&parsed.weekStart===WEEK&&parsed.summary&&parsed.summary.days.length===7&&parsed.entries.length===10&&sawBlob.type==="application/json",
+          parsed&&parsed.weekStart+" entries="+(parsed.entries&&parsed.entries.length));
+        h.setWeekStart(h.parseIso("2026-10-12")); calls.length=0; blobs.length=0;
+        if(btn) btn.click();
+        return blobs[0]?blobs[0].text():Promise.resolve("null");
+      }).then(function(text2){
+        var p2; try{ p2=JSON.parse(text2); }catch(e){ p2=null; }
+        check("E16 after paging to the next week the same button exports that week (filename and content follow the screen)",
+          p2&&p2.weekStart==="2026-10-12"&&calls.length===1&&calls[0].download==="hours-ledger-week-2026-10-12.json",JSON.stringify(calls));
+        check("E16 hard rule 4: exporting made no fetch, XMLHttpRequest or sendBeacon call (and did download once)",net.length===0&&calls.length===1,JSON.stringify(net));
+        w.URL.createObjectURL=origCreate; w.HTMLAnchorElement.prototype.click=origClick; w.fetch=origFetch; w.XMLHttpRequest=OrigXHR;
+        try{ w.navigator.sendBeacon=origBeacon; }catch(e){}
+        /* static half of the same promise: the source of the builder and the handler names no network API */
+        return fetch("app.js?v="+Date.now()).then(function(r){ return r.text(); }).then(function(src){
+          var i=src.indexOf("function buildWeekExport"), j=src.indexOf("getElementById(\"exportWeek\")");
+          var body=i>=0?src.slice(i,src.indexOf("\nfunction ",i+10)):"";
+          var handler=j>=0?src.slice(j,j+900):"";
+          check("E16 hard rule 4 (static): buildWeekExport and the export click handler contain no fetch/XMLHttpRequest/sendBeacon/WebSocket",
+            body.length>200&&handler.length>100&&!/fetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket/.test(body+handler),"builder chars="+body.length+" handler chars="+handler.length);
+        });
+      }).then(function(){ f.el.parentNode.removeChild(f.el); });
+    });
+  }).then(function(){
+    /* ---- E17 connected state: no sync fields anywhere in the file, asserted on KEYS ---- */
+    function settle(h){ return delay(250).then(function(){ return waitFor(function(){ return !h.isDriveSyncInFlight(); },4000); }).then(function(){ return delay(50); }); }
+    return freshSandbox(true).then(function(f){
+      var h=f.H;
+      f.d.getElementById("connectDrive").click();
+      return waitFor(function(){ return f.d.getElementById("connectDrive").textContent==="Drive: synced"; },4000).then(function(ok){
+        check("E17 setup: the device is connected to the fake Drive",ok&&h.getState().driveConnected===true);
+        return settle(h);
+      }).then(function(){
+        var fx=loadFixture(h); h.persist();
+        return settle(h).then(function(){ return fx; });
+      }).then(function(fx){
+        var st=h.getState(), sk=allKeys(st);
+        check("E17 precondition (so this cannot pass vacuously): the state HAS sync fields - updatedAt/updatedBy on an exported-week entry, a category and the close-out, plus tombstone containers and verdictMeta",
+          !!st.entries["2026-10-05"][0].updatedAt&&!!st.entries["2026-10-05"][0].updatedBy&&!!st.categories[0].updatedAt&&!!st.weekCloseouts[WEEK].updatedAt
+            &&!!st.deletedCategories&&!!st.deletedEntries&&!!st.verdictMeta,
+          Object.keys(st.entries["2026-10-05"][0]).join(","));
+        var x=build(h), keys=allKeys(x||{}), forbidden=["updatedAt","updatedBy","deleted","deletedAt","deletedEntries","deletedCategories","deletedVerdicts","verdictMeta","deviceId","driveConnected","settings","weeklyVerdicts","weekCloseouts"];
+        var leaked=forbidden.filter(function(k){ return keys[k]; });
+        check("E17 the export contains none of the sync/device keys at any depth (recursive key walk, not a string search)",!!x&&leaked.length===0,"leaked keys: "+leaked.join(",")+"; all keys: "+Object.keys(keys).length);
+        var allowed={}; [K_TOP,K_SUMMARY,K_DAY,K_CAT,K_ENTRY,K_DEFS,["id","name"],["note","closedAt"]].forEach(function(l){ l.forEach(function(k){ allowed[k]=true; }); });
+        var extra=Object.keys(keys).filter(function(k){ return !allowed[k]; });
+        check("E17 ...and every key anywhere in the file is one of the agreed keys",!!x&&extra.length===0,"unexpected keys: "+extra.join(","));
+        check("E17 the sync fields are still on the stored state afterwards (exporting did not strip or alter them)",!!x&&!!allKeys(h.getState()).updatedAt);
+        f.el.parentNode.removeChild(f.el);
+      });
+    });
+  }).then(function(){
+    /* ---- E18 privacy.html says it ---- */
+    return fetch("privacy.html?v="+Date.now()).then(function(r){ return r.text(); }).then(function(t){
+      check("E18 privacy.html carries the one-line Export week note (made locally, nothing sent)",/Export week/.test(t)&&/nothing is sent/i.test(t));
+    });
+  }).then(function(){
+    /* ---- E19 verdict whitelist: only the values the rail buttons write are exported, everything else is null ---- */
+    return freshSandbox(true).then(function(f){
+      var h=f.H, d=f.d, st=h.getState(), C=st.categories, W="2026-10-05", ws=h.parseIso(W);
+      h.setWeekStart(ws); st.weeklyVerdicts={}; st.weeklyVerdicts[W]={};
+      function ver(x,cat){ var r=(x&&x.categoryTotals||[]).filter(function(c){ return c.id===cat.id; })[0]; return r?r.verdict:"(row missing)"; }
+      function build(){ try{ return h.buildWeekExport(ws,"2026-10-12T00:00:00.000Z"); }catch(e){ return null; } }
+      /* what the rail buttons ACTUALLY write: read from the real rendered buttons, not from a copy of the list */
+      h.render(); h.flushPendingRenderForTest();
+      var railVals=[].slice.call(d.querySelectorAll("#totals .verdict")[0]?d.querySelectorAll("#totals .verdict")[0].querySelectorAll("button"):[]).map(function(b){ return b.getAttribute("data-v"); });
+      check("E19 setup: the rail's first verdict row has exactly three buttons: increase, keep, cut",JSON.stringify(railVals)==='["increase","keep","cut"]',JSON.stringify(railVals));
+      /* valid values, written the way the rail writes them (setVerdict), must survive unchanged */
+      railVals.forEach(function(v,i){ h.setVerdict(C[i].id,W,v); });
+      var x=build();
+      check("E19 every value the rail buttons write is exported unchanged (increase, keep, cut)",
+        !!x&&railVals.length===3&&railVals.every(function(v,i){ return ver(x,C[i])===v; }),
+        railVals.map(function(v,i){ return v+"->"+JSON.stringify(ver(x,C[i])); }).join(", "));
+      /* anything else, written straight into state (no migration runs on a direct edit), exports as null */
+      var bad=["compress","Compress","maybe","Increase","keep "];
+      bad.forEach(function(v,i){ st.weeklyVerdicts[W][C[3+i].id]=v; });
+      x=build();
+      check("E19 legacy and unknown values exported as null, not passed through: compress, Compress, maybe, Increase (case), 'keep ' (space)",
+        !!x&&bad.every(function(v,i){ return ver(x,C[3+i])===null; }),
+        bad.map(function(v,i){ return JSON.stringify(v)+"->"+JSON.stringify(ver(x,C[3+i])); }).join(", "));
+      check("E19 ...while the valid ones are still unchanged in the same file",!!x&&railVals.every(function(v,i){ return ver(x,C[i])===v; }));
+      check("E19 exporting did not rewrite the stored values (the odd strings are still in state, only the file hides them)",
+        st.weeklyVerdicts[W][C[3].id]==="compress"&&st.weeklyVerdicts[W][C[5].id]==="maybe");
+      /* the realistic route: an imported file carrying an odd value. Import validation is deliberately untouched. */
+      var copy=JSON.parse(JSON.stringify(st)); copy.weeklyVerdicts={}; copy.weeklyVerdicts[W]={}; copy.weeklyVerdicts[W][C[0].id]="maybe"; copy.weeklyVerdicts[W][C[1].id]="cut";
+      h.importBackupJson(JSON.stringify(copy));
+      var st2=h.getState(); x=build();
+      check("E19 precondition (not vacuous): after importBackupJson the odd value 'maybe' really is stored (import still does not validate)",
+        st2.weeklyVerdicts[W]&&st2.weeklyVerdicts[W][C[0].id]==="maybe",JSON.stringify(st2.weeklyVerdicts[W]));
+      check("E19 through importBackupJson: the imported 'maybe' exports as null and the imported 'cut' stays 'cut'",
+        !!x&&ver(x,C[0])===null&&ver(x,C[1])==="cut",JSON.stringify([ver(x,C[0]),ver(x,C[1])]));
+      f.el.parentNode.removeChild(f.el);
+    });
+  }).catch(function(e){
+    check("the export-week chain itself threw: "+(e&&e.message||e),false);
+  }).then(function(){ return results; });
+}
+
 })();
 </script>
 </body>

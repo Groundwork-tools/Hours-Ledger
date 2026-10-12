@@ -236,7 +236,13 @@ Serve the repo (`python3 -m http.server 8765`) and run Chrome with
 `--headless=new --disable-gpu --no-sandbox --user-data-dir=<tmp>
 --virtual-time-budget=300000 --dump-dom http://localhost:8765/selftest.html`,
 redirected to a file, then read the `id="summary"` div and the
-`.row` divs from that file. A full run takes several minutes, so start it in
+`.row` divs from that file. The summary reads `PASS - 0 failing / N total`,
+`FAIL - ...`, or `RUNNING - ... so far`; **only a line starting `PASS` counts**
+(2026-10-12 guard: a page whose test chain never started used to print
+`0 failing / 0 total`). The page appends a failing `GUARD` row if the finished
+run has fewer rows than `EXPECTED_MIN_ROWS` in `selftest.html` (639 when this
+was written); raise it in the same commit that adds tests, lower it only on
+purpose. A scratch copy that runs only one block will trip the guard by design. A full run takes several minutes, so start it in
 the background. Chrome keeps running after it has written the dump, so a
 command that waits for it to exit never returns — poll for the output file
 instead and parse it directly (then `pkill` the leftover Chrome and server).
@@ -437,6 +443,10 @@ on purpose.
   shows whichever verdict is set on the most weeks, ties shown as `"keep/cut"`
   etc., blank if none of the visible weeks have one set. A category with no key
   under a given week just means no verdict was chosen that week.
+  Stored values are exactly `increase`, `keep` or `cut`; the pre-rename
+  `compress` is cleared on load, import and undo/redo and swept on sync
+  (backlog item 18), and any other string counts as no verdict on screen and
+  in Export week.
 - A close-out is keyed the same way, one per week, written only when the user
   actually closes that week out. `note` is a single optional freeform line —
   there is deliberately no separate notes-browsing view; it only ever surfaces
@@ -2560,5 +2570,184 @@ dashboard styling.
       the state is stored, not deletion: a more compact stored shape (needs a
       `-vN` migration, hard rule 1) or moving the state out of localStorage.
       Needs its own design discussion before any code (hard rule 6).
+
+28. **Export week - a data-only JSON file for the week on screen. Built on
+    `feature/export-week` (2026-10-11); NOT merged.** Purpose (Sebastian): hand
+    one file to an agent that audits the week, instead of screenshotting the
+    grid, which gets misread. Data and static definitions only, no conclusions.
+    A button "Export week" in the "Your data" tools, next to "Export a copy";
+    downloads `hours-ledger-week-YYYY-MM-DD.json` (the Monday). The name
+    differs on purpose from the full backup's `hours-ledger-YYYY-MM-DD.json`.
+    The week is `weekStart`, also in day view (E16 pins this). Code:
+    `buildWeekExport(ws, exportedAt)` and the click handler in `app.js`,
+    `privacy.html` has the one-line note, tests are `runExportWeekTests()` in
+    `selftest.html` (E01-E19, 72 rows).
+    - **Reuse, not reimplementation.** Week figures come from `weekTotals(ws)`;
+      per-day logged/unlogged from `dayGaps(dateStr)`. **Checked by running,
+      not only reading:** `dayGaps` does not depend on `settings.startHour/
+      endHour` (an entry at 03:00-04:00 under a 06-24 setting gives the same
+      gaps under 00-24), so the display range cannot leak into "unlogged".
+    - **The equation, verified against an independent per-minute oracle on 300
+      random weeks (0 mismatches), then pinned in E07/E14.** With S = the sum of
+      every entry's duration: `sum(weekTotals.t) + weekTotals.none = S`;
+      `weekTotals.logged` = the union (a minute covered twice counts once);
+      `S - logged` = double-booked minutes. `weekTotals.overlap[cat]` is
+      narrower: only time shared with ANOTHER category or an uncategorised
+      entry. **Overlap between two entries of the same category is in S - logged
+      but in no `overlap[]` value** (seen in 23 of the oracle's random
+      categories). So per-category `doubleBookedMinutes` does not add up to the
+      week's. That is a property of what the screen shows, kept so the file
+      matches the screen, and stated in the file's definitions.
+    - **Schema (schemaVersion 1; all keys, no others - E01 pins each level):**
+      `schemaVersion, weekStart, weekEnd, exportedAt (UTC ISO), definitions
+      {logged, categoryTotals, doubleBookedMinutes, unlogged, uncategorised,
+      weekMembership, time, dst, verdict}` (static strings), `summary
+      {totalMinutes 10080, totalHours 168, loggedMinutes, loggedHours,
+      unloggedMinutes, unloggedHours, sumOfEntryMinutes, doubleBookedMinutes,
+      entryCount, days[7] {date, weekday, loggedMinutes, unloggedMinutes,
+      doubleBookedMinutes, entryCount}}`, `categoryTotals[]` (every category in
+      app order incl. zero ones, then ONE row with `id: null, name: null,
+      uncategorised: true`; each row `{id, name, uncategorised, minutes, hours,
+      doubleBookedMinutes, verdict}`), `closeout` (`{note, closedAt}` or null),
+      `entries[]` (`{date, weekday, label, category {id, name}, uncategorised,
+      categoryMissing, startMinutes, endMinutes, start, end, durationMinutes}`,
+      sorted by date, start, end, label, category id). Hours = minutes/60 to
+      2 decimals; minutes are authoritative.
+    - **Decisions (Sebastian, 2026-10-11):** `doubleBookedMinutes` at week, per
+      day and per category. No break flag (a "Break" entry is an ordinary
+      uncategorised entry whose label happens to be Break; the data cannot tell
+      it from one the user typed). Midnight halves stay unlinked, as stored.
+      A deleted category: id kept, name null, `categoryMissing: true`, counted
+      in the uncategorised row, as on the screen. A static definitions block, no
+      conclusions. One line in `privacy.html`. Nothing else.
+    - **Per-category overlap is not additive, and no same-category overlap field
+      (Sebastian, 2026-10-12).** `definitions.doubleBookedMinutes` now says so in
+      words: per-category values do not sum to the week's. **Why no extra
+      field:** adding a per-category "overlap within the same category" number
+      would not make the figures reconcile, so it would add a column and
+      promise a reconciliation it cannot deliver. Worked on the test fixture:
+      Work/Admin (A) 60 cross-category + 30 same-category, Deep (B) 60
+      cross-category. The week's double-booked is 90. Per-category cross values
+      sum to 120, because the 60 minutes A and B share appear in BOTH rows but
+      once in the week figure. Adding A's same-category 30 gives 150, further
+      from 90, not closer. Reconciling would need a per-minute breakdown, a
+      different and much larger file. **Reopen only if an agent actually
+      misreads the file** (for example, sums the per-category values and
+      reports the total as the week's double-booking).
+    - **Verdicts are whitelisted on export (2026-10-12).** `exportVerdict()` writes
+      a verdict only if it is exactly `increase`, `keep` or `cut`
+      (case-sensitive, the rail's own `v===dv` comparison); anything else is
+      `null`, and `definitions.verdict` says so. Why: the screen already treats
+      any other stored string as "no verdict" (no button pressed,
+      `majorityVerdict` ignores it), so the file must too. **Found by running a
+      probe:** the legacy `"compress"` is cleared on load, import and undo and
+      swept on sync, so it does not normally reach state, but any other string
+      (`"Compress"`, `"maybe"`) survives import and load untouched and the
+      export used to pass it through. Load, import and sync validation were
+      deliberately NOT changed. The list is a local constant, not a shared one
+      (the app inlines it in three places); E19 pins it to the buttons the rail
+      actually renders and to what `setVerdict` writes. The close-out sheet's own
+      button list is not separately pinned.
+    - **Midnight and week edges.** `putEntry` splits at write time, so the
+      export just reads two ordinary entries (first ends `1440` / `"24:00"`,
+      second starts `0`). Entries belong to the week of their calendar date: a
+      Sunday 23:00-02:00 entry has its Monday tail in the NEXT week's file, and
+      the previous Sunday's late half is not in this one (both in E02/E12). A
+      week with no entries is a full file (entries `[]`, 10080 unlogged),
+      never an error.
+    - **No sync fields, by construction and by test.** Every record is built
+      field by field from a fixed list, never copied. E17 runs with the device
+      CONNECTED to the fake Drive, asserts first that the state really has
+      `updatedAt`/`updatedBy`/tombstones/`verdictMeta` (so it cannot pass
+      vacuously), then walks the export's KEYS recursively (not a string search)
+      for the sync/device keys and for any key outside the agreed set.
+    - **Hard rules.** 4: a user-initiated download only, the same Blob + object
+      URL + anchor as "Export a copy"; E16 stubs `fetch`, `XMLHttpRequest` and
+      `sendBeacon` during a click and asserts none were called, and scans the
+      builder and handler source for them. 1, 5, 10: read-only - no state write,
+      no snapshot (E09), no storage key. 2, 3: no dependency, no build step.
+    - **Known limitation: daylight saving.** The app assumes 1440 minutes in
+      every day (minutes-from-midnight model). On a daylight-saving change day
+      the real day is 23 or 25 hours, so that day's "unlogged" is off by 60
+      minutes, in the app and in the file. Stated in the file's
+      `definitions.dst`. **The wording is date-free on purpose (2026-10-12):** the
+      first version named "Sun 25 Oct 2026", static text that would have gone
+      stale the day after and needed someone to remember to edit it. E11 now
+      fails if the note contains a year or a month name.
+    - **Tests, fail-first and mutation-checked.** Written first: against the
+      code with no builder, 53 of the 62 rows failed (the 9 that passed were
+      setup rows and controls; four of those passed vacuously on an empty file
+      and were tightened to require a non-empty one). The checks compare with an
+      oracle that rebuilds the week as a per-minute array from `state.entries`
+      without calling `weekTotals`/`dayGaps`/`toHM` - a check against
+      `weekTotals` would pass if the builder and the screen were wrong
+      together. 44 mutations, at least one per check group (E01-E18), each applied to a
+      scratch copy of the repo and run against the final tests: every one
+      makes the rows it targets fail (table below; "n failing / 62" is the
+      block's own count; the table below was produced with the 62-row block, the
+      two E11 rows added on 2026-10-12 were mutation-checked separately: date
+      put back, vague "23 or 25 hours", "not additive" sentence removed, "do not
+      sum" weakened - each failed exactly its own row). **Two weaknesses in my own tests were found
+      by the mutation run, not by reading:** flooring hours instead of rounding
+      passed because the fixture's totals were whole hours (fixed: an entry
+      making logged 970 minutes = 16.17 h); sorting `state.entries` in place
+      passed because E09 took its "before" snapshot after the first build had
+      already sorted (fixed: the snapshot is taken before any build).
+    - **Mutation results (2026-10-11, final tests; check groups that failed):**
+      M01  entry gets an extra isBreak key  ->  E01, E17  (2 failing / 62)
+      M02  header: weekEnd is Monday+7 instead of +6  ->  E01  (1 failing / 62)
+      M03  loop reads 8 days (leaks next Monday)  ->  E01, E02, E04, E05, E06, E07, E12, E13  (11 failing / 44)
+      M04  loop reads 6 days (drops Sunday)  ->  E01, E02, E03, E04, E05, E06, E07, E13, E14, E16  (11 failing / 62)
+      M05  no sort (insertion order)  ->  E02, E10  (2 failing / 62)
+      M06  end '24:00' printed as '00:00'  ->  E02  (3 failing / 62)
+      M07  weekday off by one  ->  E02  (1 failing / 62)
+      M08  duration = end instead of end-start  ->  E02, E15  (3 failing / 62)
+      M09  uncategorised name shown as 'Uncategorised'  ->  E03  (2 failing / 62)
+      M10  deleted-category entry not treated as uncategorised  ->  E03  (1 failing / 62)
+      M11  categoryMissing always false  ->  E03  (1 failing / 62)
+      M12  deleted-category entry id dropped (null)  ->  E03  (1 failing / 62)
+      M13  logged = naive sum of durations  ->  E04, E05, E06, E07, E14  (6 failing / 62)
+      M14  unlogged measured against the 06-24 window  ->  E04, E13, E14, E15  (5 failing / 62)
+      M15  hours floored instead of rounded to 2 decimals  ->  E04, E07  (2 failing / 62)
+      M16  per-day logged = naive sum of the day's durations  ->  E05, E14  (3 failing / 62)
+      M17  per-day unlogged against the visible window  ->  E05, E13, E14, E15  (5 failing / 62)
+      M18  week double-booked = sum of per-category overlaps  ->  E06, E07, E14  (3 failing / 62)
+      M19  per-category double-booked always 0  ->  E06, E14  (2 failing / 62)
+      M20  categories with 0 minutes omitted  ->  E07, E13  (3 failing / 62)
+      M21  uncategorised row counts only null-category entries (drops deleted-category minutes)  ->  E07, E14  (3 failing / 62)
+      M22  verdict read from the wrong week  ->  E08, E13  (3 failing / 62)
+      M23  close-out always null  ->  E08  (1 failing / 62)
+      M24  close-out copied whole (leaks updatedAt/updatedBy once connected)  ->  E17  (2 failing / 62)
+      M25  entry copied whole from the stored record  ->  E01, E17  (3 failing / 62)
+      M26  sorts the stored array in place  ->  E09  (1 failing / 62)
+      M27  builder pushes an undo snapshot  ->    (0 failing / 0)
+      M28  definitions: DST sentence removed  ->  E11  (1 failing / 62)
+      M29  definitions: next-week sentence changed  ->  E11  (1 failing / 62)
+      M30  definitions: 'union' wording removed  ->  E11  (1 failing / 62)
+      M31  definitions: 'local' removed  ->  E11  (1 failing / 62)
+      M32  definitions: exceed sentence removed  ->  E11  (1 failing / 62)
+      M33  definitions: hours-range sentence removed  ->  E11  (1 failing / 62)
+      M34  empty week returns null  ->  E08, E11, E13, E14  (5 failing / 62)
+      M35  entries outside the visible range dropped  ->  E02, E04, E05, E06, E07, E14, E15, E16  (9 failing / 62)
+      M36  filename collides with the full backup's  ->  E16  (2 failing / 62)
+      M37  handler exports the focused day in day view, not the week  ->  E16  (2 failing / 62)
+      M38  network call inside the builder  ->  E16  (2 failing / 62)
+      M39  network call inside the click handler  ->  E16  (2 failing / 62)
+      M40  button label changed to 'Export'  ->  E16  (1 failing / 62)
+      M41  privacy note removed  ->  E18  (1 failing / 62)
+      M42  weekStart header uses the day after  ->  E01, E16  (3 failing / 62)
+      M43  totalMinutes 10079  ->  E04  (1 failing / 62)
+      M44  builder resets the display range to 00-24  ->  E09, E15  (2 failing / 62)
+      One harness caveat: in the batch run, M27 printed "0 failing / 0 total"
+      (the headless page produced no result rows - the same thing happened
+      once to M12 and M26 in the first batch); each was re-run alone and
+      flipped as shown. Rows with no mutation of their own are setup rows,
+      preconditions and controls (E01 "builder exists", E15/E16 setup, E17
+      connect/precondition/"state keeps its sync fields"); an empty-file
+      pass would show there as a failing row, not a green one.
+    - **Not covered:** a real browser saving the file on a real phone (the test
+      spies on `createObjectURL` and the anchor's `click`; it proves the
+      wiring, not that Safari downloads it); an agent actually reading the file;
+      the two DST days themselves.
 
 Feature creep is the known failure mode of this project.

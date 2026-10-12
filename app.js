@@ -319,8 +319,8 @@ function migrateSyncFields(s){
   if(!s.deletedEntries) s.deletedEntries={};
   if(!s.deletedCategories) s.deletedCategories={};
 
-  /* verdicts: weeklyVerdicts[weekIso][catId] is a bare string ('keep'/
-     'compress'/'cut'), not an object, so its sync metadata can't live
+  /* verdicts: weeklyVerdicts[weekIso][catId] is a bare string ('increase'/
+     'keep'/'cut'), not an object, so its sync metadata can't live
      inline the way it does on entries/categories - it lives in the
      side table verdictMeta, keyed by the same weekIso+"|"+catId composite
      id flattenVerdicts() uses. verdictMeta is invariant-only-for-live: a
@@ -2041,6 +2041,105 @@ function weekTotals(ws){
   return {t:t,logged:unionMinutes(ranges),none:none,overlap:overlap};
 }
 
+/* ---------------- week export (data only, for an outside reader) ----------------
+   One JSON file for the week on screen, for handing to an agent that audits
+   the week - instead of screenshotting the grid, which gets misread. Data
+   and definitions only: no conclusions, and none of the sync fields
+   (updatedAt/updatedBy/tombstones/device id) - every entry, category row and
+   close-out is built field by field from an explicit list, never by copying
+   a stored record, so a field added to the stored shape later cannot leak
+   into the file by accident. Read-only: no state change, no snapshot, no
+   storage write, no network (hard rules 1, 4, 5 untouched).
+
+   The numbers come from weekTotals() and dayGaps() - the same functions the
+   screen uses - so the file cannot disagree with the screen. dayGaps() reads
+   only entries and the 0-1440 range, never settings.startHour/endHour, so
+   the display range cannot leak into "unlogged" (checked, selftest E15).
+
+   The identities the file satisfies (checked against an independent
+   per-minute oracle in selftest.html, not against weekTotals itself):
+     sum of every categoryTotals[].minutes (uncategorised row included)
+       = summary.sumOfEntryMinutes
+       = summary.loggedMinutes + summary.doubleBookedMinutes
+   Entries that cross midnight are exported as stored: two entries, one per
+   date, no link between them (putEntry splits them when they are written). */
+var WEEK_EXPORT_SCHEMA=1;
+var WEEKDAY_FULL=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
+var WEEK_EXPORT_DEFINITIONS={
+  logged:"loggedMinutes is the union of all entries' time: a minute covered by two or more entries is counted once.",
+  categoryTotals:"Each categoryTotals minutes value is a plain sum of entry durations, so the rows together can exceed loggedMinutes. The excess is the overlap, summary.doubleBookedMinutes: sumOfEntryMinutes - loggedMinutes.",
+  doubleBookedMinutes:"In summary and per day: sum of entry durations minus the union, including overlap inside one category. Per category: minutes of that category's time also covered by an entry of another category or an uncategorised entry (as the app's on-screen 'overlaps' line); overlap between two entries of the same category is not counted there. Per-category values are not additive: they do not sum to the week's doubleBookedMinutes (a minute shared by two categories appears in both rows but once in the week figure, and same-category overlap appears in no row).",
+  unlogged:"unloggedMinutes is 10080 minus loggedMinutes, over all 24 hours of all 7 days. The app's visible hours range is a display setting and does not change anything in this file.",
+  uncategorised:"Entries with no category, and entries whose category no longer exists (categoryMissing: true, id kept, name null), are all counted in the row with id null.",
+  weekMembership:"Entries belong to the week of their calendar date. An entry that crosses midnight is stored as two entries, one per date, with no link between them; an overnight Sunday entry's tail is on the next Monday and is in the next week's file.",
+  time:"All dates and times are local. exportedAt is UTC. Times are minutes since midnight and HH:MM; an end of 24:00 means midnight at the end of that date.",
+  dst:"The app assumes every day has 1440 minutes (24 hours). On a daylight-saving change day the real day is 23 or 25 hours, so that day's unlogged figure is off by 60 minutes.",
+  verdict:"verdict is the value set on that category for this week (increase, keep or cut), or null if none was set. Any other stored value is exported as null."
+};
+function round2(x){ return Math.round(x*100)/100; }
+/* the values the rail's verdict buttons write (data-v) - exact, case-sensitive,
+   the same comparison the rail itself makes (v===dv). There is no shared
+   constant for this in the app (the list is inlined in renderTotals,
+   majorityVerdict and the close-out sheet), so this is a local copy, pinned
+   to the real rendered buttons by selftest E19. Anything else stored - the
+   legacy "compress" that migrations normally clear, or any stray string from
+   a hand-edited import or Drive file - shows as "no verdict" on screen, so the
+   file exports it as null too (the file must match the screen). */
+var EXPORT_VERDICT_VALUES=["increase","keep","cut"];
+function exportVerdict(catId,weekIso){
+  var v=getVerdict(catId,weekIso);
+  return EXPORT_VERDICT_VALUES.indexOf(v)>-1?v:null;
+}
+function buildWeekExport(ws,exportedAt){
+  var weekIso=iso(ws), wt=weekTotals(ws);
+  var days=[], entries=[], sumAll=0;
+  for(var di=0;di<7;di++){
+    var dateStr=iso(addDays(ws,di)), sumDay=0;
+    /* sorted copy: never sort state.entries in place (E09), and a full
+       tiebreak so the file does not depend on insertion order (E10) */
+    var list=entriesFor(dateStr).slice().sort(function(a,b){
+      return (a.start-b.start)||(a.end-b.end)||(a.label<b.label?-1:a.label>b.label?1:0)||(String(a.cat)<String(b.cat)?-1:String(a.cat)>String(b.cat)?1:0);
+    });
+    list.forEach(function(e){
+      var c=catById(e.cat), id=e.cat||null;
+      sumDay+=e.end-e.start;
+      entries.push({
+        date:dateStr, weekday:WEEKDAY_FULL[di], label:e.label,
+        category:{id:id,name:c?c.name:null},
+        uncategorised:!c, categoryMissing:!!id&&!c,
+        startMinutes:e.start, endMinutes:e.end, start:toHM(e.start), end:toHM(e.end),
+        durationMinutes:e.end-e.start
+      });
+    });
+    var unlogged=dayGaps(dateStr).reduce(function(a,g){ return a+g.end-g.start; },0), logged=1440-unlogged;
+    days.push({date:dateStr,weekday:WEEKDAY_FULL[di],loggedMinutes:logged,unloggedMinutes:unlogged,doubleBookedMinutes:sumDay-logged,entryCount:list.length});
+    sumAll+=sumDay;
+  }
+  var unloggedWeek=Math.max(10080-wt.logged,0);
+  var rows=state.categories.map(function(c){
+    var m=wt.t[c.id]||0;
+    return {id:c.id,name:c.name,uncategorised:false,minutes:m,hours:round2(m/60),doubleBookedMinutes:wt.overlap[c.id]||0,verdict:exportVerdict(c.id,weekIso)};
+  });
+  rows.push({id:null,name:null,uncategorised:true,minutes:wt.none,hours:round2(wt.none/60),doubleBookedMinutes:wt.overlap.none||0,verdict:null});
+  var co=state.weekCloseouts&&state.weekCloseouts[weekIso];
+  return {
+    schemaVersion:WEEK_EXPORT_SCHEMA,
+    weekStart:weekIso, weekEnd:iso(addDays(ws,6)),
+    exportedAt:exportedAt||new Date().toISOString(),
+    definitions:WEEK_EXPORT_DEFINITIONS,
+    summary:{
+      totalMinutes:10080, totalHours:168,
+      loggedMinutes:wt.logged, loggedHours:round2(wt.logged/60),
+      unloggedMinutes:unloggedWeek, unloggedHours:round2(unloggedWeek/60),
+      sumOfEntryMinutes:sumAll, doubleBookedMinutes:sumAll-wt.logged,
+      entryCount:entries.length, days:days
+    },
+    categoryTotals:rows,
+    closeout:co?{note:co.note||"",closedAt:co.closedAt||null}:null,
+    entries:entries
+  };
+}
+
 function renderTotals(){
   var r=weekTotals(),max=r.none;
   state.categories.forEach(function(c){ max=Math.max(max,r.t[c.id]||0); });
@@ -3491,6 +3590,22 @@ document.getElementById("save").addEventListener("click",function(){
   a.click();
   setTimeout(function(){ URL.revokeObjectURL(a.href); },1000);
 });
+/* "Export week": the week on screen (weekStart - also in day view, where
+   weekStart is still the Monday of the week being looked at), as a data file.
+   Same Blob + object URL + anchor download as "Export a copy" above, and
+   deliberately a different filename so the two never overwrite each other.
+   Nothing is sent anywhere - hard rule 4. */
+document.getElementById("exportWeek").addEventListener("click",function(){
+  var data;
+  try{ data=buildWeekExport(weekStart); }catch(e){ showToast("Could not build the week export."); return; }
+  var blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+  var a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="hours-ledger-week-"+iso(weekStart)+".json";
+  a.click();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); },1000);
+  showToast("Exported the week of "+iso(weekStart)+".");
+});
 document.getElementById("load").addEventListener("click",function(){ document.getElementById("fileInput").click(); });
 /* pulled out of the FileReader callback so it's directly callable (and
    directly testable, synchronously, with no FileReader involved at all) -
@@ -3660,6 +3775,7 @@ if(TEST_MODE){
     findEntry:findEntry,
     removeEntry:removeEntry,
     weekTotals:weekTotals,
+    buildWeekExport:buildWeekExport,
     unionMinutes:unionMinutes,
     getVerdict:getVerdict,
     setVerdict:setVerdict,
