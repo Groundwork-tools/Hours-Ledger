@@ -2577,7 +2577,7 @@ dashboard styling.
     The week is `weekStart`, also in day view (E16 pins this). Code:
     `buildWeekExport(ws, exportedAt)` and the click handler in `app.js`,
     `privacy.html` has the one-line note, tests are `runExportWeekTests()` in
-    `selftest.html` (E01-E18, 64 rows).
+    `selftest.html` (E01-E19, 72 rows).
     - **Reuse, not reimplementation.** Week figures come from `weekTotals(ws)`;
       per-day logged/unlogged from `dayGaps(dateStr)`. **Checked by running,
       not only reading:** `dayGaps` does not depend on `settings.startHour/
@@ -2630,6 +2630,20 @@ dashboard styling.
       different and much larger file. **Reopen only if an agent actually
       misreads the file** (for example, sums the per-category values and
       reports the total as the week's double-booking).
+    - **Verdicts are whitelisted on export (2026-10-12).** `exportVerdict()` writes
+      a verdict only if it is exactly `increase`, `keep` or `cut`
+      (case-sensitive, the rail's own `v===dv` comparison); anything else is
+      `null`, and `definitions.verdict` says so. Why: the screen already treats
+      any other stored string as "no verdict" (no button pressed,
+      `majorityVerdict` ignores it), so the file must too. **Found by running a
+      probe:** the legacy `"compress"` is cleared on load, import and undo and
+      swept on sync, so it does not normally reach state, but any other string
+      (`"Compress"`, `"maybe"`) survives import and load untouched and the
+      export used to pass it through. Load, import and sync validation were
+      deliberately NOT changed. The list is a local constant, not a shared one
+      (the app inlines it in three places); E19 pins it to the buttons the rail
+      actually renders and to what `setVerdict` writes. The close-out sheet's own
+      button list is not separately pinned.
     - **Midnight and week edges.** `putEntry` splits at write time, so the
       export just reads two ordinary entries (first ends `1440` / `"24:00"`,
       second starts `0`). Entries belong to the week of their calendar date: a

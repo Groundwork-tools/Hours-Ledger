@@ -2074,9 +2074,22 @@ var WEEK_EXPORT_DEFINITIONS={
   weekMembership:"Entries belong to the week of their calendar date. An entry that crosses midnight is stored as two entries, one per date, with no link between them; an overnight Sunday entry's tail is on the next Monday and is in the next week's file.",
   time:"All dates and times are local. exportedAt is UTC. Times are minutes since midnight and HH:MM; an end of 24:00 means midnight at the end of that date.",
   dst:"The app assumes every day has 1440 minutes (24 hours). On a daylight-saving change day the real day is 23 or 25 hours, so that day's unlogged figure is off by 60 minutes.",
-  verdict:"verdict is the value set on that category for this week (increase, keep or cut), or null if none was set."
+  verdict:"verdict is the value set on that category for this week (increase, keep or cut), or null if none was set. Any other stored value is exported as null."
 };
 function round2(x){ return Math.round(x*100)/100; }
+/* the values the rail's verdict buttons write (data-v) - exact, case-sensitive,
+   the same comparison the rail itself makes (v===dv). There is no shared
+   constant for this in the app (the list is inlined in renderTotals,
+   majorityVerdict and the close-out sheet), so this is a local copy, pinned
+   to the real rendered buttons by selftest E19. Anything else stored - the
+   legacy "compress" that migrations normally clear, or any stray string from
+   a hand-edited import or Drive file - shows as "no verdict" on screen, so the
+   file exports it as null too (the file must match the screen). */
+var EXPORT_VERDICT_VALUES=["increase","keep","cut"];
+function exportVerdict(catId,weekIso){
+  var v=getVerdict(catId,weekIso);
+  return EXPORT_VERDICT_VALUES.indexOf(v)>-1?v:null;
+}
 function buildWeekExport(ws,exportedAt){
   var weekIso=iso(ws), wt=weekTotals(ws);
   var days=[], entries=[], sumAll=0;
@@ -2105,7 +2118,7 @@ function buildWeekExport(ws,exportedAt){
   var unloggedWeek=Math.max(10080-wt.logged,0);
   var rows=state.categories.map(function(c){
     var m=wt.t[c.id]||0;
-    return {id:c.id,name:c.name,uncategorised:false,minutes:m,hours:round2(m/60),doubleBookedMinutes:wt.overlap[c.id]||0,verdict:getVerdict(c.id,weekIso)};
+    return {id:c.id,name:c.name,uncategorised:false,minutes:m,hours:round2(m/60),doubleBookedMinutes:wt.overlap[c.id]||0,verdict:exportVerdict(c.id,weekIso)};
   });
   rows.push({id:null,name:null,uncategorised:true,minutes:wt.none,hours:round2(wt.none/60),doubleBookedMinutes:wt.overlap.none||0,verdict:null});
   var co=state.weekCloseouts&&state.weekCloseouts[weekIso];

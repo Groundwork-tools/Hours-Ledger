@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=639;
+var EXPECTED_MIN_ROWS=647;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -4729,6 +4729,7 @@ function runExportWeekTests(){
     check("E11 logged is defined as the union of entries",/union/i.test(D.logged||""));
     check("E11 category totals can exceed logged by the overlap",/exceed/i.test(D.categoryTotals||"")&&/doubleBookedMinutes/.test(D.categoryTotals||""));
     check("E11 week membership: calendar date, and an overnight Sunday entry's tail is in the next week's file",/calendar date/i.test(D.weekMembership||"")&&/next week's file/i.test(D.weekMembership||""));
+    check("E11 the verdict definition says any other stored value is exported as null",/any other stored value is exported as null/i.test(D.verdict||""),D.verdict);
     check("E11 times are local",/local/i.test(D.time||""));
     check("E11 the 1440-minute assumption and the 23-or-25-hour reality of a DST change day are stated",/1440/.test(D.dst||"")&&/23 or 25 hours/.test(D.dst||""),D.dst);
     check("E11 ...and the DST note names no calendar date or year (date-free, so it cannot go stale)",
@@ -4875,6 +4876,43 @@ function runExportWeekTests(){
     /* ---- E18 privacy.html says it ---- */
     return fetch("privacy.html?v="+Date.now()).then(function(r){ return r.text(); }).then(function(t){
       check("E18 privacy.html carries the one-line Export week note (made locally, nothing sent)",/Export week/.test(t)&&/nothing is sent/i.test(t));
+    });
+  }).then(function(){
+    /* ---- E19 verdict whitelist: only the values the rail buttons write are exported, everything else is null ---- */
+    return freshSandbox(true).then(function(f){
+      var h=f.H, d=f.d, st=h.getState(), C=st.categories, W="2026-10-05", ws=h.parseIso(W);
+      h.setWeekStart(ws); st.weeklyVerdicts={}; st.weeklyVerdicts[W]={};
+      function ver(x,cat){ var r=(x&&x.categoryTotals||[]).filter(function(c){ return c.id===cat.id; })[0]; return r?r.verdict:"(row missing)"; }
+      function build(){ try{ return h.buildWeekExport(ws,"2026-10-12T00:00:00.000Z"); }catch(e){ return null; } }
+      /* what the rail buttons ACTUALLY write: read from the real rendered buttons, not from a copy of the list */
+      h.render(); h.flushPendingRenderForTest();
+      var railVals=[].slice.call(d.querySelectorAll("#totals .verdict")[0]?d.querySelectorAll("#totals .verdict")[0].querySelectorAll("button"):[]).map(function(b){ return b.getAttribute("data-v"); });
+      check("E19 setup: the rail's first verdict row has exactly three buttons: increase, keep, cut",JSON.stringify(railVals)==='["increase","keep","cut"]',JSON.stringify(railVals));
+      /* valid values, written the way the rail writes them (setVerdict), must survive unchanged */
+      railVals.forEach(function(v,i){ h.setVerdict(C[i].id,W,v); });
+      var x=build();
+      check("E19 every value the rail buttons write is exported unchanged (increase, keep, cut)",
+        !!x&&railVals.length===3&&railVals.every(function(v,i){ return ver(x,C[i])===v; }),
+        railVals.map(function(v,i){ return v+"->"+JSON.stringify(ver(x,C[i])); }).join(", "));
+      /* anything else, written straight into state (no migration runs on a direct edit), exports as null */
+      var bad=["compress","Compress","maybe","Increase","keep "];
+      bad.forEach(function(v,i){ st.weeklyVerdicts[W][C[3+i].id]=v; });
+      x=build();
+      check("E19 legacy and unknown values exported as null, not passed through: compress, Compress, maybe, Increase (case), 'keep ' (space)",
+        !!x&&bad.every(function(v,i){ return ver(x,C[3+i])===null; }),
+        bad.map(function(v,i){ return JSON.stringify(v)+"->"+JSON.stringify(ver(x,C[3+i])); }).join(", "));
+      check("E19 ...while the valid ones are still unchanged in the same file",!!x&&railVals.every(function(v,i){ return ver(x,C[i])===v; }));
+      check("E19 exporting did not rewrite the stored values (the odd strings are still in state, only the file hides them)",
+        st.weeklyVerdicts[W][C[3].id]==="compress"&&st.weeklyVerdicts[W][C[5].id]==="maybe");
+      /* the realistic route: an imported file carrying an odd value. Import validation is deliberately untouched. */
+      var copy=JSON.parse(JSON.stringify(st)); copy.weeklyVerdicts={}; copy.weeklyVerdicts[W]={}; copy.weeklyVerdicts[W][C[0].id]="maybe"; copy.weeklyVerdicts[W][C[1].id]="cut";
+      h.importBackupJson(JSON.stringify(copy));
+      var st2=h.getState(); x=build();
+      check("E19 precondition (not vacuous): after importBackupJson the odd value 'maybe' really is stored (import still does not validate)",
+        st2.weeklyVerdicts[W]&&st2.weeklyVerdicts[W][C[0].id]==="maybe",JSON.stringify(st2.weeklyVerdicts[W]));
+      check("E19 through importBackupJson: the imported 'maybe' exports as null and the imported 'cut' stays 'cut'",
+        !!x&&ver(x,C[0])===null&&ver(x,C[1])==="cut",JSON.stringify([ver(x,C[0]),ver(x,C[1])]));
+      f.el.parentNode.removeChild(f.el);
     });
   }).catch(function(e){
     check("the export-week chain itself threw: "+(e&&e.message||e),false);
