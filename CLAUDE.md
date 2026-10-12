@@ -443,6 +443,10 @@ on purpose.
   shows whichever verdict is set on the most weeks, ties shown as `"keep/cut"`
   etc., blank if none of the visible weeks have one set. A category with no key
   under a given week just means no verdict was chosen that week.
+  Stored values are exactly `increase`, `keep` or `cut`; the pre-rename
+  `compress` is cleared on load, import and undo/redo and swept on sync
+  (backlog item 18), and any other string counts as no verdict on screen and
+  in Export week.
 - A close-out is keyed the same way, one per week, written only when the user
   actually closes that week out. `note` is a single optional freeform line —
   there is deliberately no separate notes-browsing view; it only ever surfaces

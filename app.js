@@ -319,8 +319,8 @@ function migrateSyncFields(s){
   if(!s.deletedEntries) s.deletedEntries={};
   if(!s.deletedCategories) s.deletedCategories={};
 
-  /* verdicts: weeklyVerdicts[weekIso][catId] is a bare string ('keep'/
-     'compress'/'cut'), not an object, so its sync metadata can't live
+  /* verdicts: weeklyVerdicts[weekIso][catId] is a bare string ('increase'/
+     'keep'/'cut'), not an object, so its sync metadata can't live
      inline the way it does on entries/categories - it lives in the
      side table verdictMeta, keyed by the same weekIso+"|"+catId composite
      id flattenVerdicts() uses. verdictMeta is invariant-only-for-live: a
