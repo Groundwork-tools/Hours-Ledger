@@ -119,6 +119,25 @@ button{cursor:pointer}
 .dayhead div:first-child{border-left:0}
 .dayhead b{display:block;font-family:var(--display);font-size:13px;font-weight:700;letter-spacing:.04em;margin-bottom:2px}
 .dayhead .today{background:var(--ink);color:var(--paper)}
+/* daily close-out: a header with a day sheet behind it is a real button. The
+   cell's own padding moves onto the button so the whole cell is the tap target.
+   Square corners, no shadow, like everything else. */
+.dayhead div.openable{padding:0}
+.daybtn{display:block;width:100%;min-height:100%;padding:8px 7px;border:0;border-radius:0;background:transparent;
+  font:inherit;letter-spacing:inherit;text-transform:inherit;color:inherit;text-align:left;cursor:pointer}
+.daybtn:hover{background:var(--stripe)}
+.dayhead .today .daybtn:hover{background:rgba(250,250,247,.16)}
+.daybtn:focus-visible{outline:2px solid var(--ink);outline-offset:-2px}
+.dayhead .today .daybtn:focus-visible{outline-color:var(--paper)}
+/* a day that has a highlight: a small SQUARE (the design allows no rounded corners) */
+.hl-mark{display:inline-block;width:6px;height:6px;margin-left:6px;vertical-align:middle;background:currentColor}
+/* hover preview of a highlight: desktop only (attached only when the browser reports hover
+   capability), fixed so it is not a child of #dayhead, which is rebuilt on every render */
+.day-tip{position:fixed;z-index:30;max-width:280px;background:var(--ink);color:var(--paper);font-family:var(--mono);
+  font-size:11px;line-height:1.5;padding:6px 9px;border-radius:0;box-shadow:none;pointer-events:none;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.day-tip[hidden]{display:none}
+.tot-bar i.void{background:repeating-linear-gradient(90deg,transparent 0 5px,var(--rule) 5px 6px);outline:1px solid var(--rule);outline-offset:-1px}
 .body{display:grid;grid-template-columns:56px repeat(7,1fr);position:relative}
 .gutter{border-right:1px solid var(--rule)}
 .gutter .hr{height:calc(var(--row)*2);border-bottom:1px solid var(--rule-soft);font-family:var(--mono);font-size:10px;color:var(--muted);padding:2px 6px 0 0;text-align:right}

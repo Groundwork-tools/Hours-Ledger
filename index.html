@@ -200,6 +200,10 @@
       <label>Unlogged time</label>
       <div class="closeout-gaps" id="closeoutGaps"></div>
     </div>
+    <div class="field" id="closeoutHighlightsField" hidden>
+      <label>Highlights</label>
+      <div class="closeout-gaps" id="closeoutHighlights"></div>
+    </div>
     <div class="field">
       <label for="closeoutNote">Anything stand out? <span style="text-transform:none;letter-spacing:0">(optional)</span></label>
       <input type="text" id="closeoutNote" placeholder="One line is plenty" autocomplete="off">
@@ -210,6 +214,24 @@
     </div>
   </div>
 </div>
+
+<div class="scrim" id="dayScrim">
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="dayTitle">
+    <h2 id="dayTitle"></h2>
+    <div id="dayTotals"></div>
+    <div id="dayUnlogged"></div>
+    <div class="field">
+      <label for="dayNote">Highlight of the day <span style="text-transform:none;letter-spacing:0">(optional)</span></label>
+      <input type="text" id="dayNote" maxlength="140" placeholder="One line is plenty. Empty clears it." autocomplete="off">
+    </div>
+    <div class="sheet-actions">
+      <button class="solid" id="daySave">Save</button>
+      <button class="ghost" id="dayCancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="day-tip" id="dayTip" role="tooltip" hidden></div>
 
 <button class="fab" id="fab">&#43; Log now</button>
 

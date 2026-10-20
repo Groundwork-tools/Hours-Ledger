@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=647;
+var EXPECTED_MIN_ROWS=853;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -2094,7 +2094,7 @@ function waitFor(predicate,timeoutMs){
    exists specifically to verify state SURVIVES a simulated reload (a
    real regression test for data almost lost that way) - wiping storage
    there would break the exact thing that test is checking. */
-function freshSandbox(clean){
+function freshSandbox(clean,extraQuery){
   if(clean){
     ["hours-ledger-selftest-v2","hours-ledger-device-id-TESTMODE",
      "hours-ledger-selftest-undo-v1","hours-ledger-fakedrive-TESTMODE",
@@ -2111,7 +2111,7 @@ function freshSandbox(clean){
         resolve({H:iframeEl.contentWindow.__HL_TEST__,d:iframeEl.contentDocument,el:iframeEl});
       },100);
     });
-    iframeEl.src="index.html?hltest=1&v="+Date.now();
+    iframeEl.src="index.html?hltest=1"+(extraQuery||"")+"&v="+Date.now();
     document.body.appendChild(iframeEl);
   });
 }
@@ -3005,7 +3005,1047 @@ function runAsyncTests(H,d){
     .then(function(r){ return runQuotaSaveFailureTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runUndoCapTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runQuotaProbeTests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runExportWeekTests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runExportWeekTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runDayHighlightTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runDayCloseoutUITests().then(function(more){ return r.concat(more); }); });
+}
+
+/* ---------------------------------------------------------------------
+   Day highlights (daily close-out, engine only - the popup is Phase B).
+   One optional single-line note per calendar day, state.dayHighlights[date]
+   = {text, updatedAt, updatedBy}; clearing writes a tombstone in
+   state.deletedDayHighlights[date]. Synced per record (hard rule 7).
+
+   Same conventions as the undo blocks above: every check puts what it
+   observed into its row name; each scenario gets its own clean sandbox;
+   "device B" is the real syncEngine() with its own device id against the
+   same fake Drive blob. A scenario that throws (for example because a hook
+   does not exist yet) becomes ONE failing row naming the exception, never a
+   silent skip and never a collapsed run.
+
+   Test-design notes carried over from the earlier blocks: stamps that a
+   test depends on being "old" are written explicitly (the 5s ambiguity
+   window in mergeRecords masks a wrongly-written tombstone otherwise); a
+   scenario that ends on an undo settle()s before the next one starts. */
+function runDayHighlightTests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); }
+  function J(x){ return JSON.stringify(x); }
+  var D="2026-04-20",D2="2026-04-21",D3="2026-04-22";
+  var OLD="2026-04-20T09:00:00.000Z",MID="2026-04-20T09:30:00.000Z",NEW="2026-04-20T10:00:00.000Z";
+  function settle(h){
+    return delay(250).then(function(){ return waitFor(function(){ return !h.isDriveSyncInFlight(); },4000); }).then(function(){ return delay(50); });
+  }
+  function scenario(tag,fn){
+    return function(){
+      return Promise.resolve().then(fn).catch(function(e){
+        check(tag+": scenario threw before finishing",false,String(e&&e.message||e));
+      });
+    };
+  }
+  function connectedSandbox(){
+    return freshSandbox(true).then(function(f){
+      f.d.getElementById("connectDrive").click();
+      return waitFor(function(){ return f.d.getElementById("connectDrive").textContent==="Drive: synced"; },4000).then(function(ok){
+        check("setup: fake Drive connect completed",ok);
+        return f;
+      });
+    });
+  }
+  function txt(st,date){ var r=st.dayHighlights&&st.dayHighlights[date]; return r?r.text:null; }
+  function newB(h){ return JSON.parse(JSON.stringify(h.getState())); }
+  function syncB(h,stateB){
+    var eng=h.syncEngine(stateB,h.fakeDriveRead(),"dev-B");
+    h.fakeDriveWrite(eng.toPush);
+    return eng.newLocalState;
+  }
+  function remoteRec(h,date){
+    var r=h.fakeDriveRead();
+    return r&&r.dayHighlights&&r.dayHighlights.filter(function(x){ return x.id===date; })[0];
+  }
+  /* pure-engine fixtures */
+  function baseState(h){
+    var s=JSON.parse(JSON.stringify(h.getState()));
+    s.dayHighlights={}; s.deletedDayHighlights={};
+    s.deletedEntries=s.deletedEntries||{}; s.deletedCategories=s.deletedCategories||{};
+    return s;
+  }
+  function live(s,date,text,at,by){ s.dayHighlights[date]={text:text,updatedAt:at,updatedBy:by}; }
+  function dead(s,date,at,by){ s.deletedDayHighlights[date]={updatedAt:at,updatedBy:by,deletedAt:at}; }
+  function rec(date,text,at,by){ return {id:date,date:date,text:text,updatedAt:at,updatedBy:by,deleted:false,deletedAt:null}; }
+  function tomb(date,at,by){ return {id:date,date:date,text:null,updatedAt:at,updatedBy:by,deleted:true,deletedAt:at}; }
+  function file(arr,omitKey){
+    var f={categories:[],entries:[],verdicts:[],closeouts:[]};
+    if(!omitKey) f.dayHighlights=arr;
+    return f;
+  }
+  function pushed(eng,date){ return (eng.toPush.dayHighlights||[]).filter(function(x){ return x.id===date; }); }
+  function spyLog(f){
+    var c=f.el.contentWindow.console,orig=c.log,lines=[];
+    c.log=function(){ lines.push([].join.call(arguments," ")); };
+    return {lines:lines,restore:function(){ c.log=orig; }};
+  }
+  function entry(h,date,label,cat,s,e){ h.putEntry(date,label,cat,s,e,null); }
+
+  return Promise.resolve()
+
+    /* ---- DH01: old data reads safely (additive, hard rule 1) */
+    .then(scenario("DH01",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,st=h.getState();
+        delete st.dayHighlights; delete st.deletedDayHighlights;
+        h.migrateDayHighlights(st);
+        check("DH01 a state with no dayHighlights key gets an empty map",st.dayHighlights&&typeof st.dayHighlights==="object"&&Object.keys(st.dayHighlights).length===0,J(st.dayHighlights));
+        var old={version:2,settings:{startHour:6,endHour:24},categories:[{id:"c1",name:"X",color:"#27864F"}],entries:{},weeklyVerdicts:{},weekCloseouts:{}};
+        h.importBackupJson(J(old));
+        check("DH01 importing a backup written before this feature leaves an empty map, not undefined",!!h.getState().dayHighlights&&Object.keys(h.getState().dayHighlights).length===0,J(h.getState().dayHighlights));
+        var s2=h.getState(); delete s2.dayHighlights; h.snapshot("old-shape snapshot"); h.setState(s2);
+        h.undo();
+        check("DH01 undo/redo onto a snapshot with no dayHighlights key leaves an empty map",!!h.getState().dayHighlights,J(h.getState().dayHighlights));
+        var g={}; g[D]="just a string"; g[D2]={text:5}; g[D3]={text:"ok",updatedAt:OLD,updatedBy:"dev-A"};
+        var s3=h.getState(); s3.dayHighlights=g; h.migrateDayHighlights(s3);
+        check("DH01 malformed leaves (a bare string, a non-string text) are dropped so a later sync cannot throw on them; a good one stays",
+          Object.keys(s3.dayHighlights).join(",")===D3,J(s3.dayHighlights));
+      });
+    }))
+
+    .then(scenario("DH01b",function(){
+      /* the LOAD path: a ledger saved before this feature (no key) and one with a malformed leaf,
+         then a real page load that reads it from localStorage */
+      return freshSandbox(true).then(function(f){
+        var old={version:2,settings:{startHour:6,endHour:24},categories:[{id:"c1",name:"X",color:"#27864F"}],entries:{},weeklyVerdicts:{},weekCloseouts:{}};
+        f.el.parentNode.removeChild(f.el);
+        localStorage.setItem("hours-ledger-selftest-v2",J(old));
+        return freshSandbox();
+      }).then(function(f){
+        check("DH01b loading a stored ledger that predates this feature gives an empty highlights map (and the ledger itself is intact)",
+          J(f.H.getState().dayHighlights)==="{}"&&f.H.getState().categories[0].id==="c1",J(f.H.getState().dayHighlights));
+        var bad={version:2,settings:{startHour:6,endHour:24},categories:[{id:"c1",name:"X",color:"#27864F"}],entries:{},weeklyVerdicts:{},weekCloseouts:{},
+          dayHighlights:{"2026-04-20":"a bare string","2026-04-21":{text:"fine",updatedAt:OLD,updatedBy:"dev-A"}}};
+        f.el.parentNode.removeChild(f.el);
+        localStorage.setItem("hours-ledger-selftest-v2",J(bad));
+        return freshSandbox();
+      }).then(function(f){
+        check("DH01b ...and loading a ledger with a malformed stored highlight drops only that one",
+          Object.keys(f.H.getState().dayHighlights).join(",")==="2026-04-21",J(f.H.getState().dayHighlights));
+      });
+    }))
+
+    /* ---- DH02: set / edit / clear, stamping and the connected gate */
+    .then(scenario("DH02",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,dev=h.getDeviceId();
+        var r1=h.setDayHighlight(D,"  hello  ");
+        var rec1=h.getState().dayHighlights[D];
+        check("DH02 set trims the text and returns true",r1===true&&rec1&&rec1.text==="hello",J(rec1));
+        check("DH02 set stamps updatedAt (ISO) and updatedBy (this device) at EDIT time on a connected device",
+          rec1&&typeof rec1.updatedAt==="string"&&!isNaN(Date.parse(rec1.updatedAt))&&rec1.updatedBy===dev,J(rec1));
+        var at1=rec1.updatedAt;
+        return delay(8).then(function(){
+          var r2=h.setDayHighlight(D,"hello");
+          check("DH02 saving identical text is a no-op (false, stamp unchanged, so no sync churn or spurious last-write-wins)",
+            r2===false&&h.getState().dayHighlights[D].updatedAt===at1,J(h.getState().dayHighlights[D]));
+          var r3=h.setDayHighlight(D,"hello again");
+          check("DH02 an edit restamps (newer updatedAt) and changes the text",
+            r3===true&&Date.parse(h.getState().dayHighlights[D].updatedAt)>Date.parse(at1)&&h.getState().dayHighlights[D].text==="hello again",J(h.getState().dayHighlights[D]));
+          h.setDayHighlight(D,"   ");
+          check("DH02 whitespace-only text is a clear: the live record is gone",!h.getState().dayHighlights[D],J(h.getState().dayHighlights));
+          var t=h.getState().deletedDayHighlights&&h.getState().deletedDayHighlights[D];
+          check("DH02 ...and a TOMBSTONE exists for that date (clearing must not look like an absence to the merge)",
+            !!t&&t.updatedBy===dev&&!isNaN(Date.parse(t.updatedAt))&&!isNaN(Date.parse(t.deletedAt)),J(t));
+          var before=J(h.getState().deletedDayHighlights);
+          var r4=h.setDayHighlight(D3,"");
+          check("DH02 clearing a date that has no highlight writes NO tombstone (never delete what was never seen: it may exist on Drive)",
+            r4===false&&J(h.getState().deletedDayHighlights)===before,J(h.getState().deletedDayHighlights));
+          h.setDayHighlight(D,"back again");
+          check("DH02 setting after a clear removes the tombstone: a date is never in both containers (backlog-18 collision shape)",
+            !!h.getState().dayHighlights[D]&&!(h.getState().deletedDayHighlights||{})[D],"live="+!!h.getState().dayHighlights[D]+" tomb="+!!(h.getState().deletedDayHighlights||{})[D]);
+          h.setDayHighlight(D2,"line one\nline two\t x");
+          check("DH02 newlines and tabs collapse to single spaces (single-line, same philosophy as the weekly note)",
+            h.getState().dayHighlights[D2].text==="line one line two x",J(h.getState().dayHighlights[D2].text));
+        });
+      });
+    }))
+    .then(scenario("DH02b",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        h.setDayHighlight(D,"never connected");
+        var r=h.getState().dayHighlights[D];
+        check("DH02b a device that never connected stores just the text, no sync fields (documented gate: such a device sees none of this)",
+          r&&r.text==="never connected"&&r.updatedAt===undefined&&r.updatedBy===undefined,J(r));
+        h.setDayHighlight(D,"");
+        check("DH02b ...and clearing there writes no tombstone container at all",!h.getState().deletedDayHighlights||Object.keys(h.getState().deletedDayHighlights).length===0,J(h.getState().deletedDayHighlights));
+      });
+    }))
+
+    /* ---- DH03: 140-character cap */
+    .then(scenario("DH03",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,long200=new Array(201).join("a");
+        h.setDayHighlight(D,long200);
+        check("DH03 the setter slices to 140 characters",h.getState().dayHighlights[D].text.length===140,String(h.getState().dayHighlights[D].text.length));
+        h.setDayHighlight(D2,new Array(141).join("b"));
+        check("DH03 exactly 140 is kept whole",h.getState().dayHighlights[D2].text.length===140);
+        h.setDayHighlight(D3,new Array(140).join("c")+"😀😀");
+        var t=h.getState().dayHighlights[D3].text,ok=true;
+        try{ encodeURIComponent(t); }catch(e){ ok=false; }
+        check("DH03 the cut never splits an emoji into a lone surrogate (139 chars + one whole emoji)",ok&&Array.from(t).length===140,"codepoints="+Array.from(t).length);
+        check("DH03 the exported cap constant is 140",h.getDayHighlightMax()===140,String(h.getDayHighlightMax()));
+        /* sync and import must NEVER truncate: cutting a remote record is data loss */
+        var s=baseState(h),remote=file([rec(D,new Array(301).join("z"),NEW,"dev-B")]);
+        var eng=h.syncEngine(s,remote,"dev-A");
+        check("DH03 a 300-character highlight arriving from sync is stored whole, not truncated",eng.newLocalState.dayHighlights[D]&&eng.newLocalState.dayHighlights[D].text.length===300,String(eng.newLocalState.dayHighlights[D]&&eng.newLocalState.dayHighlights[D].text.length));
+        var bk=JSON.parse(J(h.getState())); bk.dayHighlights={}; bk.dayHighlights[D]={text:new Array(301).join("y"),updatedAt:OLD,updatedBy:"dev-B"};
+        h.importBackupJson(J(bk));
+        check("DH03 ...nor on import",h.getState().dayHighlights[D].text.length===300,String(h.getState().dayHighlights[D]&&h.getState().dayHighlights[D].text.length));
+      });
+    }))
+
+    /* ---- DH04: saveDayHighlight = snapshot + set + persist (hard rule 5) */
+    .then(scenario("DH04",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,d0=h.undoDepthForTest();
+        var ch=h.saveDayHighlight(D,"first");
+        check("DH04 a change takes exactly one snapshot",ch===true&&h.undoDepthForTest()===d0+1,"depth "+d0+"->"+h.undoDepthForTest());
+        var same=h.saveDayHighlight(D,"first");
+        check("DH04 saving the same text takes none",same===false&&h.undoDepthForTest()===d0+1,"depth="+h.undoDepthForTest());
+        h.saveDayHighlight(D,"second");
+        h.saveDayHighlight(D,"");
+        check("DH04 edit and clear each take one snapshot",h.undoDepthForTest()===d0+3,"depth="+h.undoDepthForTest());
+        h.undo();
+        check("DH04 Ctrl+Z after a clear brings the text back",txt(h.getState(),D)==="second",J(h.getState().dayHighlights));
+        h.undo();
+        check("DH04 Ctrl+Z after an edit brings the earlier text back",txt(h.getState(),D)==="first",J(h.getState().dayHighlights));
+        h.undo();
+        check("DH04 Ctrl+Z after the first save removes it",txt(h.getState(),D)===null,J(h.getState().dayHighlights));
+        h.saveDayHighlight(D,"x");
+        check("DH04 saving persisted to storage",(function(){ try{ return JSON.parse(localStorage.getItem("hours-ledger-selftest-v2")).dayHighlights[D].text==="x"; }catch(e){ return false; } })());
+      });
+    }))
+
+    /* ---- DH05: per-day totals use the SPLIT entries (oracle: per-minute arrays built from state.entries,
+       never calling dayTotals/weekTotals/dayGaps/toHM, so engine and screen cannot be wrong together) */
+    .then(scenario("DH05",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,cats=h.getState().categories,c0=cats[0].id,c1=cats[1].id,c2=cats[2].id;
+        entry(h,D,"W1",c0,540,600);               /* 09:00-10:00 */
+        entry(h,D,"W2",c1,570,630);               /* 09:30-10:30, 30 min shared with W1 */
+        entry(h,D,"Free",null,720,750);           /* 12:00-12:30 uncategorised */
+        entry(h,D,"Ghost",  "no-such-cat",780,795); /* 13:00-13:15, category does not exist */
+        entry(h,D,"Sleep",c2,1410,420);           /* 23:30 -> 07:00 crosses midnight */
+        function oracle(date){
+          var mins=new Array(1440),perCat={},none=0,raw=0,i;
+          (h.getState().entries[date]||[]).forEach(function(e){
+            var known=h.getState().categories.some(function(c){ return c.id===e.cat; });
+            for(i=e.start;i<e.end;i++){ mins[i]=true; raw++; }
+            if(known) perCat[e.cat]=(perCat[e.cat]||0)+(e.end-e.start); else none+=e.end-e.start;
+          });
+          var logged=0; for(i=0;i<1440;i++) if(mins[i]) logged++;
+          return {perCat:perCat,none:none,logged:logged,raw:raw};
+        }
+        var o1=oracle(D),o2=oracle(D2),t1=h.dayTotals(D),t2=h.dayTotals(D2);
+        check("DH05 the stored data really is split (Sleep is 23:30-24:00 on the first date and 00:00-07:00 on the next)",
+          h.entriesFor(D).some(function(e){ return e.label==="Sleep"&&e.start===1410&&e.end===1440; })&&h.entriesFor(D2).some(function(e){ return e.label==="Sleep"&&e.start===0&&e.end===420; }));
+        check("DH05 first day: Sleep counts 30 min, not the whole 450",t1.t[c2]===30&&o1.perCat[c2]===30,"engine="+t1.t[c2]+" oracle="+o1.perCat[c2]);
+        check("DH05 first day: W1 60, W2 60 (raw per-category sums, as the week view shows)",t1.t[c0]===60&&t1.t[c1]===60,J(t1.t));
+        check("DH05 first day: uncategorised + deleted-category time = 45, matching the oracle",t1.none===45&&o1.none===45,"engine="+t1.none+" oracle="+o1.none);
+        check("DH05 first day: logged is the UNION (the 30 shared minutes count once) = 165, matching the oracle",t1.logged===165&&o1.logged===165,"engine="+t1.logged+" oracle="+o1.logged);
+        check("DH05 second day: Sleep counts the 420 minutes after midnight",t2.t[c2]===420&&o2.perCat[c2]===420&&t2.logged===420&&o2.logged===420,"engine="+t2.t[c2]+"/"+t2.logged+" oracle="+o2.perCat[c2]+"/"+o2.logged);
+        check("DH05 per-category totals plus uncategorised equal the sum of entry durations (same identity Export week pins)",
+          (t1.t[c0]+t1.t[c1]+t1.t[c2]+t1.none)===o1.raw,"sum="+(t1.t[c0]+t1.t[c1]+t1.t[c2]+t1.none)+" raw="+o1.raw);
+        check("DH05 a day with nothing logged is all zeros, not an error",(function(){ var t=h.dayTotals("2026-04-25"); return t.logged===0&&t.none===0&&Object.keys(t.t).length===0; })());
+      });
+    }))
+
+    /* ---- DH06: unlogged time, and TODAY's future hours are not unlogged */
+    .then(scenario("DH06",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,c0=h.getState().categories[0].id;
+        entry(h,D,"Morning",c0,540,600);      /* 09:00-10:00 */
+        entry(h,D,"Planned",c0,840,900);      /* 14:00-15:00, ahead of now on the day it is "today" */
+        var today=new Date(2026,3,20,10,30);  /* Mon 20 Apr 2026 10:30 local */
+        var tomorrow=new Date(2026,3,21,0,5), yesterday=new Date(2026,3,19,23,0);
+        check("DH06 elapsed minutes: today = minutes since midnight",h.dayElapsedMinutes(D,today)===630,String(h.dayElapsedMinutes(D,today)));
+        check("DH06 elapsed minutes: a past day = the full 1440",h.dayElapsedMinutes(D,tomorrow)===1440,String(h.dayElapsedMinutes(D,tomorrow)));
+        check("DH06 elapsed minutes: a future day = 0",h.dayElapsedMinutes(D,yesterday)===0,String(h.dayElapsedMinutes(D,yesterday)));
+        check("DH06 today at 10:30: unlogged = 630 elapsed - 60 logged = 570 (the 13.5 hours still to come are NOT unlogged; the planned 14:00 entry does not reduce it)",
+          h.dayUnloggedMinutes(D,today)===570,String(h.dayUnloggedMinutes(D,today)));
+        check("DH06 the same day seen from the next day: unlogged = 1440 - 120 = 1320 (past days use the full day)",
+          h.dayUnloggedMinutes(D,tomorrow)===1320,String(h.dayUnloggedMinutes(D,tomorrow)));
+        var mid=new Date(2026,3,20,9,30);
+        check("DH06 now inside an entry (09:30, entry runs 09:00-10:00): unlogged = 570 - 30 = 540 (only the elapsed part of the entry counts)",
+          h.dayUnloggedMinutes(D,mid)===540,String(h.dayUnloggedMinutes(D,mid)));
+        check("DH06 a future day has no unlogged time to report",h.dayUnloggedMinutes(D,yesterday)===0,String(h.dayUnloggedMinutes(D,yesterday)));
+        check("DH06 a day with nothing logged, seen later: the whole 1440 is unlogged and stays visible",h.dayUnloggedMinutes("2026-04-18",today)===1440,String(h.dayUnloggedMinutes("2026-04-18",today)));
+      });
+    }))
+
+    /* ---- DH07: which days can be opened */
+    .then(scenario("DH07",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,late=new Date(2026,3,20,23,59),early=new Date(2026,3,20,0,0);
+        check("DH07 today can be opened (even at 23:59 and at 00:00)",h.dayIsOpenable(D,late)&&h.dayIsOpenable(D,early));
+        check("DH07 a past day can be opened",h.dayIsOpenable("2026-04-19",late)&&h.dayIsOpenable("2025-01-01",late));
+        check("DH07 tomorrow cannot, even one minute before it starts",!h.dayIsOpenable(D2,late)&&!h.dayIsOpenable("2026-04-27",late));
+      });
+    }))
+
+    /* ---- DH08: the weekly close-out lists only days that HAVE a highlight, in day order */
+    .then(scenario("DH08",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,ws=h.parseIso("2026-04-20");
+        h.setDayHighlight("2026-04-26","sunday thing");
+        h.setDayHighlight("2026-04-22","wednesday thing");
+        h.setDayHighlight("2026-04-20","monday thing");
+        h.setDayHighlight("2026-04-27","NEXT week monday");
+        h.setDayHighlight("2026-04-21","tuesday, to be cleared"); h.setDayHighlight("2026-04-21","");
+        var st=h.getState(); st.dayHighlights["2026-04-24"]={text:"   ",updatedAt:OLD,updatedBy:"dev-B"};
+        var list=h.weekHighlights(ws);
+        check("DH08 exactly the days that have a non-empty highlight, Monday-first: Mon, Wed, Sun",
+          list.map(function(x){ return x.day; }).join(",")==="Mon,Wed,Sun",J(list));
+        check("DH08 each row carries date, day name and text",list[1]&&list[1].date==="2026-04-22"&&list[1].text==="wednesday thing",J(list[1]));
+        check("DH08 next week's highlight, a cleared one and a whitespace-only one are absent (no placeholder rows)",list.length===3,String(list.length));
+        check("DH08 a week with none returns an empty list",h.weekHighlights(h.parseIso("2026-03-02")).length===0);
+      });
+    }))
+
+    /* ---- DH09..: the merge, pure engine (hard rule 7) */
+    .then(scenario("DH09",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,s,eng;
+        /* a file written by an older device has NO dayHighlights key at all */
+        s=baseState(h); live(s,D,"mine",OLD,"dev-A");
+        eng=h.syncEngine(s,file([],true),"dev-A");
+        check("DH09 remote file with no dayHighlights key: local highlight is NOT removed",txt(eng.newLocalState,D)==="mine",J(eng.newLocalState.dayHighlights));
+        check("DH09 ...and it is pushed back up (this is how an old device's push gets healed)",pushed(eng,D).length===1&&pushed(eng,D)[0].deleted===false&&pushed(eng,D)[0].text==="mine",J(pushed(eng,D)));
+        s=baseState(h);
+        eng=h.syncEngine(s,file([rec(D2,"from B",OLD,"dev-B")]),"dev-A");
+        check("DH09 present on the remote only: pulled in",txt(eng.newLocalState,D2)==="from B"&&eng.newLocalState.dayHighlights[D2].updatedBy==="dev-B",J(eng.newLocalState.dayHighlights));
+        s=baseState(h); live(s,D,"mine",OLD,"dev-A");
+        eng=h.syncEngine(s,file([rec(D2,"B only",OLD,"dev-B")]),"dev-A");
+        check("DH09 a record absent from one side is never treated as a deletion (both survive, both pushed)",
+          txt(eng.newLocalState,D)==="mine"&&txt(eng.newLocalState,D2)==="B only"&&pushed(eng,D).length===1&&pushed(eng,D2).length===1,J(eng.toPush.dayHighlights));
+        s=baseState(h); live(s,D,"first ever",OLD,"dev-A");
+        eng=h.syncEngine(s,null,"dev-A");
+        check("DH09 first-ever sync (no remote file): local highlights all go up live",pushed(eng,D).length===1&&!pushed(eng,D)[0].deleted,J(eng.toPush.dayHighlights));
+        s=baseState(h); live(s,D,"live local",OLD,"dev-A");
+        eng=h.syncEngine(s,file([tomb(D,NEW,"dev-B")]),"dev-A");
+        check("DH09 another device's NEWER tombstone (>5s) beats an older local highlight: gone locally, tombstone kept",
+          txt(eng.newLocalState,D)===null&&!!eng.newLocalState.deletedDayHighlights[D]&&pushed(eng,D)[0].deleted===true,J(eng.newLocalState.deletedDayHighlights));
+        s=baseState(h); live(s,D,"edited after",NEW,"dev-A");
+        eng=h.syncEngine(s,file([tomb(D,OLD,"dev-B")]),"dev-A");
+        check("DH09 a local edit NEWER than the remote tombstone wins",txt(eng.newLocalState,D)==="edited after"&&!eng.newLocalState.deletedDayHighlights[D],J(eng.newLocalState));
+        s=baseState(h); live(s,D,"within window","2026-04-20T10:00:00.000Z","dev-A");
+        eng=h.syncEngine(s,file([tomb(D,"2026-04-20T10:00:02.000Z","dev-B")]),"dev-A");
+        check("DH09 tombstone 2s newer from another device: inside the 5s ambiguity window the live text wins (never delete on a guess)",
+          txt(eng.newLocalState,D)==="within window",J(eng.newLocalState.dayHighlights));
+        s=baseState(h); dead(s,D,MID,"dev-A");
+        eng=h.syncEngine(s,file([tomb(D,NEW,"dev-B")]),"dev-A");
+        check("DH09 two tombstones collapse to ONE record (the newer)",pushed(eng,D).length===1&&pushed(eng,D)[0].updatedAt===NEW,J(pushed(eng,D)));
+        s=baseState(h); live(s,D,"same words",OLD,"dev-A");
+        eng=h.syncEngine(s,file([rec(D,"same words",NEW,"dev-B")]),"dev-A");
+        check("DH09 identical text with different stamps is not a conflict (one live record, same text)",txt(eng.newLocalState,D)==="same words"&&pushed(eng,D).length===1);
+        /* the sweeps and the category name-dedupe run on the same payload and must not touch highlights */
+        s=baseState(h); live(s,D,"survives dedupe",OLD,"dev-A");
+        s.categories.push({id:"dupA",name:"Same Name",color:"#111111"}); s.categories.push({id:"dupB",name:"same name ",color:"#222222"});
+        eng=h.syncEngine(s,file([]),"dev-A");
+        check("DH09 a category name-dedupe in the same sync leaves highlights untouched",txt(eng.newLocalState,D)==="survives dedupe"&&pushed(eng,D).length===1,J(eng.newLocalState.dayHighlights));
+      });
+    }))
+
+    /* ---- DH10: last-write-wins, and the superseded text goes to console.log (decision D2) */
+    .then(scenario("DH10",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,s,eng,spy=spyLog(f);
+        try{
+          s=baseState(h); live(s,D,"local older text",OLD,"dev-A");
+          eng=h.syncEngine(s,file([rec(D,"remote newer text",NEW,"dev-B")]),"dev-A");
+          check("DH10 both live, text differs: the NEWER (remote) wins",txt(eng.newLocalState,D)==="remote newer text",J(eng.newLocalState.dayHighlights));
+          check("DH10 ...the superseded LOCAL text is logged (console.log) so it is recoverable",
+            spy.lines.some(function(l){ return l.indexOf("local older text")>-1; }),J(spy.lines));
+          check("DH10 ...and the winning text is not reported as lost",!spy.lines.some(function(l){ return l.indexOf("remote newer text")>-1; }));
+          spy.lines.length=0;
+          s=baseState(h); live(s,D,"local newer text",NEW,"dev-A");
+          eng=h.syncEngine(s,file([rec(D,"remote older text",OLD,"dev-B")]),"dev-A");
+          check("DH10 local newer: local wins",txt(eng.newLocalState,D)==="local newer text");
+          check("DH10 ...the superseded REMOTE text is logged",spy.lines.some(function(l){ return l.indexOf("remote older text")>-1; }),J(spy.lines));
+          spy.lines.length=0;
+          s=baseState(h); live(s,D,"my newest",NEW,"dev-A");
+          eng=h.syncEngine(s,file([rec(D,"my own stale echo",OLD,"dev-A")]),"dev-A");
+          check("DH10 remote is my own stale echo: local wins (case 3)",txt(eng.newLocalState,D)==="my newest",J(eng.newLocalState.dayHighlights));
+          check("DH10 ...and my own older text is NOT logged as a loss (it is not another device's work)",!spy.lines.some(function(l){ return l.indexOf("my own stale echo")>-1; }),J(spy.lines));
+          spy.lines.length=0;
+          s=baseState(h); live(s,D,"identical words",OLD,"dev-A");
+          eng=h.syncEngine(s,file([rec(D,"identical words",NEW,"dev-B")]),"dev-A");
+          check("DH10 identical text with different stamps is not reported as a lost edit (nothing was lost)",!spy.lines.some(function(l){ return l.indexOf("identical words")>-1; }),J(spy.lines));
+          spy.lines.length=0;
+          s=baseState(h); live(s,D,"edit that loses to a clear",OLD,"dev-A");
+          eng=h.syncEngine(s,file([tomb(D,NEW,"dev-B")]),"dev-A");
+          check("DH10 text that loses to another device's newer CLEAR is logged too",spy.lines.some(function(l){ return l.indexOf("edit that loses to a clear")>-1; }),J(spy.lines));
+        }finally{ spy.restore(); }
+      });
+    }))
+
+    /* ---- DH11: a date in both containers is resolved before the merge sees it */
+    .then(scenario("DH11",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,s=baseState(h),flat;
+        live(s,D,"live newer",NEW,"dev-A"); dead(s,D,OLD,"dev-A");
+        flat=h.flattenDayHighlights(s);
+        check("DH11 live NEWER than its tombstone: exactly one record for the date, and it is the live one",flat.length===1&&flat[0].deleted===false&&flat[0].text==="live newer",J(flat));
+        s=baseState(h); live(s,D,"live older",OLD,"dev-A"); dead(s,D,NEW,"dev-A");
+        flat=h.flattenDayHighlights(s);
+        check("DH11 tombstone NEWER than the live text: exactly one record, the tombstone",flat.length===1&&flat[0].deleted===true,J(flat));
+        s=baseState(h); s.dayHighlights[D]={text:"never synced"}; dead(s,D,NEW,"dev-A");
+        flat=h.flattenDayHighlights(s);
+        check("DH11 live text with no stamp is kept over a tombstone (keep live on a guess, as verdictCollisionWinner does)",flat.length===1&&flat[0].deleted===false,J(flat));
+        var u2=h.unflattenDayHighlights([{id:D,date:D,text:7,updatedAt:OLD,updatedBy:"dev-B",deleted:false,deletedAt:null}]);
+        check("DH11 a synced live record whose text is not a string is skipped locally (it cannot be shown), not stored and not thrown on",Object.keys(u2.dayHighlights).length===0,J(u2));
+        s=baseState(h); live(s,D,"a",OLD,"dev-A"); dead(s,D2,OLD,"dev-A");
+        check("DH11 unflatten(flatten(x)) round-trips live and tombstone",(function(){
+          var u=h.unflattenDayHighlights(h.flattenDayHighlights(s));
+          return u.dayHighlights[D]&&u.dayHighlights[D].text==="a"&&!!u.deletedDayHighlights[D2]&&!u.dayHighlights[D2]; })());
+      });
+    }))
+
+    /* ---- DH12: both push call sites carry the field, and a real two-device run converges */
+    .then(scenario("DH12",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        h.setDayHighlight(D,"written before connecting");
+        f.d.getElementById("connectDrive").click();
+        return waitFor(function(){ return f.d.getElementById("connectDrive").textContent==="Drive: synced"; },4000).then(function(ok){
+          check("DH12 setup: connect completed",ok);
+          var r=remoteRec(h,D);
+          check("DH12 connectDrive's first push carries the highlight",!!r&&r.text==="written before connecting"&&r.deleted===false,J(r));
+          check("DH12 ...and it was stamped (the connect-time stamp for a never-connected device)",!!r&&!!r.updatedAt&&r.updatedBy===h.getDeviceId(),J(r));
+          h.setDayHighlight(D2,"ongoing sync path");
+          h.persist();
+          return waitFor(function(){ return !!remoteRec(h,D2); },4000);
+        }).then(function(reached){
+          check("DH12 runDriveSync's push (the second write site) carries a new highlight",reached,J(remoteRec(h,D2)));
+          return settle(h);
+        }).then(function(){
+          h.setDayHighlight(D2,""); h.persist();
+          return waitFor(function(){ var r=remoteRec(h,D2); return r&&r.deleted===true; },4000);
+        }).then(function(gone){
+          var r=remoteRec(h,D2);
+          check("DH12 clearing reaches Drive as a TOMBSTONE for that date (deleted:true), not as an omission",gone&&r.deleted===true&&!!r.deletedAt,J(r));
+          check("DH12 ...and there is exactly one record for that date in the file",h.fakeDriveRead().dayHighlights.filter(function(x){ return x.id===D2; }).length===1);
+          return settle(h);
+        });
+      });
+    }))
+    .then(scenario("DH13",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        h.fakeDriveWrite({categories:[],entries:[],verdicts:[],closeouts:[],dayHighlights:[rec(D,"from the other phone",OLD,"dev-B")]});
+        f.d.getElementById("connectDrive").click();
+        return waitFor(function(){ return f.d.getElementById("connectDrive").textContent==="Drive: synced"; },4000).then(function(){
+          check("DH13 connecting to a Drive file that already holds a highlight pulls it in",txt(h.getState(),D)==="from the other phone",J(h.getState().dayHighlights));
+          return settle(h);
+        });
+      });
+    }))
+    .then(scenario("DH14",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,spy=spyLog(f);
+        var blank=newB(h),stateB;
+        h.setDayHighlight(D,"keep me"); h.persist();
+        return settle(h).then(function(){
+          /* back-date so the later clear is clearly newer than the text, outside the 5s window */
+          var old=new Date(Date.now()-600000).toISOString();
+          h.getState().dayHighlights[D].updatedAt=old;
+          var r=h.fakeDriveRead(); r.dayHighlights.forEach(function(x){ if(x.id===D) x.updatedAt=old; }); h.fakeDriveWrite(r);
+          stateB=syncB(h,blank);
+          check("DH14 setup: device B pulled the highlight",txt(stateB,D)==="keep me",J(stateB.dayHighlights));
+          h.setDayHighlight(D,""); h.persist();
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          check("DH14 device A cleared it; device B, after syncing, no longer has it",txt(stateB,D)===null&&!!stateB.deletedDayHighlights[D],J(stateB.dayHighlights)+" tomb="+!!stateB.deletedDayHighlights[D]);
+          h.scheduleDriveSync();
+          return settle(h);
+        }).then(function(){
+          check("DH14 ...and A did not get it back (the clear did not look like an absence to anyone)",txt(h.getState(),D)===null&&remoteRec(h,D).deleted===true,J(h.getState().dayHighlights)+" remote="+J(remoteRec(h,D)));
+          /* two devices edit the same day: newer wins everywhere, both converge */
+          h.setDayHighlight(D3,"A wrote this first"); h.persist();
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          stateB.dayHighlights[D3]={text:"B wrote this later",updatedAt:new Date(Date.now()+2000).toISOString(),updatedBy:"dev-B"};
+          stateB=syncB(h,stateB);
+          h.scheduleDriveSync();
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          check("DH14 same day edited on both devices: both converge on the newer text",txt(h.getState(),D3)==="B wrote this later"&&txt(stateB,D3)==="B wrote this later","A="+txt(h.getState(),D3)+" B="+txt(stateB,D3));
+          check("DH14 ...and A's superseded sentence was logged",spy.lines.some(function(l){ return l.indexOf("A wrote this first")>-1; }),J(spy.lines));
+          spy.restore();
+        });
+      });
+    }))
+
+    /* ---- DH15..17: undo of a highlight is a FORWARD edit (decision D3). Scoped to dayHighlights only. */
+    .then(scenario("DH15",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,blank=newB(h),stateB;
+        h.saveDayHighlight(D,"first");
+        return settle(h).then(function(){
+          stateB=syncB(h,blank);
+          return delay(8);
+        }).then(function(){
+          h.saveDayHighlight(D,"second");
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          check("DH15 setup: both devices hold 'second'",txt(h.getState(),D)==="second"&&txt(stateB,D)==="second","A="+txt(h.getState(),D)+" B="+txt(stateB,D));
+          h.undo();
+          check("DH15 A undid the edit: A shows 'first'",txt(h.getState(),D)==="first",txt(h.getState(),D));
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          h.scheduleDriveSync();
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          h.scheduleDriveSync();
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          check("DH15 EDIT then UNDO then syncs: both devices end on the same text ('first')",
+            txt(h.getState(),D)==="first"&&txt(stateB,D)==="first","A="+txt(h.getState(),D)+" B="+txt(stateB,D)+" drive="+J(remoteRec(h,D)&&remoteRec(h,D).text));
+          h.redo();
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB); h.scheduleDriveSync();
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          check("DH15 ...and REDO also converges on 'second' on both",txt(h.getState(),D)==="second"&&txt(stateB,D)==="second","A="+txt(h.getState(),D)+" B="+txt(stateB,D));
+        });
+      });
+    }))
+    .then(scenario("DH16",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,blank=newB(h),stateB;
+        h.saveDayHighlight(D,"keep me");
+        return settle(h).then(function(){
+          var old=new Date(Date.now()-600000).toISOString();
+          h.getState().dayHighlights[D].updatedAt=old;
+          var r=h.fakeDriveRead(); r.dayHighlights.forEach(function(x){ if(x.id===D) x.updatedAt=old; }); h.fakeDriveWrite(r);
+          stateB=syncB(h,blank);
+          h.saveDayHighlight(D,"");
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          check("DH16 setup: A cleared it and B applied the clear",txt(h.getState(),D)===null&&txt(stateB,D)===null);
+          h.undo();
+          check("DH16 A undid the clear: A shows 'keep me' again",txt(h.getState(),D)==="keep me",txt(h.getState(),D));
+          check("DH16 ...and right after the undo the date is NOT also tombstoned on A (checked before any sync, which would hide it: the flatten guard and the sync rebuild both clean it up)",
+            !(h.getState().deletedDayHighlights||{})[D],J(h.getState().deletedDayHighlights));
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB); h.scheduleDriveSync();
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB); h.scheduleDriveSync();
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          check("DH16 CLEAR then UNDO then syncs: both devices end with the text back",
+            txt(h.getState(),D)==="keep me"&&txt(stateB,D)==="keep me","A="+txt(h.getState(),D)+" B="+txt(stateB,D)+" drive="+J(remoteRec(h,D)));
+          check("DH16 ...and a date is never live and tombstoned at once on either device",
+            !(h.getState().deletedDayHighlights||{})[D]&&!stateB.deletedDayHighlights[D]);
+        });
+      });
+    }))
+    .then(scenario("DH17",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,blank=newB(h),stateB,cat=h.getState().categories[0].id;
+        h.saveDayHighlight(D,"mine");
+        return settle(h).then(function(){
+          h.snapshot("add entry"); h.putEntry(D,"Unrelated",cat,540,600,null); h.persist();      /* snapshot holds 'mine' */
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,blank);
+          stateB.dayHighlights[D]={text:"theirs",updatedAt:new Date(Date.now()+3000).toISOString(),updatedBy:"dev-B"};
+          stateB=syncB(h,stateB);
+          h.scheduleDriveSync();
+          return settle(h);
+        }).then(function(){
+          check("DH17 setup: A pulled device B's newer text",txt(h.getState(),D)==="theirs"&&h.getState().dayHighlights[D].updatedBy==="dev-B",J(h.getState().dayHighlights[D]));
+          h.undo();                                                                                  /* undo the unrelated entry */
+          check("DH17 undoing an UNRELATED action does not roll back another device's newer highlight",
+            txt(h.getState(),D)==="theirs"&&h.getState().dayHighlights[D].updatedBy==="dev-B",J(h.getState().dayHighlights[D]));
+          check("DH17 ...while the entry undo itself still happened",h.entriesFor(D).every(function(e){ return e.label!=="Unrelated"; }));
+          return settle(h);
+        });
+      });
+    }))
+    .then(scenario("DH18",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,cat=h.getState().categories[0].id;
+        h.saveDayHighlight(D,"stable");
+        return settle(h).then(function(){
+          var before=J(h.getState().dayHighlights[D]);
+          h.snapshot("add entry"); h.putEntry(D,"Other",cat,600,660,null); h.persist();
+          h.undo();
+          check("DH18 undoing an entry leaves an unchanged highlight byte-for-byte (same text AND same stamp: no restamp, so no sync churn)",
+            J(h.getState().dayHighlights[D])===before,before+" -> "+J(h.getState().dayHighlights[D]));
+          return settle(h);
+        });
+      });
+    }))
+    .then(scenario("DH19",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        h.saveDayHighlight(D,"x"); h.undo();
+        check("DH19 never connected: undo removes the highlight (whole-snapshot path, unchanged)",txt(h.getState(),D)===null);
+        check("DH19 ...and creates no tombstone container on a device that never synced",!h.getState().deletedDayHighlights||Object.keys(h.getState().deletedDayHighlights).length===0,J(h.getState().deletedDayHighlights));
+      });
+    }))
+
+    /* ---- DH03b: boundary rows for the cap, trim and whitespace collapse (each has a matching mutation) */
+    .then(scenario("DH03b",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        function rep(c,n){ return new Array(n+1).join(c); }
+        function stored(raw){ h.setDayHighlight(D,""); h.setDayHighlight(D,raw); var r=h.getState().dayHighlights[D]; return r?r.text:null; }
+        var t139=stored(rep("x",139)),t140=stored(rep("x",140)),t141=stored(rep("x",141)),t142=stored(rep("x",142));
+        check("DH03b 139 characters are kept whole (139)",t139!==null&&t139.length===139&&t139===rep("x",139),String(t139&&t139.length));
+        check("DH03b 140 characters are kept whole (140)",t140!==null&&t140.length===140&&t140===rep("x",140),String(t140&&t140.length));
+        check("DH03b 141 characters are cut to exactly 140, the first 140 kept",t141!==null&&t141.length===140&&t141===rep("x",140),String(t141&&t141.length));
+        check("DH03b 142 characters are cut to exactly 140",t142!==null&&t142.length===140,String(t142&&t142.length));
+        var padded=stored("     "+rep("x",140)+"     ");
+        check("DH03b leading and trailing whitespace is trimmed BEFORE the cap counts: 140 real characters inside 10 spaces are kept whole",padded===rep("x",140),String(padded&&padded.length));
+        var cutAtSpace=stored(rep("x",139)+" yyy");
+        check("DH03b a cut that lands on a space leaves no trailing space (139 x, the space dropped)",cutAtSpace===rep("x",139),J(cutAtSpace&&cutAtSpace.slice(-3))+" len="+(cutAtSpace&&cutAtSpace.length));
+        check("DH03b '   hi   ' is stored as 'hi' (trim)",stored("   hi   ")==="hi",J(stored("   hi   ")));
+        check("DH03b '\\n' collapses to one space: 'a\\n\\nb' -> 'a b'",stored("a\n\nb")==="a b",J(stored("a\n\nb")));
+        check("DH03b '\\r\\n' collapses: 'a\\r\\nb' -> 'a b'",stored("a\r\nb")==="a b",J(stored("a\r\nb")));
+        check("DH03b a tab collapses: 'a\\tb' -> 'a b'",stored("a\tb")==="a b",J(stored("a\tb")));
+        check("DH03b a run of plain spaces collapses: 'a    b' -> 'a b'",stored("a    b")==="a b",J(stored("a    b")));
+        check("DH03b mixed whitespace around and inside: ' \\n a\\t\\t b \\n ' -> 'a b'",stored(" \n a\t\t b \n ")==="a b",J(stored(" \n a\t\t b \n ")));
+        h.setDayHighlight(D,"was here"); h.setDayHighlight(D," \n\t ");
+        check("DH03b a whitespace-only value (spaces, newline, tab) is a clear, not a stored blank",!h.getState().dayHighlights[D],J(h.getState().dayHighlights[D]));
+      });
+    }))
+
+    /* ---- DH21: D3 stress test. B writes a NEWER highlight and syncs; A has pulled nothing, still holds
+       its older text, undoes an UNRELATED action (an entry delete), then syncs. The snapshot being restored
+       holds the same highlight A already has, so nothing about the highlight should change. */
+    .then(scenario("DH21",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,cat=h.getState().categories[0].id,blank=newB(h),stateB,eid,t1;
+        h.snapshot("add entry"); h.putEntry(D,"Unrelated",cat,540,600,null); h.persist();
+        eid=h.entriesFor(D)[0].id;
+        h.saveDayHighlight(D,"A older text");
+        return settle(h).then(function(){
+          h.snapshot("delete Unrelated"); h.removeEntry(eid); h.persist();       /* this snapshot holds 'A older text' */
+          return settle(h);
+        }).then(function(){
+          t1=h.getState().dayHighlights[D].updatedAt;
+          stateB=syncB(h,blank);                                                  /* B pulls A's older text */
+          stateB.dayHighlights[D]={text:"B newer text",updatedAt:new Date(Date.parse(t1)+50).toISOString(),updatedBy:"dev-B"};
+          stateB=syncB(h,stateB);                                                 /* B writes newer text and pushes */
+          check("DH21 setup: A has pulled nothing and still holds its OLDER text; Drive holds B's NEWER text",
+            txt(h.getState(),D)==="A older text"&&remoteRec(h,D)&&remoteRec(h,D).text==="B newer text","A="+txt(h.getState(),D)+" drive="+(remoteRec(h,D)&&remoteRec(h,D).text));
+          var before=J(h.getState().dayHighlights[D]);
+          h.undo();                                                               /* undo the unrelated entry delete */
+          check("DH21 the unrelated undo brought the entry back",h.entriesFor(D).some(function(e){ return e.label==="Unrelated"; }));
+          check("DH21 ...and left A's highlight record byte-for-byte unchanged, same stamp (no restamp)",J(h.getState().dayHighlights[D])===before,before+" -> "+J(h.getState().dayHighlights[D]));
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          var a=txt(h.getState(),D),b=txt(stateB,D),d=remoteRec(h,D)&&remoteRec(h,D).text;
+          check("DH21 FINAL after A syncs: highlight on A, on B and on the fake Drive are all B's newer text",
+            a==="B newer text"&&b==="B newer text"&&d==="B newer text","A="+a+" | B="+b+" | drive="+d);
+        });
+      });
+    }))
+    /* the neighbouring case, written down as behaviour rather than assumed: A undoes its OWN highlight edit
+       while B has written something newer that A has not pulled. That undo is a deliberate new edit by A, so
+       it wins last-write-wins, and B's text is logged as superseded (decision D2). */
+    .then(scenario("DH21b",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,cat=h.getState().categories[0].id,blank=newB(h),stateB,eid,spy=spyLog(f);
+        h.snapshot("add entry"); h.putEntry(D,"Unrelated",cat,540,600,null); h.persist(); eid=h.entriesFor(D)[0].id;
+        h.saveDayHighlight(D,"v1");
+        return settle(h).then(function(){
+          h.snapshot("delete Unrelated"); h.removeEntry(eid); h.persist();
+          h.saveDayHighlight(D,"v2");                                             /* A's own later edit; its snapshot holds v1 */
+          return settle(h);
+        }).then(function(){
+          var t2=h.getState().dayHighlights[D].updatedAt;
+          stateB=syncB(h,blank);
+          stateB.dayHighlights[D]={text:"B newer than v2",updatedAt:new Date(Date.parse(t2)+50).toISOString(),updatedBy:"dev-B"};
+          stateB=syncB(h,stateB);
+          h.undo();                                                               /* undoes A's OWN edit v2 -> v1 */
+          check("DH21b A undid its own edit: A shows v1",txt(h.getState(),D)==="v1",txt(h.getState(),D));
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          var a=txt(h.getState(),D),b=txt(stateB,D);
+          check("DH21b A's undo of its own edit is a new edit and wins: A and B converge on v1",a==="v1"&&b==="v1","A="+a+" | B="+b);
+          check("DH21b ...and B's superseded sentence was logged, not lost silently",spy.lines.some(function(l){ return l.indexOf("B newer than v2")>-1; }),J(spy.lines.filter(function(l){ return l.indexOf("day-highlight")>-1; })));
+          spy.restore();
+        });
+      });
+    }))
+
+    /* ---- DH20: Export week stays highlight-free (the file is data about the week's time, unchanged) */
+    .then(scenario("DH20",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H;
+        h.setDayHighlight(D,"SECRET-HIGHLIGHT-TEXT");
+        var ex=h.buildWeekExport(h.parseIso("2026-04-20"),"2026-04-27T00:00:00.000Z");
+        var s=J(ex);
+        check("DH20 Export week does not contain highlight text or dayHighlights keys (out of scope for this feature)",
+          s.indexOf("SECRET-HIGHLIGHT-TEXT")===-1&&s.toLowerCase().indexOf("highlight")===-1,s.length+" chars");
+      });
+    }))
+
+    .then(function(){ return results; });
+}
+
+/* ---------------------------------------------------------------------
+   Daily close-out, Phase B: the UI on top of the Phase A engine. Written
+   BEFORE the UI exists. Same conventions as runDayHighlightTests: each
+   scenario in its own clean sandbox, a scenario that throws becomes one
+   failing row naming the exception, every row carries what it observed.
+
+   The sandbox iframe is display:none, so these rows can read the DOM, the
+   state and COMPUTED STYLE, and dispatch synthetic mouse/key events, but they
+   cannot prove layout, tap targets, real touch dispatch or how a real phone
+   renders. Those are in CLAUDE.md's backlog 29 as "not verified". */
+function runDayCloseoutUITests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  function J(x){ return JSON.stringify(x); }
+  function scenario(tag,fn){
+    return function(){
+      return Promise.resolve().then(fn).catch(function(e){
+        check(tag+": scenario threw before finishing",false,String(e&&e.message||e));
+      });
+    };
+  }
+  /* a fresh profile auto-opens the intro modal, which holds a scroll lock and also answers Escape;
+     dismiss it first, exactly as the main harness does at the top of runTests */
+  function sandbox(extraQuery){
+    return freshSandbox(true,extraQuery).then(function(f){ if(f.d.getElementById("intro").classList.contains("on")) f.d.getElementById("introGo").click(); return f; });
+  }
+  var MON="2026-04-20",TUE="2026-04-21",WED="2026-04-22",SUN="2026-04-26",NEXTMON="2026-04-27";
+  var DN=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+  /* an independent copy of dur(), so a row never asserts the app against itself */
+  function dur(m){ var h=Math.floor(m/60),r=m%60; if(!m) return "0h"; return (h?h+"h":"")+(r?(h?" ":"")+r+"m":""); }
+  function showWeek(h,mondayIso,mode){ h.setViewMode(mode||"week"); h.setWeekStart(h.parseIso(mondayIso)); h.render(); }
+  function btns(f){ return [].slice.call(f.d.querySelectorAll("#dayhead .daybtn")); }
+  function btnFor(f,date){ return btns(f).filter(function(b){ return b.dataset.date===date; })[0]; }
+  function el(f,id){ return f.d.getElementById(id); }
+  function sheetOn(f){ return el(f,"dayScrim")&&el(f,"dayScrim").classList.contains("on"); }
+  function fire(node,type,props){
+    var ev=new ((node.ownerDocument||node).defaultView.Event)(type,{bubbles:true,cancelable:true});
+    Object.keys(props||{}).forEach(function(k){ ev[k]=props[k]; });
+    node.dispatchEvent(ev); return ev;
+  }
+  function key(node,k){
+    var ev=new ((node.ownerDocument||node).defaultView.KeyboardEvent)("keydown",{key:k,bubbles:true,cancelable:true});
+    node.dispatchEvent(ev); return ev;
+  }
+  function click(node){ node.dispatchEvent(new ((node.ownerDocument||node).defaultView.MouseEvent)("click",{bubbles:true,cancelable:true})); }
+  /* a fresh sandbox already holds ONE scroll lock for the intro modal, so lock checks are relative to a baseline */
+  function lockBase(h){ return h.getBodyScrollLockCount(); }
+
+  return Promise.resolve()
+
+    /* ---- PB01: which headers are buttons */
+    .then(scenario("PB01",function(){
+      return sandbox().then(function(f){
+        var h=f.H;
+        showWeek(h,MON);
+        var b=btns(f);
+        check("PB01 a fully past week: all 7 day headers are buttons, one per date, Monday first",
+          b.length===7&&b.map(function(x){ return x.dataset.date; }).join(",")==="2026-04-20,2026-04-21,2026-04-22,2026-04-23,2026-04-24,2026-04-25,2026-04-26",b.map(function(x){ return x.dataset.date; }).join(","));
+        check("PB01 ...they are real <button> elements (keyboard and touch reachable) with an accessible name",
+          b.length===7&&b.every(function(x){ return x.tagName==="BUTTON"&&/Day summary/.test(x.getAttribute("aria-label")||""); }),b[0]&&b[0].outerHTML.slice(0,120));
+        var future=h.iso(h.addDays(h.mondayOf(new Date()),140));
+        showWeek(h,future);
+        check("PB01 a fully future week: no day header is a button (future days cannot be opened) but all 7 day names still show",
+          btns(f).length===0&&el(f,"dayhead").children.length===8&&DN.every(function(n){ return el(f,"dayhead").textContent.indexOf(n.toUpperCase())>-1||el(f,"dayhead").textContent.indexOf(n)>-1; }),btns(f).length+" buttons, "+el(f,"dayhead").children.length+" cells");
+        showWeek(h,h.iso(h.mondayOf(new Date())));
+        var todayIdx=(new Date().getDay()+6)%7,iso0=h.iso(new Date());
+        check("PB01 the current week: buttons for today and the days before it, none after",
+          btns(f).length===todayIdx+1&&btns(f).every(function(x){ return x.dataset.date<=iso0; }),btns(f).length+" buttons, today index "+todayIdx);
+        showWeek(h,MON,"day"); h.setFocusDay(2); h.render();
+        check("PB01 day view: the single visible header is a button for that day",btns(f).length===1&&btns(f)[0].dataset.date===WED,btns(f).map(function(x){ return x.dataset.date; }).join(","));
+      });
+    }))
+
+    /* ---- PB02: the marker for a day with a highlight */
+    .then(scenario("PB02",function(){
+      return sandbox().then(function(f){
+        var h=f.H;
+        h.setDayHighlight(WED,"shipped it");
+        showWeek(h,MON);
+        var withMark=btns(f).filter(function(x){ return x.querySelector(".hl-mark"); }).map(function(x){ return x.dataset.date; });
+        check("PB02 only the day that has a highlight carries the marker",withMark.join(",")===WED,withMark.join(","));
+        var m=btnFor(f,WED).querySelector(".hl-mark"),cs=m&&f.el.contentWindow.getComputedStyle(m),bs=f.el.contentWindow.getComputedStyle(btnFor(f,WED));
+        check("PB02 the marker is square (border-radius 0), per the design constraint of no rounded corners",!!cs&&cs.borderRadius==="0px"&&cs.width!=="0px",cs&&(cs.borderRadius+" "+cs.width));
+        check("PB02 the header button has no radius and no shadow",bs.borderRadius==="0px"&&bs.boxShadow==="none",bs.borderRadius+" / "+bs.boxShadow);
+        check("PB02 the accessible name says there is a highlight, so the marker is not the only signal",/highlight/i.test(btnFor(f,WED).getAttribute("aria-label")||"")&&!/highlight/i.test(btnFor(f,MON).getAttribute("aria-label")||""),btnFor(f,WED).getAttribute("aria-label"));
+        h.setDayHighlight(WED,"");
+        h.render();
+        check("PB02 clearing it removes the marker on the next render",!btnFor(f,WED).querySelector(".hl-mark"));
+      });
+    }))
+
+    /* ---- PB03: the sheet for a day */
+    .then(scenario("PB03",function(){
+      return sandbox().then(function(f){
+        var h=f.H,cats=h.getState().categories,c0=cats[0],c2=cats[2];
+        h.putEntry(TUE,"Work",c0.id,540,600,null);              /* Tue 09:00-10:00 */
+        h.putEntry(MON,"Sleep",c2.id,1410,420,null);            /* Mon 23:30 -> Tue 07:00, split at write time */
+        showWeek(h,MON);
+        var base=lockBase(h);
+        click(btnFor(f,TUE));
+        check("PB03 clicking Tuesday's header opens the sheet",sheetOn(f));
+        check("PB03 the title is the day and date",el(f,"dayTitle").textContent.indexOf("Tue 21 Apr")>-1,el(f,"dayTitle").textContent);
+        var t=el(f,"dayTotals").textContent;
+        check("PB03 Tuesday's totals use the SPLIT sleep: 7h after midnight, not the whole 7h 30m",t.indexOf(c2.name)>-1&&t.indexOf("7h")>-1&&t.indexOf("7h 30m")===-1,t);
+        check("PB03 ...and Tuesday's own work entry shows, 1h",t.indexOf(c0.name)>-1&&/1h(?! )/.test(t),t);
+        var u=el(f,"dayUnlogged").textContent;
+        check("PB03 unlogged for a past day is the whole rest of the day: 24h - 8h logged = 16h, and it is visible",u.indexOf("Unlogged")>-1&&u.indexOf(dur(960))>-1&&u.indexOf("so far")===-1,u);
+        check("PB03 the body scroll lock is taken exactly once while the sheet is open",h.getBodyScrollLockCount()===base+1,base+" -> "+h.getBodyScrollLockCount());
+        check("PB03 there are no verdict buttons in the day sheet (those belong to the week)",el(f,"dayScrim").querySelectorAll(".verdict").length===0);
+        click(el(f,"dayCancel"));
+        click(btnFor(f,MON));
+        var tm=el(f,"dayTotals").textContent,um=el(f,"dayUnlogged").textContent;
+        check("PB03 Monday's sheet shows the other half of the split: 30m of sleep only",tm.indexOf(c2.name)>-1&&tm.indexOf("30m")>-1&&tm.indexOf("7h")===-1,tm);
+        check("PB03 ...and unlogged 24h - 30m = 23h 30m",um.indexOf(dur(1410))>-1,um);
+        click(el(f,"dayCancel"));
+        showWeek(h,"2026-03-02"); click(btnFor(f,"2026-03-04"));
+        check("PB03 an empty day says so and shows all 24h as unlogged",/nothing logged/i.test(el(f,"dayTotals").textContent)&&el(f,"dayUnlogged").textContent.indexOf("24h")>-1,el(f,"dayTotals").textContent+" | "+el(f,"dayUnlogged").textContent);
+        click(el(f,"dayCancel"));
+      });
+    }))
+    .then(scenario("PB03b",function(){
+      return sandbox().then(function(f){
+        var h=f.H;
+        showWeek(h,h.iso(h.mondayOf(new Date())));
+        var today=h.iso(new Date()),future=h.iso(h.addDays(new Date(),3)),base=lockBase(h);
+        check("PB03b openDay refuses a future date (returns false, no sheet, no scroll lock taken)",h.openDay(future)===false&&!sheetOn(f)&&h.getBodyScrollLockCount()===base,"lock "+base+" -> "+h.getBodyScrollLockCount());
+        var before=h.dayUnloggedMinutes(today);
+        click(btnFor(f,today));
+        var after=h.dayUnloggedMinutes(today),u=el(f,"dayUnlogged").textContent;
+        check("PB03b today opens, and its unlogged line says 'so far' and counts only the hours that have happened",
+          sheetOn(f)&&u.indexOf("so far")>-1&&(u.indexOf(dur(before))>-1||u.indexOf(dur(after))>-1),u+" (expected "+dur(before)+" or "+dur(after)+")");
+        click(el(f,"dayCancel"));
+      });
+    }))
+
+    /* ---- PB04: save, clear, cancel, outside click, keys */
+    .then(scenario("PB04",function(){
+      return sandbox().then(function(f){
+        var h=f.H,d0,base=lockBase(h);
+        showWeek(h,MON);
+        click(btnFor(f,TUE));
+        d0=h.undoDepthForTest();
+        el(f,"dayNote").value="  Shipped the thing  ";
+        click(el(f,"daySave"));
+        check("PB04 Save stores the trimmed text on that date",h.getDayHighlight(TUE)==="Shipped the thing",J(h.getState().dayHighlights));
+        check("PB04 ...takes exactly one undo snapshot (hard rule 5)",h.undoDepthForTest()===d0+1,"depth "+d0+" -> "+h.undoDepthForTest());
+        check("PB04 ...closes the sheet and releases the scroll lock",!sheetOn(f)&&h.getBodyScrollLockCount()===base,"on="+sheetOn(f)+" lock "+base+" -> "+h.getBodyScrollLockCount());
+        check("PB04 ...and the header now shows the marker without a manual refresh",!!btnFor(f,TUE).querySelector(".hl-mark"));
+        check("PB04 ...and a toast with Undo confirms it",/highlight/i.test(el(f,"toastText").textContent)&&!el(f,"toastUndo").hidden,el(f,"toastText").textContent);
+        h.undo();
+        check("PB04 Ctrl+Z after saving from the sheet removes the highlight and the marker",h.getDayHighlight(TUE)===null&&!btnFor(f,TUE).querySelector(".hl-mark"));
+        h.redo();
+        click(btnFor(f,TUE));
+        check("PB04 reopening the day shows the saved text in the field",el(f,"dayNote").value==="Shipped the thing",el(f,"dayNote").value);
+        d0=h.undoDepthForTest();
+        click(el(f,"daySave"));
+        check("PB04 Save with unchanged text takes no snapshot and just closes",h.undoDepthForTest()===d0&&!sheetOn(f),"depth "+d0+" -> "+h.undoDepthForTest());
+        click(btnFor(f,TUE));
+        el(f,"dayNote").value="";
+        click(el(f,"daySave"));
+        check("PB04 Save with an empty field clears the highlight",h.getDayHighlight(TUE)===null&&h.undoDepthForTest()===d0+1,J(h.getState().dayHighlights));
+        h.undo();
+        click(btnFor(f,TUE));
+        d0=h.undoDepthForTest();
+        el(f,"dayNote").value="typed but not saved";
+        click(el(f,"dayCancel"));
+        check("PB04 Cancel discards what was typed: no change, no snapshot, sheet closed",h.getDayHighlight(TUE)==="Shipped the thing"&&h.undoDepthForTest()===d0&&!sheetOn(f),h.getDayHighlight(TUE));
+      });
+    }))
+    .then(scenario("PB04b",function(){
+      return sandbox().then(function(f){
+        var h=f.H,base=lockBase(h);
+        showWeek(h,MON);
+        var scrim=el(f,"dayScrim");
+        click(btnFor(f,TUE));
+        el(f,"dayNote").value="not saved by an outside click";
+        fire(scrim,"mousedown"); click(scrim);
+        check("PB04b a genuine click on the backdrop closes the sheet without saving",!sheetOn(f)&&h.getDayHighlight(TUE)===null,"on="+sheetOn(f));
+        click(btnFor(f,TUE));
+        fire(scrim.querySelector(".sheet"),"mousedown"); click(scrim);
+        check("PB04b a press that starts INSIDE the sheet and releases on the backdrop (a text-selection drag) does not close it",sheetOn(f));
+        key(f.d,"Escape");
+        check("PB04b Escape closes the sheet",!sheetOn(f)&&h.getBodyScrollLockCount()===base,"lock "+base+" -> "+h.getBodyScrollLockCount());
+        click(btnFor(f,TUE));
+        el(f,"dayNote").value="saved by Enter";
+        key(el(f,"dayNote"),"Enter");
+        check("PB04b Enter in the field saves and closes",h.getDayHighlight(TUE)==="saved by Enter"&&!sheetOn(f),h.getDayHighlight(TUE));
+        for(var i=0;i<3;i++){ click(btnFor(f,TUE)); click(el(f,"dayCancel")); }
+        check("PB04b repeated open/close leaves the scroll lock where it started (no stuck lock)",h.getBodyScrollLockCount()===base,"lock "+base+" -> "+h.getBodyScrollLockCount());
+      });
+    }))
+    .then(scenario("PB04c",function(){
+      return sandbox().then(function(f){
+        var h=f.H;
+        showWeek(h,MON);
+        click(btnFor(f,TUE));
+        var inp=el(f,"dayNote");
+        check("PB04c the field is a single-line text input with maxlength 140 (the cap lives in the engine too)",inp.tagName==="INPUT"&&inp.type==="text"&&inp.maxLength===140,inp.tagName+" "+inp.type+" "+inp.maxLength);
+        inp.value=new Array(201).join("q");
+        click(el(f,"daySave"));
+        check("PB04c even if a longer value gets past the field, what is stored is 140 characters",h.getDayHighlight(TUE)&&h.getDayHighlight(TUE).length===140,String(h.getDayHighlight(TUE)&&h.getDayHighlight(TUE).length));
+        click(btnFor(f,WED));
+        check("PB04c reopening another day starts from THAT day's text, not the previous field value",el(f,"dayNote").value===""&&el(f,"dayTitle").textContent.indexOf("Wed 22 Apr")>-1,J(el(f,"dayNote").value)+" / "+el(f,"dayTitle").textContent);
+        click(el(f,"dayCancel"));
+      });
+    }))
+
+    /* ---- PB05: text is text, never markup; a render does not clobber typing */
+    .then(scenario("PB05",function(){
+      return sandbox().then(function(f){
+        var h=f.H,evil='<img src=x onerror="window.__pwned=1"><b>bold</b>';
+        h.setDayHighlight(TUE,evil);
+        showWeek(h,MON);
+        click(btnFor(f,TUE));
+        check("PB05 the field shows the text literally and no element was created from it",el(f,"dayNote").value===evil&&el(f,"dayScrim").querySelectorAll("img,b.__x").length===0&&!f.el.contentWindow.__pwned,el(f,"dayNote").value);
+        el(f,"dayNote").value="half typed";
+        h.render();
+        check("PB05 a render while the sheet is open (a background sync lands) does not touch what is being typed",sheetOn(f)&&el(f,"dayNote").value==="half typed",el(f,"dayNote").value);
+        click(el(f,"dayCancel"));
+        check("PB05 the header's accessible name and marker contain no markup from the text",btnFor(f,TUE).querySelectorAll("img").length===0&&(btnFor(f,TUE).getAttribute("aria-label")||"").indexOf("<")===-1,btnFor(f,TUE).getAttribute("aria-label"));
+      });
+    }))
+
+    /* ---- PB06: the week close-out lists only days that have a highlight */
+    .then(scenario("PB06",function(){
+      return sandbox().then(function(f){
+        var h=f.H,evil='<img src=x onerror="window.__pwned2=1">';
+        h.setDayHighlight(SUN,"sunday thing"); h.setDayHighlight(WED,"wednesday thing"); h.setDayHighlight(MON,evil);
+        h.setDayHighlight(NEXTMON,"NEXT week"); h.setDayHighlight(TUE,"x"); h.setDayHighlight(TUE,"");
+        h.openCloseout(h.parseIso(MON));
+        var field=el(f,"closeoutHighlightsField"),rows=[].slice.call(el(f,"closeoutHighlights").children);
+        check("PB06 the week close-out has a Highlights section, shown when the week has any",!!field&&!field.hidden,String(field&&field.hidden));
+        check("PB06 ...listing exactly the days that have one, in day order: Mon, Wed, Sun",rows.map(function(r){ return r.querySelector("b").textContent; }).join(",")==="Mon,Wed,Sun",rows.map(function(r){ return r.textContent; }).join(" | "));
+        check("PB06 ...each row carries the text; no placeholder rows for days without one; next week's is not listed",
+          rows.length===3&&rows[1].textContent.indexOf("wednesday thing")>-1&&el(f,"closeoutHighlights").textContent.indexOf("NEXT week")===-1,rows.map(function(r){ return r.textContent; }).join(" | "));
+        check("PB06 ...text is inserted as text, not markup",el(f,"closeoutHighlights").querySelectorAll("img").length===0&&!f.el.contentWindow.__pwned2&&rows[0].textContent.indexOf(evil)>-1,rows[0].textContent);
+        el(f,"closeoutCancel").click();
+        h.openCloseout(h.parseIso("2026-03-30"));
+        check("PB06 a week with no highlights shows no Highlights section at all (and nothing is left over from the previous week)",el(f,"closeoutHighlightsField").hidden===true&&el(f,"closeoutHighlights").children.length===0,"hidden="+el(f,"closeoutHighlightsField").hidden+" rows="+el(f,"closeoutHighlights").children.length);
+        el(f,"closeoutCancel").click();
+      });
+    }))
+
+    /* ---- PB07: the hover preview is a convenience, never the only way */
+    .then(scenario("PB07",function(){
+      return sandbox().then(function(f){
+        var h=f.H,d=f.d;
+        h.setDayHighlight(TUE,"short note");
+        var head=d.createElement("div"),tip=d.createElement("div"); tip.hidden=true;
+        head.innerHTML='<div><button class="daybtn" data-date="'+TUE+'">Tue</button></div><div><button class="daybtn" data-date="'+MON+'">Mon</button></div>';
+        d.body.appendChild(head); d.body.appendChild(tip);
+        var on=h.attachDayPreview(head,tip,true);
+        check("PB07 with a hover-capable pointer the preview attaches",on===true);
+        fire(head.querySelector('[data-date="'+TUE+'"]'),"mouseover");
+        check("PB07 hovering a day that has a highlight shows it",tip.hidden===false&&tip.textContent==="short note",tip.hidden+" "+J(tip.textContent));
+        fire(head.querySelector('[data-date="'+TUE+'"]'),"mouseout");
+        check("PB07 leaving hides it",tip.hidden===true);
+        fire(head.querySelector('[data-date="'+MON+'"]'),"mouseover");
+        check("PB07 hovering a day WITHOUT one shows nothing",tip.hidden===true);
+        h.setDayHighlight(TUE,'<img src=x onerror="window.__pwned3=1">');
+        fire(head.querySelector('[data-date="'+TUE+'"]'),"mouseover");
+        check("PB07 the preview renders text, never markup",tip.querySelectorAll("img").length===0&&!f.el.contentWindow.__pwned3,tip.textContent);
+        var head2=d.createElement("div"),tip2=d.createElement("div"); tip2.hidden=true;
+        head2.innerHTML=head.innerHTML; d.body.appendChild(head2); d.body.appendChild(tip2);
+        var off=h.attachDayPreview(head2,tip2,false);
+        fire(head2.querySelector('[data-date="'+TUE+'"]'),"mouseover");
+        check("PB07 without hover capability (touch) nothing attaches and nothing ever shows",off===false&&tip2.hidden===true);
+        /* the real page */
+        var capable=!!(f.el.contentWindow.matchMedia&&f.el.contentWindow.matchMedia("(hover: hover)").matches);
+        check("PB07 the real page attaches the preview exactly when the browser reports hover capability",h.dayPreviewAttached()===capable,"attached="+h.dayPreviewAttached()+" capable="+capable);
+        var realTip=el(f,"dayTip");
+        check("PB07 the real preview element exists and is NOT inside #dayhead (which is rebuilt on every render)",!!realTip&&!el(f,"dayhead").contains(realTip));
+        h.render();
+        check("PB07 ...so it survives a render",el(f,"dayTip")===realTip&&f.d.body.contains(realTip));
+        var cs=f.el.contentWindow.getComputedStyle(realTip);
+        check("PB07 a long note is clamped to 3 lines with a bounded width, and the preview never takes pointer events",
+          (cs.webkitLineClamp==="3"||cs.getPropertyValue("-webkit-line-clamp")==="3")&&cs.maxWidth!=="none"&&cs.pointerEvents==="none",cs.getPropertyValue("-webkit-line-clamp")+" / "+cs.maxWidth+" / "+cs.pointerEvents);
+        check("PB07 the preview has square corners and no shadow",cs.borderRadius==="0px"&&cs.boxShadow==="none",cs.borderRadius+" / "+cs.boxShadow);
+      });
+    }))
+
+    /* ---- PB07b: the whole flow as a TOUCH device sees it (no hover capability at all) */
+    .then(scenario("PB07b",function(){
+      return sandbox("&nohover=1").then(function(f){
+        var h=f.H,d=f.d,base=lockBase(h);
+        h.setDayHighlight(TUE,"visible without hovering");
+        h.putEntry(TUE,"Work",h.getState().categories[0].id,540,600,null);
+        showWeek(h,MON);
+        check("PB07b (no-hover browser) the preview is not attached",h.dayPreviewAttached()===false,String(h.dayPreviewAttached()));
+        fire(btnFor(f,TUE),"mouseover");
+        check("PB07b ...and hovering a day does nothing",el(f,"dayTip").hidden===true);
+        check("PB07b ...but the day still has its marker, so a touch user can see which days have a note",!!btnFor(f,TUE).querySelector(".hl-mark"));
+        click(btnFor(f,TUE));
+        check("PB07b ...tapping the header opens the sheet with the full text and the totals",sheetOn(f)&&el(f,"dayNote").value==="visible without hovering"&&el(f,"dayTotals").textContent.indexOf("1h")>-1,el(f,"dayNote").value);
+        el(f,"dayNote").value="edited on a phone";
+        click(el(f,"daySave"));
+        check("PB07b ...saving works and closes it",h.getDayHighlight(TUE)==="edited on a phone"&&!sheetOn(f)&&h.getBodyScrollLockCount()===base,h.getDayHighlight(TUE));
+        h.openCloseout(h.parseIso(MON));
+        check("PB07b ...and the week close-out lists it",el(f,"closeoutHighlights").textContent.indexOf("edited on a phone")>-1,el(f,"closeoutHighlights").textContent);
+        el(f,"closeoutCancel").click();
+      });
+    }))
+
+    /* ---- PB08: Enter must not open an entry sheet behind the day sheet */
+    .then(scenario("PB08",function(){
+      return sandbox().then(function(f){
+        var h=f.H;
+        showWeek(h,MON);
+        click(btnFor(f,TUE));
+        key(f.d.body,"Enter");
+        check("PB08 with the day sheet open, Enter on the page does not open the entry sheet underneath",!el(f,"scrim").classList.contains("on"),"entry sheet on="+el(f,"scrim").classList.contains("on"));
+        click(el(f,"dayCancel"));
+      });
+    }))
+
+    /* ---- PB09: a failed save is never reported as saved */
+    .then(scenario("PB09",function(){
+      return sandbox().then(function(f){
+        var h=f.H,win=f.el.contentWindow,orig=win.Storage.prototype.setItem;
+        showWeek(h,MON);
+        click(btnFor(f,TUE));
+        el(f,"dayNote").value="cannot be stored";
+        win.Storage.prototype.setItem=function(){ var e=new Error("quota"); e.name="QuotaExceededError"; throw e; };
+        try{ click(el(f,"daySave")); }finally{ win.Storage.prototype.setItem=orig; }
+        var toast=el(f,"toastText").textContent,status=el(f,"statusText").textContent;
+        check("PB09 when the browser refuses the write, the toast does not say Saved",!/saved highlight/i.test(toast)&&/not saved/i.test(toast),toast);
+        check("PB09 ...and the status line says it was not saved on this device",/not saved/i.test(status),status);
+        check("PB09 ...while the text is still held in memory for this session",h.getDayHighlight(TUE)==="cannot be stored");
+      });
+    }))
+
+    .then(function(){ return results; });
 }
 
 /* ---------------------------------------------------------------------
