@@ -439,6 +439,19 @@ on purpose.
     (the suite covers them with fixtures; the real week above is evidence for
     totals and counts, not for those cases); the two daylight-saving days; a
     literal incognito window.
+- **Daily close-out / day highlights** (2026-10-20): merged to `main` as `0b852ef`
+  and pushed; see backlog 29. Only what was actually run after the deploy:
+  - *Ran:* polled `https://groundwork-tools.github.io/Hours-Ledger/app.js` with a
+    random cache-busting query string every ~10 s; the first four polls (until
+    18:54:32 UTC) returned the old code, the fifth (18:54:43) the new, under a
+    minute after the push at 18:53:52. Then compared SHA-256 of the live files with
+    the merged repo files: `app.js`, `index.html` and `styles.css` match
+    byte-for-byte (`3174afab...`, `fe65e7ec...`, `b0f02bba...`). The live `app.js`
+    contains `undoDayHighlightsAsForwardEdits`, `attachDayPreview`,
+    `flattenDayHighlights`, `saveDayHighlight` and `openDay`; the live
+    `index.html` contains `dayScrim`, `dayTip` and `closeoutHighlightsField`.
+  - *Not yet verified:* see "Not yet verified" under backlog 29. None of it is
+    marked verified.
 
 ---
 
@@ -2805,10 +2818,32 @@ dashboard styling.
 
 29. **Daily close-out - click a day header, see that day's time per category,
     write one optional highlight line. Phase A (engine) built on
-    `feature/day-closeout` (2026-10-20), committed locally as `759e1c8`, NOT merged,
-    NOT pushed. Phase B (the day sheet, the header buttons and marker, the hover
-    preview, the Highlights section in the week close-out sheet) is built, tests
-    first, and is uncommitted at the time of writing; see "Phase B" below.**
+    `feature/day-closeout` (commit `759e1c8`); Phase B (the day sheet, the header
+    buttons and marker, the hover preview, the Highlights section in the week
+    close-out sheet) is commit `893032f`. MERGED to `main` as `0b852ef` and pushed
+    on 2026-10-20; LIVE.**
+    - **Rollback:** `git revert -m 1 0b852efa63fc8007b9a371e1d4fe00a58956e193` on
+      `main`, then push (revert the merge commit, not the two feature commits).
+      Before the merge `main` was `d106b022a29c8dd80edca98417a38022f1e4e31c`. A
+      rollback does not delete highlights already written: they stay in
+      `hours-ledger-v2` as unknown keys, and in the Drive file until an older device
+      pushes a file without the key.
+    - **Verified after deploy (ran):** the live `app.js`, `index.html` and
+      `styles.css` are byte-for-byte the merged files; details under "What's live
+      and verified".
+    - **Reported before the deploy, not observed from this tool:** Sebastian checked
+      Phase B on a phone and a laptop (test-mode build) and took a downloaded backup
+      of the live Drive file and an exported copy of the local data before the first
+      deploy.
+    - **Not yet verified (nothing here is marked verified):**
+      1. Real two-device Drive sync of highlights (set on one device, seen on the
+         other; clear on one, gone on the other).
+      2. The real Drive file after the first write: that it still matches the
+         downloaded backup apart from the new `dayHighlights` key.
+      3. Other devices and browser profiles beyond the ones checked before deploy.
+      4. Any cached old tab: a tab still running pre-deploy code has no
+         `dayHighlights` in memory, and its next save drops highlights from the local
+         ledger (see "Known gaps" below).
     Decisions (Sebastian, 2026-10-20), each with
     its reason:
     - **D1: 140 characters.** Enforced in the setter (`normalizeHighlightText`,
