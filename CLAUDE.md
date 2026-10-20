@@ -457,7 +457,11 @@ on purpose.
   },
   weekCloseouts: {
     "2026-07-27": { note: string, closedAt: isoString }   // keyed by that week's Monday
-  }
+  },
+  dayHighlights: {                                        // optional; absent on older ledgers
+    "2026-10-20": { text: string, updatedAt?, updatedBy? } // keyed by real date, <= 140 characters
+  },
+  deletedDayHighlights: { "2026-10-20": { updatedAt, updatedBy, deletedAt } }  // tombstones, sync only
 }
 ```
 
@@ -480,6 +484,16 @@ on purpose.
   current one can ever be opened for close-out (see `openCloseout()` in
   `app.js`) — the ritual looks back at a finished week, never judges one still
   in progress.
+- A day highlight (backlog 29, branch `feature/day-closeout`, not merged) is one
+  optional single line of text per calendar day, at most 140 characters
+  (`DAY_HIGHLIGHT_MAX`, counted in code points). Both `dayHighlights` and
+  `deletedDayHighlights` are new top-level keys: a state without them reads as
+  "no highlights" (`migrateDayHighlights()` runs on load, import and undo/redo),
+  `hours-ledger-v2` and every existing field are unchanged (hard rule 1), and old
+  code that re-saves a state keeps the unknown keys. Stamped with
+  `updatedAt`/`updatedBy` at EDIT time, but only once the device has sync fields
+  (`state.deletedEntries` exists, the `removeEntry` gate); a never-connected
+  device stores just `{text}` and `migrateSyncFields` stamps it at first connect.
 - Undo history lives separately under `hours-ledger-undo-v1`: up to 12 states are
   written, but only the newest that fit 500,000 characters (never fewer than 1) -
   see the narrow reading under hard rule 5. The in-memory stack holds 25.
@@ -2788,5 +2802,138 @@ dashboard styling.
       the branch from the laptop) would have cost a setup for a risk that small.
       The phone check passed. This narrows the rule for read-only additions; it
       is not a precedent for anything that writes state.
+
+29. **Daily close-out - click a day header, see that day's time per category,
+    write one optional highlight line. Phase A (engine) built on
+    `feature/day-closeout` (2026-10-20), NOT merged, NOT pushed. Phase B (the popup,
+    the header button and dot, the hover preview, the section in the week
+    close-out sheet) is not built.** Decisions (Sebastian, 2026-10-20), each with
+    its reason:
+    - **D1: 140 characters.** Enforced in the setter (`normalizeHighlightText`,
+      code points so an emoji is never cut) and, in Phase B, `maxlength` on the
+      input. NEVER enforced in sync or import: truncating a record that arrived
+      from Drive would be data loss. A longer synced note is stored whole and only
+      clamped on display. The weekly close-out note has no cap and stays as it is.
+    - **D2: same-day conflict between two devices is last-write-wins on
+      `updatedAt`, and the sentence that lost goes to `console.log`**
+      (`logSupersededHighlights`, in `syncEngine`). Same precedent as Money
+      Ledger's: its first version showed a notice whenever last-write-wins
+      discarded an edit and reversed that the next commit (SYNC-LESSONS.md) - an
+      event that rare is noise by the time it appears, and the resolution is
+      right either way. Reason this still logs the text: unlike a verdict, what
+      is discarded is the user's own prose, so it is kept recoverable for anyone
+      looking in DevTools. Not logged: a remote copy that is this device's own
+      stale echo (mergeRecords case 3 - not another device's work), and a loser
+      whose text equals the winner's. It also logs text that loses to a newer
+      clear. **Known weakness:** last-write-wins trusts both devices' wall
+      clocks, so a device with its clock ahead always wins. The only live-versus-
+      tombstone protection is mergeRecords' 5-second window (live wins inside it).
+    - **D3: undoing a highlight edit or clear is a FORWARD edit**
+      (`undoDayHighlightsAsForwardEdits`, called from `applyState` under the same
+      gate as the entry path), **scoped to highlights only.** Entries keep
+      `undoEntriesAsForwardEdits`; categories, verdicts and close-outs keep the
+      whole-snapshot behaviour, and **backlog 22 stays open for those.** Why a
+      plain snapshot restore is wrong here: it brings back the OLD stamp, which
+      loses last-write-wins forever against a device that already holds the newer
+      text. Reproduced before the fix (selftest `DH15`/`DH16`/`DH17`, 4 failing of
+      110): A edits first->second, B pulls it, A undoes, and A ends on "first"
+      while B and Drive stay on "second"; an undone clear is back on A but stays
+      deleted on B; and undoing an unrelated action rolled another device's newer
+      highlight back. Rule, per date: same text as now -> keep the current record
+      untouched (no restamp, no sync churn); different -> write the snapshot's text
+      (or a tombstone if the snapshot had none) with a fresh stamp from this
+      device, unless the current record was last written by ANOTHER device (theirs;
+      an undo of something else must not roll it back). A device that never
+      connected takes the plain snapshot path and gets no tombstone container.
+    - **D4: names `dayHighlights` / `deletedDayHighlights`.**
+    - **D5: the day-view header also opens the sheet** (Phase B).
+    - **D6: the week close-out sheet lists only the days that HAVE a highlight, in
+      day order; days without one show nothing, no dashes** (`weekHighlights()`
+      returns exactly that; a whitespace-only text counts as none).
+    - **Also decided:** today and past days can be opened, future days cannot
+      (`dayIsOpenable`); no notes-browsing view; no required action.
+    - **Sync design (hard rule 7).** Close-out shape (inline stamp, date as the
+      record id) plus verdict-style tombstones, merged by the unmodified
+      `mergeRecords()` with `DAYHIGHLIGHT_FIELDS=["text","deleted","deletedAt"]`.
+      Clearing writes a tombstone, **only for a highlight that exists on this
+      device** (a date it has never seen a note on may have one on Drive; a
+      tombstone for it would delete something nobody acknowledged). Setting a
+      highlight removes its tombstone, and `flattenDayHighlights` resolves a date
+      found in both containers to ONE record (tombstone only if strictly newer than
+      a stamped live record; an unstamped live record is kept) - the backlog-18
+      collision, closed twice. A remote file with no `dayHighlights` key (an older
+      device's push) is read as `[]`; local highlights survive and go back up. Both
+      push call sites (`connectDrive`, `runDriveSync`) carry the field.
+    - **Per-day figures.** `dayTotals(date)` mirrors `weekTotals` for one date. A
+      midnight-crossing entry is already two entries on two dates (`putEntry`
+      splits at write time), so per-day totals use the split with no extra code;
+      checked against an independent per-minute oracle. For TODAY, unlogged time is
+      only the part of the day that has already happened (`dayElapsedMinutes`: a past
+      day is 1440, a future day 0, today the minutes since midnight;
+      `dayUnloggedMinutes`). A past day's unlogged time stays fully visible.
+    - **Known limitation: daylight saving.** The app assumes every day has 1440
+      minutes. On a change day the real day is 23 or 25 hours: Sunday 25 Oct 2026
+      (Europe) is a 25-hour day, so that day's "unlogged" is off by 60 minutes -
+      here as in the week view and Export week. Not fixed; the minutes-from-midnight
+      model cannot represent it.
+    - **Known gaps, said plainly.** (1) An already-open tab running pre-deploy code
+      has no `dayHighlights` in memory; its next save rewrites `hours-ledger-v2`
+      without them. Connected devices recover them from Drive (an absent record is
+      kept); a local-only user's highlights written in the new tab can be lost.
+      Narrow window, cannot be prevented from here. (2) Hover is a convenience
+      only (Phase B): below 820px and on touch the sheet must be fully usable.
+      (3) Highlights are deliberately NOT in Export week (E-tests unchanged; DH20
+      pins it); "Export a copy" includes them because it writes the whole state.
+    - **Tests (`selftest.html`, `runDayHighlightTests()`, 115 rows, DH01-DH20).**
+      Written first. Against the unchanged `app.js`: 31 failing / 47 rows (a
+      scenario that cannot run becomes ONE failing row naming the missing hook).
+      With the engine but WITHOUT the D3 forward-edit: 4 failing / 110 rows, all
+      undo divergences (the evidence for D3 above). With it: 0 failing. Full
+      `selftest.html`: `PASS - 0 failing / 762 total` (647 before this branch);
+      `EXPECTED_MIN_ROWS` is 762. Sync tests use the real `syncEngine()` for a
+      second device ("dev-B") against the same fake Drive, as in the undo blocks;
+      stamps a test depends on being old are written explicitly (the 5-second
+      window masks a wrongly-written tombstone otherwise).
+    - **Mutation checks (2026-10-20, 52 mutations, each applied to a scratch copy
+      and run against the final tests; every one makes at least one row fail).**
+      Two things the first mutation run found in my OWN tests, fixed before this
+      count: no row covered the LOAD-path migration (added `DH01b`), and `M49`
+      (undo revive leaves the old tombstone) survived because the flatten guard
+      and the sync rebuild clean it up later (added an immediate-after-undo row to
+      `DH16`). Two kills are by crash, not assertion: `M01` (no empty map -> the app
+      does not load at all) and, in the first run, `M43`, which was a malformed
+      mutation of mine (a dangling `else`) and was redone as a valid one.
+    - **Rows no mutation turns red (31 of 115, said plainly).** "Every mutation is
+      caught" is a statement about the 52 mutations, not about every row. Of the 31:
+      8 are setup rows (the fake-Drive connect completed); about a dozen are basic
+      behaviour my mutation set does not target (trim, newline collapse, "exactly
+      140 kept", the cap constant, a past day is openable, per-category raw sums,
+      the split fixture's own precondition, an empty day is all zeros); and 5 are
+      CONTROLS for merge cases that the unmodified, shared `mergeRecords()`
+      delivers (a local edit newer than a tombstone wins, the 5-second window,
+      identical text, local newer wins, my own stale echo). Those controls passed
+      even before the engine existed (they are in the 31-failing/47 run as PASS)
+      and would only flip if `mergeRecords` itself changed, which the older sync
+      suite already guards. Do not read them as evidence for the new code.
+    - **Not covered:** a real device, real Drive, a real browser clock around
+      midnight, the two daylight-saving days, and everything in Phase B.
+
+30. **The existing week close-out is stamped at sync time, not edit time, so an
+    offline edit can beat a newer one - REASONED, NOT REPRODUCED. Not fixed in
+    `feature/day-closeout`.** `closeoutSave` (`app.js`) replaces
+    `state.weekCloseouts[wk]` with `{note, closedAt}` and no `updatedAt`/
+    `updatedBy`; `migrateSyncFields` stamps an unstamped close-out with the time of
+    the next SYNC, not of the edit. Consequence, from reading `mergeRecords` case 6
+    (last-write-wins on `updatedAt`): device A edits the note offline at 10:00 and
+    syncs at 18:00; device B edited it at 12:00 and synced at 12:05. A's record is
+    stamped 18:00, newer than B's 12:00 edit, so A's older text wins and B's edit is
+    lost. Same shape as the "stamped late" flaw the entry path avoids by stamping
+    on write. Two other things on the same code path, also read and not run:
+    `closeoutSave` takes no `snapshot()` (an edit of an existing note overwrites it
+    with no undo - hard rule 5), and a close-out has no tombstone (backlog 12
+    phase 2). The day highlights (item 29) stamp at edit time and do not share the
+    flaw. A fix would stamp in `closeoutSave` under the same `state.deletedEntries`
+    gate and add the snapshot; it needs its own test written first (two devices,
+    the offline edit ordering above) and its own decision.
 
 Feature creep is the known failure mode of this project.

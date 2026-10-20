@@ -355,6 +355,17 @@ function migrateSyncFields(s){
     if(!c.updatedAt){ c.updatedAt=stamp; c.updatedBy=dev; }
   });
 
+  /* day highlights: same inline shape as close-outs, plus real tombstones
+     (clearing one is a reachable delete). A highlight written on a connected
+     device is already stamped at edit time (setDayHighlight); this only
+     stamps the ones written before the device ever synced. */
+  migrateDayHighlights(s);
+  if(!s.deletedDayHighlights) s.deletedDayHighlights={};
+  Object.keys(s.dayHighlights).forEach(function(date){
+    var h=s.dayHighlights[date];
+    if(!h.updatedAt){ h.updatedAt=stamp; h.updatedBy=dev; }
+  });
+
   return s;
 }
 
@@ -555,6 +566,100 @@ function unflattenCloseouts(flat){
   return {weekCloseouts:weekCloseouts};
 }
 
+/* ---------------- day highlights (daily close-out) ----------------
+   state.dayHighlights[dateStr] = {text, updatedAt, updatedBy}: one optional
+   single-line note per calendar day. A leaf is an object, so its sync
+   metadata lives inline (same shape as a close-out) - but unlike a close-out
+   it CAN be cleared, so it gets real tombstones in state.deletedDayHighlights
+   [dateStr] = {updatedAt, updatedBy, deletedAt}. The date is the record id.
+   Hard rule 7: a cleared highlight is a tombstone, never an omission.
+
+   Additive only (hard rule 1): both maps are new top-level keys; a state
+   without them reads as "no highlights" (migrateDayHighlights), and
+   hours-ledger-v2's existing shape is untouched. */
+var DAY_HIGHLIGHT_MAX=140;
+function migrateDayHighlights(s){
+  var isMap=function(x){ return x&&typeof x==="object"&&!Array.isArray(x); };
+  if(!isMap(s.dayHighlights)) s.dayHighlights={};
+  Object.keys(s.dayHighlights).forEach(function(date){
+    var h=s.dayHighlights[date];
+    if(!isMap(h)||typeof h.text!=="string"){
+      console.log("[day-highlight] dropped a malformed stored highlight for "+date+": "+JSON.stringify(h));
+      delete s.dayHighlights[date];
+    }
+  });
+  if(s.deletedDayHighlights!==undefined){
+    if(!isMap(s.deletedDayHighlights)) s.deletedDayHighlights={};
+    Object.keys(s.deletedDayHighlights).forEach(function(date){
+      if(!isMap(s.deletedDayHighlights[date])) delete s.deletedDayHighlights[date];
+    });
+  }
+  return s;
+}
+var DAYHIGHLIGHT_FIELDS=["text","deleted","deletedAt"];
+/* a date can be in both containers only through a bug (setDayHighlight removes
+   the tombstone when it writes a live record) - but two flat records with one
+   id would let mergeRecords' byId silently keep whichever came last, which is
+   exactly how the verdict bug (backlog 18) lost fresh edits. So resolve it here:
+   the tombstone wins only if it is strictly newer than a STAMPED live record;
+   an unstamped live record (written before this device ever synced) is kept,
+   same "keep live on a guess" bias as verdictCollisionWinner. */
+function dayTombstoneWins(h,t){
+  return !!(h.updatedAt&&t.updatedAt&&Date.parse(t.updatedAt)>Date.parse(h.updatedAt));
+}
+function flattenDayHighlights(s){
+  var liveMap=s.dayHighlights||{},deadMap=s.deletedDayHighlights||{},out=[];
+  Object.keys(liveMap).forEach(function(date){
+    var h=liveMap[date],t=deadMap[date];
+    if(t&&dayTombstoneWins(h,t)) return;
+    out.push({id:date,date:date,text:h.text,updatedAt:h.updatedAt,updatedBy:h.updatedBy,deleted:false,deletedAt:null});
+  });
+  Object.keys(deadMap).forEach(function(date){
+    var h=liveMap[date],t=deadMap[date];
+    if(h&&!dayTombstoneWins(h,t)) return;
+    out.push({id:date,date:date,text:null,updatedAt:t.updatedAt,updatedBy:t.updatedBy,deleted:true,deletedAt:t.deletedAt});
+  });
+  return out;
+}
+function unflattenDayHighlights(flat){
+  var dayHighlights={},deletedDayHighlights={};
+  flat.forEach(function(r){
+    if(r.deleted){
+      deletedDayHighlights[r.id]={updatedAt:r.updatedAt,updatedBy:r.updatedBy,deletedAt:r.deletedAt};
+    }else if(typeof r.text==="string"){
+      dayHighlights[r.id]={text:r.text,updatedAt:r.updatedAt,updatedBy:r.updatedBy};
+    }else{
+      /* a live record without text can't be shown or edited. It stays on Drive
+         (toPush is built from the merged flat list, not from this); only the
+         local copy is skipped. */
+      console.log("[day-highlight] ignored a synced highlight for "+r.id+" that has no text: "+JSON.stringify(r));
+    }
+  });
+  return {dayHighlights:dayHighlights,deletedDayHighlights:deletedDayHighlights};
+}
+/* last-write-wins decides which sentence survives a same-day conflict (decision
+   2026-10-20, same precedent as Money Ledger: no notice in the UI). The text
+   that LOST is user-written prose, so it goes to the console - recoverable by
+   anyone looking, silent for everyone else. Not logged: the remote copy when
+   it is my own stale echo (mergeRecords case 3 - not another device's work),
+   and a loser whose text equals the winner's. */
+function logSupersededHighlights(localFlat,remoteFlat,mergedFlat,deviceId){
+  var win={},remoteById={};
+  mergedFlat.forEach(function(r){ win[r.id]=r; });
+  remoteFlat.forEach(function(r){ remoteById[r.id]=r; });
+  localFlat.forEach(function(L){
+    var R=remoteById[L.id],W=win[L.id];
+    if(!R||!W) return;
+    [{rec:L,remote:false},{rec:R,remote:true}].forEach(function(x){
+      var X=x.rec;
+      if(X===W||X.deleted||typeof X.text!=="string"||!X.text.trim()) return;
+      if(x.remote&&X.updatedBy===deviceId) return;
+      if(!W.deleted&&W.text===X.text) return;
+      console.log("[day-highlight] superseded (last write wins) on "+X.id+": \""+X.text+"\" (written "+X.updatedAt+" by "+X.updatedBy+", "+(x.remote?"from Drive":"on this device")+")");
+    });
+  });
+}
+
 /* the merge itself - compares records, never files. Ported from Money Ledger's
    mergeRecords (see SYNC-LESSONS.md) with the same six-case shape; only the
    caller-supplied contentFields whitelist changes per record type. */
@@ -704,7 +809,8 @@ function dedupeCategoriesByName(catsFlat,entriesFlat,verdictsFlat,deviceId){
    remoteFile is null for a genuine first-ever sync (nothing to merge
    against, every local record trivially survives via case 1); its shape
    otherwise is {categories:[...flat...], entries:[...flat...],
-   verdicts:[...flat...], closeouts:[...flat...]}, tombstones inline via
+   verdicts:[...flat...], closeouts:[...flat...], dayHighlights:[...flat...]}
+   (dayHighlights absent in a file an older device wrote - read as []), tombstones inline via
    deleted:true. */
 function syncEngine(localStateIn,remoteFile,deviceId){
   /* migrateSyncFields mutates in place - clone first so a failure anywhere
@@ -715,7 +821,7 @@ function syncEngine(localStateIn,remoteFile,deviceId){
      as a side effect no matter what happens after. */
   var localState=JSON.parse(JSON.stringify(localStateIn));
   migrateSyncFields(localState);
-  var remote=remoteFile||{categories:[],entries:[],verdicts:[],closeouts:[]};
+  var remote=remoteFile||{categories:[],entries:[],verdicts:[],closeouts:[],dayHighlights:[]};
 
   var localCatsFlat=flattenCategories(localState);
   var mergedCatsFlat=mergeRecords(localCatsFlat,remote.categories,CATEGORY_FIELDS,deviceId);
@@ -732,6 +838,11 @@ function syncEngine(localStateIn,remoteFile,deviceId){
   var remoteCloseoutsFlat=remote.closeouts||[];
   var mergedCloseoutsFlat=mergeRecords(localCloseoutsFlat,remoteCloseoutsFlat,CLOSEOUT_FIELDS,deviceId);
 
+  var localHighlightsFlat=flattenDayHighlights(localState);
+  var remoteHighlightsFlat=remote.dayHighlights||[];
+  var mergedHighlightsFlat=mergeRecords(localHighlightsFlat,remoteHighlightsFlat,DAYHIGHLIGHT_FIELDS,deviceId);
+  logSupersededHighlights(localHighlightsFlat,remoteHighlightsFlat,mergedHighlightsFlat,deviceId);
+
   var deduped=dedupeCategoriesByName(mergedCatsFlat,mergedEntriesFlat,mergedVerdictsFlat,deviceId);
   mergedCatsFlat=deduped.categories;
   mergedEntriesFlat=deduped.entries;
@@ -743,15 +854,17 @@ function syncEngine(localStateIn,remoteFile,deviceId){
   var entriesResult=unflattenEntries(mergedEntriesFlat);
   var verdictsResult=unflattenVerdicts(mergedVerdictsFlat);
   var closeoutsResult=unflattenCloseouts(mergedCloseoutsFlat);
+  var highlightsResult=unflattenDayHighlights(mergedHighlightsFlat);
 
   return {
     newLocalState:Object.assign({},localState,{
       categories:catsResult.categories,deletedCategories:catsResult.deletedCategories,
       entries:entriesResult.entries,deletedEntries:entriesResult.deletedEntries,
       weeklyVerdicts:verdictsResult.weeklyVerdicts,verdictMeta:verdictsResult.verdictMeta,deletedVerdicts:verdictsResult.deletedVerdicts,
-      weekCloseouts:closeoutsResult.weekCloseouts
+      weekCloseouts:closeoutsResult.weekCloseouts,
+      dayHighlights:highlightsResult.dayHighlights,deletedDayHighlights:highlightsResult.deletedDayHighlights
     }),
-    toPush:{categories:mergedCatsFlat,entries:mergedEntriesFlat,verdicts:mergedVerdictsFlat,closeouts:mergedCloseoutsFlat},
+    toPush:{categories:mergedCatsFlat,entries:mergedEntriesFlat,verdicts:mergedVerdictsFlat,closeouts:mergedCloseoutsFlat,dayHighlights:mergedHighlightsFlat},
     /* surfaced separately from newLocalState/toPush - this is the ONE thing
        this otherwise-pure engine hands back specifically so its caller can
        tell the user something happened, not data the caller needs to apply.
@@ -1120,6 +1233,7 @@ if(!state||!state.categories) state=JSON.parse(JSON.stringify(DEFAULTS));
 if(!state.settings) state.settings={startHour:6,endHour:24};
 if(!state.entries) state.entries={};
 if(!state.weekCloseouts) state.weekCloseouts={};
+migrateDayHighlights(state);
 migrateVerdicts(state);
 migrateVerdictScale(state);
 migrateVerdictTombstoneCollisions(state);
@@ -1351,7 +1465,7 @@ function connectDrive(){
          succeeds, so both branches mention it if it happened. */
       var sweptNote=(syncResult.sweptCompress&&syncResult.sweptCompress.length)?
         " "+describeCompressSweep(syncResult.sweptCompress):"";
-      driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts}).then(function(){
+      driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts,dayHighlights:syncResult.toPush.dayHighlights}).then(function(){
         setStatus(syncedStatusText());
         document.getElementById("connectDrive").textContent="Drive: synced";
         showToast("Connected — your weeks are syncing."+sweptNote,false);
@@ -1457,7 +1571,7 @@ function runDriveSync(manual){
          surfaced outside DevTools. state is already reassigned above, so
          catById resolves against the just-merged categories. */
       if(syncResult.sweptCompress&&syncResult.sweptCompress.length) showToast(describeCompressSweep(syncResult.sweptCompress),false);
-      return driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts}).then(function(){
+      return driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts,dayHighlights:syncResult.toPush.dayHighlights}).then(function(){
         driveSyncInFlight=false;
         setStatus(syncedStatusText());
         document.getElementById("connectDrive").disabled=false;
@@ -1662,6 +1776,42 @@ function undoEntriesAsForwardEdits(snap,cur){
    no way to tell whose delete it overrides. Close-outs have no tombstones,
    so nothing can collide there. Entries are untouched by this - they keep
    undoEntriesAsForwardEdits's own guards. */
+/* Undo/redo of a DAY HIGHLIGHT is a forward edit, scoped to highlights only
+   (decision 2026-10-20; entries keep undoEntriesAsForwardEdits, categories,
+   verdicts and close-outs keep the whole-snapshot behaviour - backlog 22 stays
+   open for those). Why it cannot be a plain snapshot restore: the restored
+   record carries its OLD stamp, so against a device that already holds the
+   newer text it loses last-write-wins forever (reproduced in selftest DH15/
+   DH16: A undoes an edit, B keeps the newer text, they never converge; an
+   undone clear is resurrected on A but stays deleted on B).
+
+   Per date, comparing the text the snapshot has with the text there is now:
+   same -> keep the CURRENT record untouched (stamp included, so an unrelated
+   undo causes no sync churn); different -> write the snapshot's text (or a
+   tombstone, if the snapshot had none) with a fresh stamp from this device -
+   unless the current record was last written by ANOTHER device, in which case
+   it is theirs and an undo of something else must not roll it back (the same
+   guard the entry path uses). Only runs once the device has sync fields. */
+function undoDayHighlightsAsForwardEdits(snap,cur){
+  var dev=getDeviceId(),now=nowIso();
+  var snapLive=snap.dayHighlights||{},curLive=cur.dayHighlights||{},curDead=cur.deletedDayHighlights||{};
+  var live=Object.assign({},curLive),dead=Object.assign({},curDead),dates={};
+  [snapLive,curLive,curDead].forEach(function(m){ Object.keys(m).forEach(function(d){ dates[d]=true; }); });
+  Object.keys(dates).forEach(function(date){
+    var c=curLive[date],sn=snapLive[date];
+    if((c?c.text:null)===(sn?sn.text:null)) return;
+    var owner=c||curDead[date];
+    if(owner&&owner.updatedBy&&owner.updatedBy!==dev) return;
+    if(sn){
+      live[date]={text:sn.text,updatedAt:now,updatedBy:dev};
+      delete dead[date];
+    }else{
+      delete live[date];
+      dead[date]={updatedAt:now,updatedBy:dev,deletedAt:now};
+    }
+  });
+  return {live:live,dead:dead};
+}
 function carrySyncContainers(prev,snap){
   if(!prev) return;
   if(prev.deletedCategories&&!snap.deletedCategories){
@@ -1692,10 +1842,14 @@ function applyState(json){
     var fwd=undoEntriesAsForwardEdits(state,prev);
     state.entries=fwd.entries;
     state.deletedEntries=fwd.deletedEntries;
+    var hl=undoDayHighlightsAsForwardEdits(state,prev);
+    state.dayHighlights=hl.live;
+    state.deletedDayHighlights=hl.dead;
   }
   if(!state.settings) state.settings={startHour:6,endHour:24};
   if(!state.entries) state.entries={};
   if(!state.weekCloseouts) state.weekCloseouts={};
+  migrateDayHighlights(state);
   migrateVerdicts(state);
   migrateVerdictScale(state);
   migrateVerdictTombstoneCollisions(state);
@@ -1825,6 +1979,67 @@ function setVerdict(catId,weekIso,v){
       state.deletedVerdicts[key]={weekIso:weekIso,catId:catId,updatedAt:nowIso(),updatedBy:getDeviceId(),deletedAt:nowIso()};
     }
   }
+}
+
+/* ---- day highlights: edit paths (the sync shape is documented above, next to
+   flattenDayHighlights) ----
+   One line, at most DAY_HIGHLIGHT_MAX characters (counted in code points so an
+   emoji is never cut in half), whitespace collapsed. The cap is enforced HERE
+   and in the input's maxlength, never in sync or import: truncating a record
+   that arrived from Drive would be data loss.
+
+   Stamped at EDIT time (updatedAt/updatedBy), unlike a week close-out, whose
+   stamp is applied at the next sync (backlog 30): an offline edit must carry
+   the time it was made. Gated on state.deletedEntries - the same "this device
+   has sync fields" signal removeEntry uses - so a device that never connected
+   writes just {text}, as the data model promises; migrateSyncFields stamps
+   those at first connect.
+
+   Clearing writes a tombstone, but only for a highlight that exists here: a
+   date this device has never seen a note on may have one on Drive, and a
+   tombstone for it would delete something nobody acknowledged (hard rule 7). */
+function normalizeHighlightText(raw){
+  var t=String(raw==null?"":raw).replace(/\s+/g," ").trim();
+  var cps=Array.from(t);
+  if(cps.length>DAY_HIGHLIGHT_MAX) t=cps.slice(0,DAY_HIGHLIGHT_MAX).join("").trim();
+  return t;
+}
+function getDayHighlight(dateStr){
+  var h=state.dayHighlights&&state.dayHighlights[dateStr];
+  return (h&&typeof h.text==="string"&&h.text.trim())?h.text:null;
+}
+function dayHighlightWouldChange(dateStr,raw){
+  var text=normalizeHighlightText(raw),cur=state.dayHighlights&&state.dayHighlights[dateStr];
+  return text?!(cur&&cur.text===text):!!cur;
+}
+function setDayHighlight(dateStr,raw){
+  if(!state.dayHighlights) state.dayHighlights={};
+  if(!dayHighlightWouldChange(dateStr,raw)) return false;
+  var text=normalizeHighlightText(raw),stamped=!!state.deletedEntries;
+  if(text){
+    var rec={text:text};
+    if(stamped){ rec.updatedAt=nowIso(); rec.updatedBy=getDeviceId(); }
+    state.dayHighlights[dateStr]=rec;
+    /* a live record and its own tombstone must never coexist - see flattenDayHighlights */
+    if(state.deletedDayHighlights) delete state.deletedDayHighlights[dateStr];
+  }else{
+    delete state.dayHighlights[dateStr];
+    if(stamped){
+      if(!state.deletedDayHighlights) state.deletedDayHighlights={};
+      var now=nowIso();
+      state.deletedDayHighlights[dateStr]={updatedAt:now,updatedBy:getDeviceId(),deletedAt:now};
+    }
+  }
+  return true;
+}
+/* the whole edit as one undoable step (hard rule 5): snapshot first, then
+   mutate, then save. No snapshot and no write when nothing would change. */
+function saveDayHighlight(dateStr,raw){
+  if(!dayHighlightWouldChange(dateStr,raw)) return false;
+  snapshot(normalizeHighlightText(raw)?"day highlight":"clear day highlight");
+  setDayHighlight(dateStr,raw);
+  persist();
+  return true;
 }
 
 function putEntry(dateStr,label,catId,start,end,replaceId){
@@ -2039,6 +2254,51 @@ function weekTotals(ws){
     overlap.none=intersectionMinutes(noneRanges,allCatRanges);
   }
   return {t:t,logged:unionMinutes(ranges),none:none,overlap:overlap};
+}
+
+/* ---- per-day figures for the daily close-out ----
+   Entries are keyed by real date and putEntry() splits a midnight-crossing
+   entry into two ordinary entries at write time, so one date's entries are
+   already "that day's share" - no splitting happens here. Same arithmetic as
+   weekTotals() for a single day: per-category sums are raw, uncategorised (and
+   deleted-category) time is "none", logged is the UNION so double-booked
+   minutes count once. */
+function dayTotals(dateStr){
+  var t={},none=0,ranges=[];
+  entriesFor(dateStr).forEach(function(e){
+    var m=e.end-e.start;
+    ranges.push({start:e.start,end:e.end});
+    if(catById(e.cat)) t[e.cat]=(t[e.cat]||0)+m; else none+=m;
+  });
+  return {t:t,none:none,logged:unionMinutes(ranges)};
+}
+/* how much of a day has happened: a past day is all 1440 minutes, a future day
+   none, today the minutes since midnight. Hours that have not happened yet must
+   not read as unlogged. Known limit (CLAUDE.md): 1440 is assumed for every day,
+   so a daylight-saving change day is off by 60 minutes. nowDate is a parameter
+   so tests can pin the clock. */
+function dayElapsedMinutes(dateStr,nowDate){
+  var now=nowDate||new Date(),today=iso(now);
+  if(dateStr<today) return 1440;
+  if(dateStr>today) return 0;
+  return now.getHours()*60+now.getMinutes();
+}
+function dayUnloggedMinutes(dateStr,nowDate){
+  var limit=dayElapsedMinutes(dateStr,nowDate),sum=0;
+  dayGaps(dateStr).forEach(function(g){ sum+=Math.max(0,Math.min(g.end,limit)-g.start); });
+  return sum;
+}
+/* today and past days can be opened, future days cannot */
+function dayIsOpenable(dateStr,nowDate){ return dateStr<=iso(nowDate||new Date()); }
+/* the highlights of one week for its close-out sheet: only days that HAVE one,
+   in day order, no placeholder rows */
+function weekHighlights(ws){
+  var out=[];
+  for(var i=0;i<7;i++){
+    var date=iso(addDays(ws,i)),text=getDayHighlight(date);
+    if(text) out.push({date:date,day:DAYNAMES[i],text:text});
+  }
+  return out;
 }
 
 /* ---------------- week export (data only, for an outside reader) ----------------
@@ -3620,6 +3880,7 @@ function importBackupJson(jsonText){
   state=d;
   if(!state.settings) state.settings={startHour:6,endHour:24};
   if(!state.weekCloseouts) state.weekCloseouts={};
+  migrateDayHighlights(state);
   migrateVerdicts(state);
   migrateVerdictScale(state);
   migrateVerdictTombstoneCollisions(state);
@@ -3779,6 +4040,18 @@ if(TEST_MODE){
     unionMinutes:unionMinutes,
     getVerdict:getVerdict,
     setVerdict:setVerdict,
+    migrateDayHighlights:migrateDayHighlights,
+    flattenDayHighlights:flattenDayHighlights,
+    unflattenDayHighlights:unflattenDayHighlights,
+    getDayHighlight:getDayHighlight,
+    setDayHighlight:setDayHighlight,
+    saveDayHighlight:saveDayHighlight,
+    getDayHighlightMax:function(){ return DAY_HIGHLIGHT_MAX; },
+    dayTotals:dayTotals,
+    dayElapsedMinutes:dayElapsedMinutes,
+    dayUnloggedMinutes:dayUnloggedMinutes,
+    dayIsOpenable:dayIsOpenable,
+    weekHighlights:weekHighlights,
     migrateVerdicts:migrateVerdicts,
     migrateVerdictScale:migrateVerdictScale,
     migrateVerdictTombstoneCollisions:migrateVerdictTombstoneCollisions,
