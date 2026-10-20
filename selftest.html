@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=762;
+var EXPECTED_MIN_ROWS=853;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -2094,7 +2094,7 @@ function waitFor(predicate,timeoutMs){
    exists specifically to verify state SURVIVES a simulated reload (a
    real regression test for data almost lost that way) - wiping storage
    there would break the exact thing that test is checking. */
-function freshSandbox(clean){
+function freshSandbox(clean,extraQuery){
   if(clean){
     ["hours-ledger-selftest-v2","hours-ledger-device-id-TESTMODE",
      "hours-ledger-selftest-undo-v1","hours-ledger-fakedrive-TESTMODE",
@@ -2111,7 +2111,7 @@ function freshSandbox(clean){
         resolve({H:iframeEl.contentWindow.__HL_TEST__,d:iframeEl.contentDocument,el:iframeEl});
       },100);
     });
-    iframeEl.src="index.html?hltest=1&v="+Date.now();
+    iframeEl.src="index.html?hltest=1"+(extraQuery||"")+"&v="+Date.now();
     document.body.appendChild(iframeEl);
   });
 }
@@ -3006,7 +3006,8 @@ function runAsyncTests(H,d){
     .then(function(r){ return runUndoCapTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runQuotaProbeTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runExportWeekTests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runDayHighlightTests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runDayHighlightTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runDayCloseoutUITests().then(function(more){ return r.concat(more); }); });
 }
 
 /* ---------------------------------------------------------------------
@@ -3608,6 +3609,94 @@ function runDayHighlightTests(){
       });
     }))
 
+    /* ---- DH03b: boundary rows for the cap, trim and whitespace collapse (each has a matching mutation) */
+    .then(scenario("DH03b",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        function rep(c,n){ return new Array(n+1).join(c); }
+        function stored(raw){ h.setDayHighlight(D,""); h.setDayHighlight(D,raw); var r=h.getState().dayHighlights[D]; return r?r.text:null; }
+        var t139=stored(rep("x",139)),t140=stored(rep("x",140)),t141=stored(rep("x",141)),t142=stored(rep("x",142));
+        check("DH03b 139 characters are kept whole (139)",t139!==null&&t139.length===139&&t139===rep("x",139),String(t139&&t139.length));
+        check("DH03b 140 characters are kept whole (140)",t140!==null&&t140.length===140&&t140===rep("x",140),String(t140&&t140.length));
+        check("DH03b 141 characters are cut to exactly 140, the first 140 kept",t141!==null&&t141.length===140&&t141===rep("x",140),String(t141&&t141.length));
+        check("DH03b 142 characters are cut to exactly 140",t142!==null&&t142.length===140,String(t142&&t142.length));
+        var padded=stored("     "+rep("x",140)+"     ");
+        check("DH03b leading and trailing whitespace is trimmed BEFORE the cap counts: 140 real characters inside 10 spaces are kept whole",padded===rep("x",140),String(padded&&padded.length));
+        var cutAtSpace=stored(rep("x",139)+" yyy");
+        check("DH03b a cut that lands on a space leaves no trailing space (139 x, the space dropped)",cutAtSpace===rep("x",139),J(cutAtSpace&&cutAtSpace.slice(-3))+" len="+(cutAtSpace&&cutAtSpace.length));
+        check("DH03b '   hi   ' is stored as 'hi' (trim)",stored("   hi   ")==="hi",J(stored("   hi   ")));
+        check("DH03b '\\n' collapses to one space: 'a\\n\\nb' -> 'a b'",stored("a\n\nb")==="a b",J(stored("a\n\nb")));
+        check("DH03b '\\r\\n' collapses: 'a\\r\\nb' -> 'a b'",stored("a\r\nb")==="a b",J(stored("a\r\nb")));
+        check("DH03b a tab collapses: 'a\\tb' -> 'a b'",stored("a\tb")==="a b",J(stored("a\tb")));
+        check("DH03b a run of plain spaces collapses: 'a    b' -> 'a b'",stored("a    b")==="a b",J(stored("a    b")));
+        check("DH03b mixed whitespace around and inside: ' \\n a\\t\\t b \\n ' -> 'a b'",stored(" \n a\t\t b \n ")==="a b",J(stored(" \n a\t\t b \n ")));
+        h.setDayHighlight(D,"was here"); h.setDayHighlight(D," \n\t ");
+        check("DH03b a whitespace-only value (spaces, newline, tab) is a clear, not a stored blank",!h.getState().dayHighlights[D],J(h.getState().dayHighlights[D]));
+      });
+    }))
+
+    /* ---- DH21: D3 stress test. B writes a NEWER highlight and syncs; A has pulled nothing, still holds
+       its older text, undoes an UNRELATED action (an entry delete), then syncs. The snapshot being restored
+       holds the same highlight A already has, so nothing about the highlight should change. */
+    .then(scenario("DH21",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,cat=h.getState().categories[0].id,blank=newB(h),stateB,eid,t1;
+        h.snapshot("add entry"); h.putEntry(D,"Unrelated",cat,540,600,null); h.persist();
+        eid=h.entriesFor(D)[0].id;
+        h.saveDayHighlight(D,"A older text");
+        return settle(h).then(function(){
+          h.snapshot("delete Unrelated"); h.removeEntry(eid); h.persist();       /* this snapshot holds 'A older text' */
+          return settle(h);
+        }).then(function(){
+          t1=h.getState().dayHighlights[D].updatedAt;
+          stateB=syncB(h,blank);                                                  /* B pulls A's older text */
+          stateB.dayHighlights[D]={text:"B newer text",updatedAt:new Date(Date.parse(t1)+50).toISOString(),updatedBy:"dev-B"};
+          stateB=syncB(h,stateB);                                                 /* B writes newer text and pushes */
+          check("DH21 setup: A has pulled nothing and still holds its OLDER text; Drive holds B's NEWER text",
+            txt(h.getState(),D)==="A older text"&&remoteRec(h,D)&&remoteRec(h,D).text==="B newer text","A="+txt(h.getState(),D)+" drive="+(remoteRec(h,D)&&remoteRec(h,D).text));
+          var before=J(h.getState().dayHighlights[D]);
+          h.undo();                                                               /* undo the unrelated entry delete */
+          check("DH21 the unrelated undo brought the entry back",h.entriesFor(D).some(function(e){ return e.label==="Unrelated"; }));
+          check("DH21 ...and left A's highlight record byte-for-byte unchanged, same stamp (no restamp)",J(h.getState().dayHighlights[D])===before,before+" -> "+J(h.getState().dayHighlights[D]));
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          var a=txt(h.getState(),D),b=txt(stateB,D),d=remoteRec(h,D)&&remoteRec(h,D).text;
+          check("DH21 FINAL after A syncs: highlight on A, on B and on the fake Drive are all B's newer text",
+            a==="B newer text"&&b==="B newer text"&&d==="B newer text","A="+a+" | B="+b+" | drive="+d);
+        });
+      });
+    }))
+    /* the neighbouring case, written down as behaviour rather than assumed: A undoes its OWN highlight edit
+       while B has written something newer that A has not pulled. That undo is a deliberate new edit by A, so
+       it wins last-write-wins, and B's text is logged as superseded (decision D2). */
+    .then(scenario("DH21b",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,cat=h.getState().categories[0].id,blank=newB(h),stateB,eid,spy=spyLog(f);
+        h.snapshot("add entry"); h.putEntry(D,"Unrelated",cat,540,600,null); h.persist(); eid=h.entriesFor(D)[0].id;
+        h.saveDayHighlight(D,"v1");
+        return settle(h).then(function(){
+          h.snapshot("delete Unrelated"); h.removeEntry(eid); h.persist();
+          h.saveDayHighlight(D,"v2");                                             /* A's own later edit; its snapshot holds v1 */
+          return settle(h);
+        }).then(function(){
+          var t2=h.getState().dayHighlights[D].updatedAt;
+          stateB=syncB(h,blank);
+          stateB.dayHighlights[D]={text:"B newer than v2",updatedAt:new Date(Date.parse(t2)+50).toISOString(),updatedBy:"dev-B"};
+          stateB=syncB(h,stateB);
+          h.undo();                                                               /* undoes A's OWN edit v2 -> v1 */
+          check("DH21b A undid its own edit: A shows v1",txt(h.getState(),D)==="v1",txt(h.getState(),D));
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          var a=txt(h.getState(),D),b=txt(stateB,D);
+          check("DH21b A's undo of its own edit is a new edit and wins: A and B converge on v1",a==="v1"&&b==="v1","A="+a+" | B="+b);
+          check("DH21b ...and B's superseded sentence was logged, not lost silently",spy.lines.some(function(l){ return l.indexOf("B newer than v2")>-1; }),J(spy.lines.filter(function(l){ return l.indexOf("day-highlight")>-1; })));
+          spy.restore();
+        });
+      });
+    }))
+
     /* ---- DH20: Export week stays highlight-free (the file is data about the week's time, unchanged) */
     .then(scenario("DH20",function(){
       return connectedSandbox().then(function(f){
@@ -3617,6 +3706,342 @@ function runDayHighlightTests(){
         var s=J(ex);
         check("DH20 Export week does not contain highlight text or dayHighlights keys (out of scope for this feature)",
           s.indexOf("SECRET-HIGHLIGHT-TEXT")===-1&&s.toLowerCase().indexOf("highlight")===-1,s.length+" chars");
+      });
+    }))
+
+    .then(function(){ return results; });
+}
+
+/* ---------------------------------------------------------------------
+   Daily close-out, Phase B: the UI on top of the Phase A engine. Written
+   BEFORE the UI exists. Same conventions as runDayHighlightTests: each
+   scenario in its own clean sandbox, a scenario that throws becomes one
+   failing row naming the exception, every row carries what it observed.
+
+   The sandbox iframe is display:none, so these rows can read the DOM, the
+   state and COMPUTED STYLE, and dispatch synthetic mouse/key events, but they
+   cannot prove layout, tap targets, real touch dispatch or how a real phone
+   renders. Those are in CLAUDE.md's backlog 29 as "not verified". */
+function runDayCloseoutUITests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  function J(x){ return JSON.stringify(x); }
+  function scenario(tag,fn){
+    return function(){
+      return Promise.resolve().then(fn).catch(function(e){
+        check(tag+": scenario threw before finishing",false,String(e&&e.message||e));
+      });
+    };
+  }
+  /* a fresh profile auto-opens the intro modal, which holds a scroll lock and also answers Escape;
+     dismiss it first, exactly as the main harness does at the top of runTests */
+  function sandbox(extraQuery){
+    return freshSandbox(true,extraQuery).then(function(f){ if(f.d.getElementById("intro").classList.contains("on")) f.d.getElementById("introGo").click(); return f; });
+  }
+  var MON="2026-04-20",TUE="2026-04-21",WED="2026-04-22",SUN="2026-04-26",NEXTMON="2026-04-27";
+  var DN=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+  /* an independent copy of dur(), so a row never asserts the app against itself */
+  function dur(m){ var h=Math.floor(m/60),r=m%60; if(!m) return "0h"; return (h?h+"h":"")+(r?(h?" ":"")+r+"m":""); }
+  function showWeek(h,mondayIso,mode){ h.setViewMode(mode||"week"); h.setWeekStart(h.parseIso(mondayIso)); h.render(); }
+  function btns(f){ return [].slice.call(f.d.querySelectorAll("#dayhead .daybtn")); }
+  function btnFor(f,date){ return btns(f).filter(function(b){ return b.dataset.date===date; })[0]; }
+  function el(f,id){ return f.d.getElementById(id); }
+  function sheetOn(f){ return el(f,"dayScrim")&&el(f,"dayScrim").classList.contains("on"); }
+  function fire(node,type,props){
+    var ev=new ((node.ownerDocument||node).defaultView.Event)(type,{bubbles:true,cancelable:true});
+    Object.keys(props||{}).forEach(function(k){ ev[k]=props[k]; });
+    node.dispatchEvent(ev); return ev;
+  }
+  function key(node,k){
+    var ev=new ((node.ownerDocument||node).defaultView.KeyboardEvent)("keydown",{key:k,bubbles:true,cancelable:true});
+    node.dispatchEvent(ev); return ev;
+  }
+  function click(node){ node.dispatchEvent(new ((node.ownerDocument||node).defaultView.MouseEvent)("click",{bubbles:true,cancelable:true})); }
+  /* a fresh sandbox already holds ONE scroll lock for the intro modal, so lock checks are relative to a baseline */
+  function lockBase(h){ return h.getBodyScrollLockCount(); }
+
+  return Promise.resolve()
+
+    /* ---- PB01: which headers are buttons */
+    .then(scenario("PB01",function(){
+      return sandbox().then(function(f){
+        var h=f.H;
+        showWeek(h,MON);
+        var b=btns(f);
+        check("PB01 a fully past week: all 7 day headers are buttons, one per date, Monday first",
+          b.length===7&&b.map(function(x){ return x.dataset.date; }).join(",")==="2026-04-20,2026-04-21,2026-04-22,2026-04-23,2026-04-24,2026-04-25,2026-04-26",b.map(function(x){ return x.dataset.date; }).join(","));
+        check("PB01 ...they are real <button> elements (keyboard and touch reachable) with an accessible name",
+          b.length===7&&b.every(function(x){ return x.tagName==="BUTTON"&&/Day summary/.test(x.getAttribute("aria-label")||""); }),b[0]&&b[0].outerHTML.slice(0,120));
+        var future=h.iso(h.addDays(h.mondayOf(new Date()),140));
+        showWeek(h,future);
+        check("PB01 a fully future week: no day header is a button (future days cannot be opened) but all 7 day names still show",
+          btns(f).length===0&&el(f,"dayhead").children.length===8&&DN.every(function(n){ return el(f,"dayhead").textContent.indexOf(n.toUpperCase())>-1||el(f,"dayhead").textContent.indexOf(n)>-1; }),btns(f).length+" buttons, "+el(f,"dayhead").children.length+" cells");
+        showWeek(h,h.iso(h.mondayOf(new Date())));
+        var todayIdx=(new Date().getDay()+6)%7,iso0=h.iso(new Date());
+        check("PB01 the current week: buttons for today and the days before it, none after",
+          btns(f).length===todayIdx+1&&btns(f).every(function(x){ return x.dataset.date<=iso0; }),btns(f).length+" buttons, today index "+todayIdx);
+        showWeek(h,MON,"day"); h.setFocusDay(2); h.render();
+        check("PB01 day view: the single visible header is a button for that day",btns(f).length===1&&btns(f)[0].dataset.date===WED,btns(f).map(function(x){ return x.dataset.date; }).join(","));
+      });
+    }))
+
+    /* ---- PB02: the marker for a day with a highlight */
+    .then(scenario("PB02",function(){
+      return sandbox().then(function(f){
+        var h=f.H;
+        h.setDayHighlight(WED,"shipped it");
+        showWeek(h,MON);
+        var withMark=btns(f).filter(function(x){ return x.querySelector(".hl-mark"); }).map(function(x){ return x.dataset.date; });
+        check("PB02 only the day that has a highlight carries the marker",withMark.join(",")===WED,withMark.join(","));
+        var m=btnFor(f,WED).querySelector(".hl-mark"),cs=m&&f.el.contentWindow.getComputedStyle(m),bs=f.el.contentWindow.getComputedStyle(btnFor(f,WED));
+        check("PB02 the marker is square (border-radius 0), per the design constraint of no rounded corners",!!cs&&cs.borderRadius==="0px"&&cs.width!=="0px",cs&&(cs.borderRadius+" "+cs.width));
+        check("PB02 the header button has no radius and no shadow",bs.borderRadius==="0px"&&bs.boxShadow==="none",bs.borderRadius+" / "+bs.boxShadow);
+        check("PB02 the accessible name says there is a highlight, so the marker is not the only signal",/highlight/i.test(btnFor(f,WED).getAttribute("aria-label")||"")&&!/highlight/i.test(btnFor(f,MON).getAttribute("aria-label")||""),btnFor(f,WED).getAttribute("aria-label"));
+        h.setDayHighlight(WED,"");
+        h.render();
+        check("PB02 clearing it removes the marker on the next render",!btnFor(f,WED).querySelector(".hl-mark"));
+      });
+    }))
+
+    /* ---- PB03: the sheet for a day */
+    .then(scenario("PB03",function(){
+      return sandbox().then(function(f){
+        var h=f.H,cats=h.getState().categories,c0=cats[0],c2=cats[2];
+        h.putEntry(TUE,"Work",c0.id,540,600,null);              /* Tue 09:00-10:00 */
+        h.putEntry(MON,"Sleep",c2.id,1410,420,null);            /* Mon 23:30 -> Tue 07:00, split at write time */
+        showWeek(h,MON);
+        var base=lockBase(h);
+        click(btnFor(f,TUE));
+        check("PB03 clicking Tuesday's header opens the sheet",sheetOn(f));
+        check("PB03 the title is the day and date",el(f,"dayTitle").textContent.indexOf("Tue 21 Apr")>-1,el(f,"dayTitle").textContent);
+        var t=el(f,"dayTotals").textContent;
+        check("PB03 Tuesday's totals use the SPLIT sleep: 7h after midnight, not the whole 7h 30m",t.indexOf(c2.name)>-1&&t.indexOf("7h")>-1&&t.indexOf("7h 30m")===-1,t);
+        check("PB03 ...and Tuesday's own work entry shows, 1h",t.indexOf(c0.name)>-1&&/1h(?! )/.test(t),t);
+        var u=el(f,"dayUnlogged").textContent;
+        check("PB03 unlogged for a past day is the whole rest of the day: 24h - 8h logged = 16h, and it is visible",u.indexOf("Unlogged")>-1&&u.indexOf(dur(960))>-1&&u.indexOf("so far")===-1,u);
+        check("PB03 the body scroll lock is taken exactly once while the sheet is open",h.getBodyScrollLockCount()===base+1,base+" -> "+h.getBodyScrollLockCount());
+        check("PB03 there are no verdict buttons in the day sheet (those belong to the week)",el(f,"dayScrim").querySelectorAll(".verdict").length===0);
+        click(el(f,"dayCancel"));
+        click(btnFor(f,MON));
+        var tm=el(f,"dayTotals").textContent,um=el(f,"dayUnlogged").textContent;
+        check("PB03 Monday's sheet shows the other half of the split: 30m of sleep only",tm.indexOf(c2.name)>-1&&tm.indexOf("30m")>-1&&tm.indexOf("7h")===-1,tm);
+        check("PB03 ...and unlogged 24h - 30m = 23h 30m",um.indexOf(dur(1410))>-1,um);
+        click(el(f,"dayCancel"));
+        showWeek(h,"2026-03-02"); click(btnFor(f,"2026-03-04"));
+        check("PB03 an empty day says so and shows all 24h as unlogged",/nothing logged/i.test(el(f,"dayTotals").textContent)&&el(f,"dayUnlogged").textContent.indexOf("24h")>-1,el(f,"dayTotals").textContent+" | "+el(f,"dayUnlogged").textContent);
+        click(el(f,"dayCancel"));
+      });
+    }))
+    .then(scenario("PB03b",function(){
+      return sandbox().then(function(f){
+        var h=f.H;
+        showWeek(h,h.iso(h.mondayOf(new Date())));
+        var today=h.iso(new Date()),future=h.iso(h.addDays(new Date(),3)),base=lockBase(h);
+        check("PB03b openDay refuses a future date (returns false, no sheet, no scroll lock taken)",h.openDay(future)===false&&!sheetOn(f)&&h.getBodyScrollLockCount()===base,"lock "+base+" -> "+h.getBodyScrollLockCount());
+        var before=h.dayUnloggedMinutes(today);
+        click(btnFor(f,today));
+        var after=h.dayUnloggedMinutes(today),u=el(f,"dayUnlogged").textContent;
+        check("PB03b today opens, and its unlogged line says 'so far' and counts only the hours that have happened",
+          sheetOn(f)&&u.indexOf("so far")>-1&&(u.indexOf(dur(before))>-1||u.indexOf(dur(after))>-1),u+" (expected "+dur(before)+" or "+dur(after)+")");
+        click(el(f,"dayCancel"));
+      });
+    }))
+
+    /* ---- PB04: save, clear, cancel, outside click, keys */
+    .then(scenario("PB04",function(){
+      return sandbox().then(function(f){
+        var h=f.H,d0,base=lockBase(h);
+        showWeek(h,MON);
+        click(btnFor(f,TUE));
+        d0=h.undoDepthForTest();
+        el(f,"dayNote").value="  Shipped the thing  ";
+        click(el(f,"daySave"));
+        check("PB04 Save stores the trimmed text on that date",h.getDayHighlight(TUE)==="Shipped the thing",J(h.getState().dayHighlights));
+        check("PB04 ...takes exactly one undo snapshot (hard rule 5)",h.undoDepthForTest()===d0+1,"depth "+d0+" -> "+h.undoDepthForTest());
+        check("PB04 ...closes the sheet and releases the scroll lock",!sheetOn(f)&&h.getBodyScrollLockCount()===base,"on="+sheetOn(f)+" lock "+base+" -> "+h.getBodyScrollLockCount());
+        check("PB04 ...and the header now shows the marker without a manual refresh",!!btnFor(f,TUE).querySelector(".hl-mark"));
+        check("PB04 ...and a toast with Undo confirms it",/highlight/i.test(el(f,"toastText").textContent)&&!el(f,"toastUndo").hidden,el(f,"toastText").textContent);
+        h.undo();
+        check("PB04 Ctrl+Z after saving from the sheet removes the highlight and the marker",h.getDayHighlight(TUE)===null&&!btnFor(f,TUE).querySelector(".hl-mark"));
+        h.redo();
+        click(btnFor(f,TUE));
+        check("PB04 reopening the day shows the saved text in the field",el(f,"dayNote").value==="Shipped the thing",el(f,"dayNote").value);
+        d0=h.undoDepthForTest();
+        click(el(f,"daySave"));
+        check("PB04 Save with unchanged text takes no snapshot and just closes",h.undoDepthForTest()===d0&&!sheetOn(f),"depth "+d0+" -> "+h.undoDepthForTest());
+        click(btnFor(f,TUE));
+        el(f,"dayNote").value="";
+        click(el(f,"daySave"));
+        check("PB04 Save with an empty field clears the highlight",h.getDayHighlight(TUE)===null&&h.undoDepthForTest()===d0+1,J(h.getState().dayHighlights));
+        h.undo();
+        click(btnFor(f,TUE));
+        d0=h.undoDepthForTest();
+        el(f,"dayNote").value="typed but not saved";
+        click(el(f,"dayCancel"));
+        check("PB04 Cancel discards what was typed: no change, no snapshot, sheet closed",h.getDayHighlight(TUE)==="Shipped the thing"&&h.undoDepthForTest()===d0&&!sheetOn(f),h.getDayHighlight(TUE));
+      });
+    }))
+    .then(scenario("PB04b",function(){
+      return sandbox().then(function(f){
+        var h=f.H,base=lockBase(h);
+        showWeek(h,MON);
+        var scrim=el(f,"dayScrim");
+        click(btnFor(f,TUE));
+        el(f,"dayNote").value="not saved by an outside click";
+        fire(scrim,"mousedown"); click(scrim);
+        check("PB04b a genuine click on the backdrop closes the sheet without saving",!sheetOn(f)&&h.getDayHighlight(TUE)===null,"on="+sheetOn(f));
+        click(btnFor(f,TUE));
+        fire(scrim.querySelector(".sheet"),"mousedown"); click(scrim);
+        check("PB04b a press that starts INSIDE the sheet and releases on the backdrop (a text-selection drag) does not close it",sheetOn(f));
+        key(f.d,"Escape");
+        check("PB04b Escape closes the sheet",!sheetOn(f)&&h.getBodyScrollLockCount()===base,"lock "+base+" -> "+h.getBodyScrollLockCount());
+        click(btnFor(f,TUE));
+        el(f,"dayNote").value="saved by Enter";
+        key(el(f,"dayNote"),"Enter");
+        check("PB04b Enter in the field saves and closes",h.getDayHighlight(TUE)==="saved by Enter"&&!sheetOn(f),h.getDayHighlight(TUE));
+        for(var i=0;i<3;i++){ click(btnFor(f,TUE)); click(el(f,"dayCancel")); }
+        check("PB04b repeated open/close leaves the scroll lock where it started (no stuck lock)",h.getBodyScrollLockCount()===base,"lock "+base+" -> "+h.getBodyScrollLockCount());
+      });
+    }))
+    .then(scenario("PB04c",function(){
+      return sandbox().then(function(f){
+        var h=f.H;
+        showWeek(h,MON);
+        click(btnFor(f,TUE));
+        var inp=el(f,"dayNote");
+        check("PB04c the field is a single-line text input with maxlength 140 (the cap lives in the engine too)",inp.tagName==="INPUT"&&inp.type==="text"&&inp.maxLength===140,inp.tagName+" "+inp.type+" "+inp.maxLength);
+        inp.value=new Array(201).join("q");
+        click(el(f,"daySave"));
+        check("PB04c even if a longer value gets past the field, what is stored is 140 characters",h.getDayHighlight(TUE)&&h.getDayHighlight(TUE).length===140,String(h.getDayHighlight(TUE)&&h.getDayHighlight(TUE).length));
+        click(btnFor(f,WED));
+        check("PB04c reopening another day starts from THAT day's text, not the previous field value",el(f,"dayNote").value===""&&el(f,"dayTitle").textContent.indexOf("Wed 22 Apr")>-1,J(el(f,"dayNote").value)+" / "+el(f,"dayTitle").textContent);
+        click(el(f,"dayCancel"));
+      });
+    }))
+
+    /* ---- PB05: text is text, never markup; a render does not clobber typing */
+    .then(scenario("PB05",function(){
+      return sandbox().then(function(f){
+        var h=f.H,evil='<img src=x onerror="window.__pwned=1"><b>bold</b>';
+        h.setDayHighlight(TUE,evil);
+        showWeek(h,MON);
+        click(btnFor(f,TUE));
+        check("PB05 the field shows the text literally and no element was created from it",el(f,"dayNote").value===evil&&el(f,"dayScrim").querySelectorAll("img,b.__x").length===0&&!f.el.contentWindow.__pwned,el(f,"dayNote").value);
+        el(f,"dayNote").value="half typed";
+        h.render();
+        check("PB05 a render while the sheet is open (a background sync lands) does not touch what is being typed",sheetOn(f)&&el(f,"dayNote").value==="half typed",el(f,"dayNote").value);
+        click(el(f,"dayCancel"));
+        check("PB05 the header's accessible name and marker contain no markup from the text",btnFor(f,TUE).querySelectorAll("img").length===0&&(btnFor(f,TUE).getAttribute("aria-label")||"").indexOf("<")===-1,btnFor(f,TUE).getAttribute("aria-label"));
+      });
+    }))
+
+    /* ---- PB06: the week close-out lists only days that have a highlight */
+    .then(scenario("PB06",function(){
+      return sandbox().then(function(f){
+        var h=f.H,evil='<img src=x onerror="window.__pwned2=1">';
+        h.setDayHighlight(SUN,"sunday thing"); h.setDayHighlight(WED,"wednesday thing"); h.setDayHighlight(MON,evil);
+        h.setDayHighlight(NEXTMON,"NEXT week"); h.setDayHighlight(TUE,"x"); h.setDayHighlight(TUE,"");
+        h.openCloseout(h.parseIso(MON));
+        var field=el(f,"closeoutHighlightsField"),rows=[].slice.call(el(f,"closeoutHighlights").children);
+        check("PB06 the week close-out has a Highlights section, shown when the week has any",!!field&&!field.hidden,String(field&&field.hidden));
+        check("PB06 ...listing exactly the days that have one, in day order: Mon, Wed, Sun",rows.map(function(r){ return r.querySelector("b").textContent; }).join(",")==="Mon,Wed,Sun",rows.map(function(r){ return r.textContent; }).join(" | "));
+        check("PB06 ...each row carries the text; no placeholder rows for days without one; next week's is not listed",
+          rows.length===3&&rows[1].textContent.indexOf("wednesday thing")>-1&&el(f,"closeoutHighlights").textContent.indexOf("NEXT week")===-1,rows.map(function(r){ return r.textContent; }).join(" | "));
+        check("PB06 ...text is inserted as text, not markup",el(f,"closeoutHighlights").querySelectorAll("img").length===0&&!f.el.contentWindow.__pwned2&&rows[0].textContent.indexOf(evil)>-1,rows[0].textContent);
+        el(f,"closeoutCancel").click();
+        h.openCloseout(h.parseIso("2026-03-30"));
+        check("PB06 a week with no highlights shows no Highlights section at all (and nothing is left over from the previous week)",el(f,"closeoutHighlightsField").hidden===true&&el(f,"closeoutHighlights").children.length===0,"hidden="+el(f,"closeoutHighlightsField").hidden+" rows="+el(f,"closeoutHighlights").children.length);
+        el(f,"closeoutCancel").click();
+      });
+    }))
+
+    /* ---- PB07: the hover preview is a convenience, never the only way */
+    .then(scenario("PB07",function(){
+      return sandbox().then(function(f){
+        var h=f.H,d=f.d;
+        h.setDayHighlight(TUE,"short note");
+        var head=d.createElement("div"),tip=d.createElement("div"); tip.hidden=true;
+        head.innerHTML='<div><button class="daybtn" data-date="'+TUE+'">Tue</button></div><div><button class="daybtn" data-date="'+MON+'">Mon</button></div>';
+        d.body.appendChild(head); d.body.appendChild(tip);
+        var on=h.attachDayPreview(head,tip,true);
+        check("PB07 with a hover-capable pointer the preview attaches",on===true);
+        fire(head.querySelector('[data-date="'+TUE+'"]'),"mouseover");
+        check("PB07 hovering a day that has a highlight shows it",tip.hidden===false&&tip.textContent==="short note",tip.hidden+" "+J(tip.textContent));
+        fire(head.querySelector('[data-date="'+TUE+'"]'),"mouseout");
+        check("PB07 leaving hides it",tip.hidden===true);
+        fire(head.querySelector('[data-date="'+MON+'"]'),"mouseover");
+        check("PB07 hovering a day WITHOUT one shows nothing",tip.hidden===true);
+        h.setDayHighlight(TUE,'<img src=x onerror="window.__pwned3=1">');
+        fire(head.querySelector('[data-date="'+TUE+'"]'),"mouseover");
+        check("PB07 the preview renders text, never markup",tip.querySelectorAll("img").length===0&&!f.el.contentWindow.__pwned3,tip.textContent);
+        var head2=d.createElement("div"),tip2=d.createElement("div"); tip2.hidden=true;
+        head2.innerHTML=head.innerHTML; d.body.appendChild(head2); d.body.appendChild(tip2);
+        var off=h.attachDayPreview(head2,tip2,false);
+        fire(head2.querySelector('[data-date="'+TUE+'"]'),"mouseover");
+        check("PB07 without hover capability (touch) nothing attaches and nothing ever shows",off===false&&tip2.hidden===true);
+        /* the real page */
+        var capable=!!(f.el.contentWindow.matchMedia&&f.el.contentWindow.matchMedia("(hover: hover)").matches);
+        check("PB07 the real page attaches the preview exactly when the browser reports hover capability",h.dayPreviewAttached()===capable,"attached="+h.dayPreviewAttached()+" capable="+capable);
+        var realTip=el(f,"dayTip");
+        check("PB07 the real preview element exists and is NOT inside #dayhead (which is rebuilt on every render)",!!realTip&&!el(f,"dayhead").contains(realTip));
+        h.render();
+        check("PB07 ...so it survives a render",el(f,"dayTip")===realTip&&f.d.body.contains(realTip));
+        var cs=f.el.contentWindow.getComputedStyle(realTip);
+        check("PB07 a long note is clamped to 3 lines with a bounded width, and the preview never takes pointer events",
+          (cs.webkitLineClamp==="3"||cs.getPropertyValue("-webkit-line-clamp")==="3")&&cs.maxWidth!=="none"&&cs.pointerEvents==="none",cs.getPropertyValue("-webkit-line-clamp")+" / "+cs.maxWidth+" / "+cs.pointerEvents);
+        check("PB07 the preview has square corners and no shadow",cs.borderRadius==="0px"&&cs.boxShadow==="none",cs.borderRadius+" / "+cs.boxShadow);
+      });
+    }))
+
+    /* ---- PB07b: the whole flow as a TOUCH device sees it (no hover capability at all) */
+    .then(scenario("PB07b",function(){
+      return sandbox("&nohover=1").then(function(f){
+        var h=f.H,d=f.d,base=lockBase(h);
+        h.setDayHighlight(TUE,"visible without hovering");
+        h.putEntry(TUE,"Work",h.getState().categories[0].id,540,600,null);
+        showWeek(h,MON);
+        check("PB07b (no-hover browser) the preview is not attached",h.dayPreviewAttached()===false,String(h.dayPreviewAttached()));
+        fire(btnFor(f,TUE),"mouseover");
+        check("PB07b ...and hovering a day does nothing",el(f,"dayTip").hidden===true);
+        check("PB07b ...but the day still has its marker, so a touch user can see which days have a note",!!btnFor(f,TUE).querySelector(".hl-mark"));
+        click(btnFor(f,TUE));
+        check("PB07b ...tapping the header opens the sheet with the full text and the totals",sheetOn(f)&&el(f,"dayNote").value==="visible without hovering"&&el(f,"dayTotals").textContent.indexOf("1h")>-1,el(f,"dayNote").value);
+        el(f,"dayNote").value="edited on a phone";
+        click(el(f,"daySave"));
+        check("PB07b ...saving works and closes it",h.getDayHighlight(TUE)==="edited on a phone"&&!sheetOn(f)&&h.getBodyScrollLockCount()===base,h.getDayHighlight(TUE));
+        h.openCloseout(h.parseIso(MON));
+        check("PB07b ...and the week close-out lists it",el(f,"closeoutHighlights").textContent.indexOf("edited on a phone")>-1,el(f,"closeoutHighlights").textContent);
+        el(f,"closeoutCancel").click();
+      });
+    }))
+
+    /* ---- PB08: Enter must not open an entry sheet behind the day sheet */
+    .then(scenario("PB08",function(){
+      return sandbox().then(function(f){
+        var h=f.H;
+        showWeek(h,MON);
+        click(btnFor(f,TUE));
+        key(f.d.body,"Enter");
+        check("PB08 with the day sheet open, Enter on the page does not open the entry sheet underneath",!el(f,"scrim").classList.contains("on"),"entry sheet on="+el(f,"scrim").classList.contains("on"));
+        click(el(f,"dayCancel"));
+      });
+    }))
+
+    /* ---- PB09: a failed save is never reported as saved */
+    .then(scenario("PB09",function(){
+      return sandbox().then(function(f){
+        var h=f.H,win=f.el.contentWindow,orig=win.Storage.prototype.setItem;
+        showWeek(h,MON);
+        click(btnFor(f,TUE));
+        el(f,"dayNote").value="cannot be stored";
+        win.Storage.prototype.setItem=function(){ var e=new Error("quota"); e.name="QuotaExceededError"; throw e; };
+        try{ click(el(f,"daySave")); }finally{ win.Storage.prototype.setItem=orig; }
+        var toast=el(f,"toastText").textContent,status=el(f,"statusText").textContent;
+        check("PB09 when the browser refuses the write, the toast does not say Saved",!/saved highlight/i.test(toast)&&/not saved/i.test(toast),toast);
+        check("PB09 ...and the status line says it was not saved on this device",/not saved/i.test(status),status);
+        check("PB09 ...while the text is still held in memory for this session",h.getDayHighlight(TUE)==="cannot be stored");
       });
     }))
 

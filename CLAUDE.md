@@ -2805,9 +2805,11 @@ dashboard styling.
 
 29. **Daily close-out - click a day header, see that day's time per category,
     write one optional highlight line. Phase A (engine) built on
-    `feature/day-closeout` (2026-10-20), NOT merged, NOT pushed. Phase B (the popup,
-    the header button and dot, the hover preview, the section in the week
-    close-out sheet) is not built.** Decisions (Sebastian, 2026-10-20), each with
+    `feature/day-closeout` (2026-10-20), committed locally as `759e1c8`, NOT merged,
+    NOT pushed. Phase B (the day sheet, the header buttons and marker, the hover
+    preview, the Highlights section in the week close-out sheet) is built, tests
+    first, and is uncommitted at the time of writing; see "Phase B" below.**
+    Decisions (Sebastian, 2026-10-20), each with
     its reason:
     - **D1: 140 characters.** Enforced in the setter (`normalizeHighlightText`,
       code points so an emoji is never cut) and, in Phase B, `maxlength` on the
@@ -2884,13 +2886,13 @@ dashboard styling.
       only (Phase B): below 820px and on touch the sheet must be fully usable.
       (3) Highlights are deliberately NOT in Export week (E-tests unchanged; DH20
       pins it); "Export a copy" includes them because it writes the whole state.
-    - **Tests (`selftest.html`, `runDayHighlightTests()`, 115 rows, DH01-DH20).**
+    - **Tests (`selftest.html`, `runDayHighlightTests()`, 137 rows, DH01-DH21b).**
       Written first. Against the unchanged `app.js`: 31 failing / 47 rows (a
       scenario that cannot run becomes ONE failing row naming the missing hook).
       With the engine but WITHOUT the D3 forward-edit: 4 failing / 110 rows, all
       undo divergences (the evidence for D3 above). With it: 0 failing. Full
-      `selftest.html`: `PASS - 0 failing / 762 total` (647 before this branch);
-      `EXPECTED_MIN_ROWS` is 762. Sync tests use the real `syncEngine()` for a
+      `selftest.html`: `PASS - 0 failing / 853 total` after Phase B (647 before
+      this branch, +137 highlight engine, +69 Phase B UI); `EXPECTED_MIN_ROWS` is 853. Sync tests use the real `syncEngine()` for a
       second device ("dev-B") against the same fake Drive, as in the undo blocks;
       stamps a test depends on being old are written explicitly (the 5-second
       window masks a wrongly-written tombstone otherwise).
@@ -2915,8 +2917,98 @@ dashboard styling.
       even before the engine existed (they are in the 31-failing/47 run as PASS)
       and would only flip if `mergeRecords` itself changed, which the older sync
       suite already guards. Do not read them as evidence for the new code.
-    - **Not covered:** a real device, real Drive, a real browser clock around
-      midnight, the two daylight-saving days, and everything in Phase B.
+    - **D3 stress test (2026-10-20, `DH21`/`DH21b`) - it already behaved correctly.**
+      Scenario: B writes a newer highlight and syncs; A, having pulled nothing and
+      still holding its older text, undoes an UNRELATED action (an entry delete),
+      then syncs. Result: A, B and the fake Drive all end on B's newer text, and A's
+      highlight record is byte-for-byte unchanged by the undo (same text, same
+      stamp). Why: the snapshot being restored holds the same highlight A already
+      has, so the equal-text rule leaves the current record alone; nothing is
+      restamped. The "restamp only what the undone action itself changed" fix
+      proposed for this case is therefore what the rule already does, using
+      "text equals the snapshot's" as the proxy (a whole-state snapshot cannot say
+      which keys an action touched; it can only be compared with the state it
+      replaces). The mutation that breaks it is `M48` (drop the equal-text early
+      return, so every key is restamped): A, B and Drive all end on A's OLDER text,
+      which silently overwrites B's newer prose. `DH21` fails under `M48`. Related,
+      and decided here rather than assumed (`DH21b`): when A undoes its OWN highlight
+      edit while B has since written something newer that A has not pulled, A's undo
+      is a new edit and wins last-write-wins; B's sentence is logged as superseded
+      (D2). **Known hole, not built:** two tabs of the same browser profile share one
+      device id, so the ownership guard cannot tell a second tab's edit from this
+      tab's own; an undo in a stale tab can restamp over the other tab's newer text.
+      That is the same multi-tab hazard that already applies to the whole ledger.
+    - **Boundary rows (`DH03b`).** 139, 140, 141 and 142 characters; whitespace
+      inside the budget (140 real characters inside 10 spaces is kept whole); a cut
+      that lands on a space leaves no trailing space; trim; and collapse of `\n`,
+      `\r\n`, tab and runs of spaces to one space; a whitespace-only value clears.
+      Mutations `M53` (cut at 141), `M54` (cut at 139), `M59` (cut at 138), `M55` (no
+      trim), `M56` (no trim after the cut), `M57` (no collapse) and `M58` (collapse
+      spaces only) each turn their matching rows red; total 59 mutations on the
+      engine block.
+    - **Not covered (engine):** a real device, real Drive, a real browser clock
+      around midnight, the two daylight-saving days.
+
+    **Phase B - the UI (built 2026-10-20, uncommitted when written).**
+    - **What it is.** A day header (today or a past day; in day view too) is a real
+      `<button class="daybtn">` that opens a sheet for that one date: time per
+      category, an Unlogged line ("Unlogged so far" for today), and a single-line
+      field (`maxlength` 140; Enter saves, Escape or Cancel discards; empty clears)
+      saved through `saveDayHighlight` (one undo snapshot) with a toast that has
+      Undo. A future day is plain text, not a button. A day with a highlight carries
+      a small **square** mark (`.hl-mark`) and says so in its accessible name. The
+      marker is square, not a dot, because the design allows no rounded corners.
+      The week close-out sheet shows a Highlights section listing only the days that
+      have one, in day order, and the whole section is hidden when there are none.
+      All highlight text is inserted as text, never as markup.
+    - **Hover is a convenience only.** `attachDayPreview()` attaches the hover
+      preview only when the browser reports hover capability (`hoverCapable()`, the
+      same signal as the 168-hour bar). Nothing else depends on it. A TEST_MODE-only
+      query flag `?hltest=1&nohover=1` makes a sandbox behave as a touch device, so
+      the suite runs the whole flow (header, sheet, save, week sheet) without hover
+      (`PB07b`); mutation `P39` (buttons only on hover-capable browsers) turns it red.
+    - **Behaviour worth knowing.** The sheet does not re-render while it is open: a
+      background sync landing mid-edit cannot replace what is being typed, so its
+      totals are as of the moment it opened. A save the browser refuses is reported
+      as "Not saved on this device", never "Saved" (`PB09`). The global Enter
+      shortcut that opens a new entry is blocked while the day sheet is open.
+    - **Tests (`runDayCloseoutUITests()`, 69 rows, PB01-PB09).** Written first:
+      against code with no UI, 15 failing of 17 rows (the scenarios stop at the first
+      missing element). 46 mutations on the UI (`P01`-`P46`, across `app.js`,
+      `styles.css` and `index.html`), each turns at least one row red. Rows no
+      mutation turns red (18 of 68, said plainly) are mostly basics the engine tests
+      already cover (save stores trimmed text, 140 stored, unlogged on an empty day),
+      setup preconditions, and negative checks (no verdict buttons in the day sheet).
+      The Phase B suite runs in a `display:none` iframe: it reads DOM, state and
+      computed style and dispatches synthetic events, so it **cannot** prove layout,
+      tap-target size, real touch dispatch or how a phone renders the header button,
+      the square marker or the sheet.
+    - **Not covered (Phase B):** a real phone below 820px, real touch, the on-screen
+      keyboard with the field focused, a real mouse hover and the tooltip's real
+      position, text-selection drag on a real device.
+
+    **Testing and deploy rules for this feature (Sebastian, 2026-10-20).**
+    - **Real two-device Drive sync of highlights cannot be verified before deploy.**
+      Google sign-in only completes on the production origin and on `localhost`; no
+      preview origin is authorised and the test build uses a fake Drive. So the suite
+      (a fake Drive, plus "device B" driven through the real `syncEngine()`) is the
+      only pre-deploy evidence for highlight sync. The first real two-device run
+      happens on the live site, after deploy.
+    - **Before the FIRST deploy, both of these must exist:** (1) a downloaded backup
+      of the live Drive file `hours-ledger-sync.json`, and (2) an "Export a copy" of
+      the local data on each device that syncs. The first deploy is the first time
+      any device writes `dayHighlights` into the real Drive file.
+    - **How the branch is tested on devices.** No origin-guard code is added (that
+      would be new behaviour under hard rule 6). The phone uses the LAN URL with
+      `?hltest=1` ONLY, e.g. `http://<laptop-LAN-IP>:<port>/index.html?hltest=1`,
+      served from the laptop on a port other than 8000; test-mode storage is
+      suffixed and the Drive functions return before any `fetch()`. Real data goes
+      in by importing an "Export a copy" there (import forces `driveConnected` off).
+      On the laptop, `localhost` is used ONLY in a fresh incognito window: the
+      normal profile's `localhost:8000` may hold a connected ledger, and a normal
+      window there would auto-sync this branch to the real Drive file. Do not push to
+      get a `raw.githack.com` preview; that origin cannot sign in to Drive and the
+      branch is deliberately not pushed before it has been tested.
 
 30. **The existing week close-out is stamped at sync time, not edit time, so an
     offline edit can beat a newer one - REASONED, NOT REPRODUCED. Not fixed in

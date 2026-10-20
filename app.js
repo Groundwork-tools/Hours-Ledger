@@ -2133,8 +2133,14 @@ function renderGrid(){
   document.getElementById("gridbody").style.gridTemplateColumns=cols;
   document.querySelector(".grid").style.minWidth=(vis.length>3?"720px":"0");
   head.innerHTML='<div></div>'+vis.map(function(i){
-    var d=days[i];
-    return '<div class="'+(iso(d)===todayStr?"today":"")+'"><b>'+DAYNAMES[i]+"</b>"+d.getDate()+" "+MONTHS[d.getMonth()]+"</div>";
+    var d=days[i],ds=iso(d),hl=getDayHighlight(ds);
+    var inner="<b>"+DAYNAMES[i]+"</b>"+d.getDate()+" "+MONTHS[d.getMonth()]+(hl?'<span class="hl-mark" aria-hidden="true"></span>':"");
+    /* today and past days open the day sheet; a future day is plain text (daily close-out) */
+    if(dayIsOpenable(ds)){
+      return '<div class="'+(ds===todayStr?"today ":"")+'openable"><button type="button" class="daybtn" data-date="'+ds+'" aria-label="Day summary for '+
+        DAYNAMES[i]+" "+d.getDate()+" "+MONTHS[d.getMonth()]+(hl?", has a highlight":"")+'">'+inner+"</button></div>";
+    }
+    return '<div class="'+(ds===todayStr?"today":"")+'">'+inner+"</div>";
   }).join("");
 
   var sh=state.settings.startHour, eh=state.settings.endHour, gut="";
@@ -3053,6 +3059,7 @@ document.addEventListener("keydown",function(ev){
   var tag=ev.target.tagName;
   if(tag==="INPUT"||tag==="TEXTAREA"||tag==="SELECT"||tag==="BUTTON"||tag==="A"||ev.target.isContentEditable) return;
   if(document.getElementById("closeoutScrim").classList.contains("on")) return;
+  if(document.getElementById("dayScrim").classList.contains("on")) return;
   if(introEl.classList.contains("on")) return;
   if(!document.getElementById("reviewSection").hidden) return;
   if(cats.querySelector(".picker:not([hidden])")||cats.querySelector(".catdelete:not([hidden])")) return;
@@ -3609,6 +3616,7 @@ function openCloseout(ws){
   document.getElementById("closeoutRange").textContent=fmtShort(ws)+"–"+fmtShort(addDays(ws,6));
   renderCloseoutTotals();
   renderCloseoutGaps();
+  renderCloseoutHighlights();
   var existing=state.weekCloseouts[iso(ws)];
   document.getElementById("closeoutNote").value=existing?existing.note:"";
   /* same reasoning as openSheet()'s identical reset above - content length
@@ -3688,6 +3696,127 @@ document.getElementById("reviewTable").addEventListener("click",function(ev){
   var th=ev.target.closest(".review-closeable"); if(!th) return;
   openCloseout(parseIso(th.dataset.week));
 });
+
+/* ---------------- daily close-out: the day sheet, header buttons, hover preview ----------------
+   Clicking a day header (today or any past day; a future day is not a button) opens a sheet for
+   that ONE date: time per category (the same figures the week uses, for one date - a midnight-
+   crossing entry is already split into two entries on two dates, so each day gets its own share),
+   the unlogged time (for TODAY only the hours that have happened - dayUnloggedMinutes), and one
+   optional highlight line. Saving goes through saveDayHighlight (snapshot first, hard rule 5).
+   The engine and its sync design are documented above, at flattenDayHighlights.
+
+   Nothing here depends on hover: the header is a real <button>, the sheet shows the full text, and
+   the hover preview below is attached only when the browser reports hover capability. The sheet
+   does NOT re-render its own content while open (a background sync landing mid-edit must not
+   replace what is being typed); its totals are as of when it was opened. */
+var dayScrimEl=document.getElementById("dayScrim"), dayOpenDate=null;
+function dayLabel(dateStr){
+  var d=parseIso(dateStr);
+  return DAYNAMES[(d.getDay()+6)%7]+" "+d.getDate()+" "+MONTHS[d.getMonth()];
+}
+function renderDayTotals(dateStr){
+  var r=dayTotals(dateStr), max=r.none;
+  state.categories.forEach(function(c){ max=Math.max(max,r.t[c.id]||0); });
+  var rows=state.categories.slice().sort(function(a,b){ return (r.t[b.id]||0)-(r.t[a.id]||0); }).map(function(c){
+    var m=r.t[c.id]||0; if(!m) return "";
+    return '<div class="tot"><div class="tot-top"><span class="dot" style="background:'+c.color+'"></span>'+escapeHtml(c.name)+
+      '<span class="h">'+dur(m)+'</span></div><div class="tot-bar"><i style="width:'+(max?Math.round(m/max*100):0)+"%;background:"+c.color+'"></i></div></div>';
+  }).join("");
+  if(r.none) rows+='<div class="tot"><div class="tot-top"><span class="dot" style="background:var(--none)"></span>No category'+
+    '<span class="h">'+dur(r.none)+'</span></div><div class="tot-bar"><i style="width:'+(max?Math.round(r.none/max*100):0)+'%;background:var(--none)"></i></div></div>';
+  document.getElementById("dayTotals").innerHTML=rows||'<p class="emptyhint">Nothing logged this day.</p>';
+  var isToday=dateStr===iso(new Date()), un=dayUnloggedMinutes(dateStr), elapsed=dayElapsedMinutes(dateStr);
+  document.getElementById("dayUnlogged").innerHTML='<div class="tot"><div class="tot-top"><span class="dot" style="background:transparent;border:1px solid var(--muted)"></span>'+
+    (isToday?"Unlogged so far":"Unlogged")+'<span class="h">'+dur(un)+'</span></div>'+
+    '<div class="tot-bar"><i class="void" style="width:'+(elapsed?Math.round(un/elapsed*100):0)+'%"></i></div></div>';
+}
+function openDay(dateStr){
+  if(!dayIsOpenable(dateStr)) return false;
+  hideToast();
+  dayOpenDate=dateStr;
+  document.getElementById("dayTitle").textContent=dayLabel(dateStr);
+  renderDayTotals(dateStr);
+  document.getElementById("dayNote").value=getDayHighlight(dateStr)||"";
+  dayScrimEl.querySelector(".sheet").scrollTop=0;
+  dayScrimEl.classList.add("on");
+  lockBodyScroll();
+  return true;
+}
+function closeDay(){
+  if(!dayScrimEl.classList.contains("on")) return;
+  dayScrimEl.classList.remove("on");
+  dayOpenDate=null;
+  unlockBodyScroll();
+}
+wireOutsideClose(dayScrimEl,closeDay);
+wireScrimTouchBlock(dayScrimEl);
+document.getElementById("dayCancel").addEventListener("click",closeDay);
+function saveDay(){
+  if(!dayOpenDate) return;
+  var date=dayOpenDate, had=getDayHighlight(date)!==null;
+  var changed=saveDayHighlight(date,document.getElementById("dayNote").value);
+  closeDay();
+  render();
+  if(!changed) return;
+  /* never say Saved when the browser refused the write (hard rule 10); the status line and the
+     red box were already set by persist() -> noteLocalSave() */
+  if(localSaveFailed){ showToast("Not saved on this device — storage is full",false); return; }
+  showToast((getDayHighlight(date)===null?"Cleared highlight for ":(had?"Updated highlight for ":"Saved highlight for "))+dayLabel(date),true);
+}
+document.getElementById("daySave").addEventListener("click",saveDay);
+document.getElementById("dayNote").addEventListener("keydown",function(ev){
+  if(ev.key==="Enter"){ ev.preventDefault(); saveDay(); }
+});
+document.addEventListener("keydown",function(ev){
+  if(ev.key==="Escape"&&dayScrimEl.classList.contains("on")) closeDay();
+});
+document.getElementById("dayhead").addEventListener("click",function(ev){
+  var b=ev.target.closest&&ev.target.closest(".daybtn");
+  if(b) openDay(b.dataset.date);
+});
+
+/* hover preview of a day's highlight. A pure convenience: attached ONLY when hoverCapable (the
+   real call below passes matchMedia("(hover: hover)").matches, the same signal as the 168-hour
+   bar's tooltip), so a phone or tablet gets nothing and loses nothing. The tooltip element lives
+   outside #dayhead (rebuilt on every render) and shows text via textContent, never markup. */
+function attachDayPreview(headEl,tipEl,hoverCapable){
+  if(!hoverCapable) return false;
+  headEl.addEventListener("mouseover",function(ev){
+    var b=ev.target.closest&&ev.target.closest(".daybtn[data-date]");
+    var text=b&&getDayHighlight(b.dataset.date);
+    if(!text){ tipEl.hidden=true; return; }
+    tipEl.textContent=text;
+    tipEl.hidden=false;
+    var r=b.getBoundingClientRect(), w=tipEl.offsetWidth||0;
+    tipEl.style.top=(r.bottom+6)+"px";
+    tipEl.style.left=Math.max(8,Math.min(r.left,(window.innerWidth||0)-w-8))+"px";
+  });
+  headEl.addEventListener("mouseout",function(){ tipEl.hidden=true; });
+  return true;
+}
+/* hoverCapable() is the real browser signal. Under TEST_MODE only, "?nohover=1" in the URL makes it
+   report false, so selftest.html can run the whole day-sheet flow as a touch device would see it
+   (a hover-capable headless browser cannot otherwise prove "nothing depends on hover"). Never read
+   outside TEST_MODE. */
+function hoverCapable(){
+  if(TEST_MODE&&location.search.indexOf("nohover=1")>-1) return false;
+  return !!(window.matchMedia&&window.matchMedia("(hover: hover)").matches);
+}
+var dayPreviewAttached=attachDayPreview(document.getElementById("dayhead"),document.getElementById("dayTip"),hoverCapable());
+
+/* the week close-out lists the days of that week that HAVE a highlight, in day order (nothing for
+   days without one; the whole section hidden when there are none). Text only, never markup. */
+function renderCloseoutHighlights(){
+  var box=document.getElementById("closeoutHighlights"), list=weekHighlights(closeoutWeek);
+  box.textContent="";
+  list.forEach(function(x){
+    var row=document.createElement("div"), b=document.createElement("b");
+    row.className="gap-row"; b.textContent=x.day;
+    row.appendChild(b); row.appendChild(document.createTextNode(x.text));
+    box.appendChild(row);
+  });
+  document.getElementById("closeoutHighlightsField").hidden=!list.length;
+}
 
 /* which day "Add entry" should default to: the focused day in day view,
    today if the displayed week is the current one, else Monday */
@@ -4040,6 +4169,12 @@ if(TEST_MODE){
     unionMinutes:unionMinutes,
     getVerdict:getVerdict,
     setVerdict:setVerdict,
+    openDay:openDay,
+    closeDay:closeDay,
+    attachDayPreview:attachDayPreview,
+    dayPreviewAttached:function(){ return dayPreviewAttached; },
+    setViewMode:function(v){ viewMode=v; },
+    getViewMode:function(){ return viewMode; },
     migrateDayHighlights:migrateDayHighlights,
     flattenDayHighlights:flattenDayHighlights,
     unflattenDayHighlights:unflattenDayHighlights,
