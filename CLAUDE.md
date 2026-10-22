@@ -3063,4 +3063,54 @@ dashboard styling.
     gate and add the snapshot; it needs its own test written first (two devices,
     the offline edit ordering above) and its own decision.
 
+## Sessions design decisions
+
+Backlog 31, branch `feature/sessions` (built overnight 2026-10-22 under written instructions; NOT merged, NOT
+deployed, never tried on a real device or against a real Drive - see `OVERNIGHT-STATUS.md` for what was run).
+A session is a named, ordered set of blocks stored as offsets from a start time. Each decision below was made
+before the build and is recorded with its reason so it is not reopened by accident.
+
+**Stage 1 - the data, its sync, save-as-session, manual apply**
+- **Shape.** `state.sessions[id] = {id, name, blocks:[{offset,duration,label,cat}], schedule, updatedAt?,
+  updatedBy?}` and `state.deletedSessions[id] = {updatedAt, updatedBy, deletedAt}`. Both keys are optional and
+  additive (`migrateSessions` on load, import and undo/redo): `hours-ledger-v2` is unchanged (rule 1).
+  Applying creates ordinary entries. No link back, no planned/confirmed state, no new entry field.
+- **The whole session is the sync unit, last write wins.** Why: a session is edited as a unit; per-block records
+  would let two devices produce an interleaved session nobody wrote. The text that loses is `console.log`ged
+  (same precedent as day highlights), not shown.
+- **blocks and schedule are flattened to canonical JSON text for sync.** Why: `mergeRecords` compares content
+  with `===` (`sameContent`), so an array or object field from two separately built states never reads as
+  equal and would always fall through to last-write-wins. As text, equal blocks are equal strings and take case
+  2 ("same content"). `mergeRecords` itself is shared and untouched. Pinned by S06 (with a control row that
+  shows the raw-array trap).
+- **Random ids, no name dedup.** Why: nothing references a session id (entries carry no back-link), so a
+  duplicate cannot silently reassign anything, unlike categories (which is why category name dedup exists and
+  hurts). The user deletes the extra one. Rejected: an id derived from the pattern - it breaks the first time
+  the user edits the session.
+- **Tombstones only for a session that exists on this device; stamps at edit time, behind the
+  `state.deletedEntries` gate.** Same rules as the day highlights, for the same reasons (hard rule 7; the
+  stamped-at-sync flaw in backlog 30).
+- **Undo of sessions is a forward edit in stage 1** (`undoSessionsAsForwardEdits`), not a whole-snapshot
+  restore: a restore brings back the old stamp (a ghost after an undone create; last-write-wins lost after an
+  undone edit - the backlog 22 class). Guarded on ownership: a session another device last wrote is theirs. A
+  snapshot taken before this feature has no `sessions` key; undoing onto it keeps the current sessions.
+- **Category remaps.** `dedupeCategoriesByName` and `doDeleteCategory` (with a target) move block categories the
+  way they move entries', and restamp a session they change. Delete without a target leaves dangling ids, as
+  for entries; apply then treats a block whose category is gone as uncategorised.
+- **Apply.** Any start date, past or future. One `snapshot()` for the whole apply = one undo step. Midnight:
+  `sessionSegments` splits exactly as `putEntry` does (a block past 24:00 moves to the next date). Overlap with
+  existing entries is ALLOWED with a preview (the app has always allowed overlap and shows it as double-booked;
+  refusing would block pre-logging a day that already has something, overwriting would destroy data). Double
+  submit: the first click takes the session id out of `sessApplyId` before doing anything and disables the
+  button; the apply is synchronous so no flag can stay stuck (rule 9).
+- **Dismissed suggestions and banner dismissals are device-local, capped, never synced.** A dismissal is a
+  preference, not data. A suggestion's identity is a cluster whose centre moves as data grows, so a synced
+  dismissal would need fuzzy matching inside a merge record, and one that wrongly suppresses a real pattern
+  would be a silent loss. (Stages 2 and 3.)
+- **Known cost, not fixed (open issue):** applying to a future date creates ordinary entries, so the current
+  week's 168-hour bar, week totals and Export week count time that has not happened as logged. By instruction:
+  no marker, no new field.
+- **Known gap, same as the day highlights:** an already-open tab running pre-feature code has no `sessions` in
+  memory; its next save rewrites the ledger without them. Connected devices recover them from Drive.
+
 Feature creep is the known failure mode of this project.

@@ -114,6 +114,7 @@
           <button class="ghost" id="linkFile">Keep a file in sync</button>
           <button class="ghost" id="save">Export a copy</button>
           <button class="ghost" id="exportWeek" title="Download the week on screen as a data file">Export week</button>
+          <button class="ghost" id="sessionsBtn" title="Save logged time as a reusable session, or apply one">Sessions</button>
           <button class="ghost" id="load">Open a copy</button>
           <button class="ghost" id="range">Show full 24h</button>
           <button class="ghost" id="print">Print</button>
@@ -227,6 +228,50 @@
     <div class="sheet-actions">
       <button class="solid" id="daySave">Save</button>
       <button class="ghost" id="dayCancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="scrim" id="sessScrim">
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sessTitle">
+    <h2 id="sessTitle">Sessions</h2>
+    <div id="sessList"></div>
+    <div id="sessApply" hidden>
+      <h3 id="sessApplyTitle"></h3>
+      <div class="field">
+        <label for="sessApplyDate">Date</label>
+        <input type="date" id="sessApplyDate">
+      </div>
+      <div class="field">
+        <label for="sessApplyTime">Start time</label>
+        <input type="time" id="sessApplyTime">
+      </div>
+      <p class="hint" id="sessApplyPreview"></p>
+      <div class="sheet-actions">
+        <button class="solid" id="sessApplyGo">Apply</button>
+        <button class="ghost" id="sessApplyCancel">Cancel</button>
+      </div>
+    </div>
+    <h3>Save logged time as a session</h3>
+    <div class="field">
+      <label for="sessSaveDate">Day</label>
+      <input type="date" id="sessSaveDate">
+    </div>
+    <div class="field">
+      <label for="sessSaveFrom">From</label>
+      <input type="time" id="sessSaveFrom">
+    </div>
+    <div class="field">
+      <label for="sessSaveTo">To</label>
+      <input type="time" id="sessSaveTo">
+    </div>
+    <div class="field">
+      <label for="sessSaveName">Name</label>
+      <input type="text" id="sessSaveName" maxlength="60" autocomplete="off" placeholder="e.g. Muay Thai morning">
+    </div>
+    <div class="sheet-actions">
+      <button class="solid" id="sessSaveGo">Save session</button>
+      <button class="ghost" id="sessClose">Close</button>
     </div>
   </div>
 </div>

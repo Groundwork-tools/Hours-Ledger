@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=853;
+var EXPECTED_MIN_ROWS=985;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -3007,7 +3007,8 @@ function runAsyncTests(H,d){
     .then(function(r){ return runQuotaProbeTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runExportWeekTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runDayHighlightTests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runDayCloseoutUITests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runDayCloseoutUITests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runSessionTests().then(function(more){ return r.concat(more); }); });
 }
 
 /* ---------------------------------------------------------------------
@@ -3709,6 +3710,634 @@ function runDayHighlightTests(){
       });
     }))
 
+    .then(function(){ return results; });
+}
+
+/* ---------------------------------------------------------------------
+   Sessions (backlog 31) - stage 1: the data, its sync, save-as-session,
+   manual apply, undo, the category remaps. Written BEFORE the code and
+   watched to fail against the old app.js (OVERNIGHT-STATUS.md has the log).
+
+   A session = a named, ordered set of blocks stored as offsets from a start
+   time: state.sessions[id] = {id, name, blocks:[{offset,duration,label,cat}],
+   schedule, updatedAt?, updatedBy?}; deletions in state.deletedSessions.
+   Synced per record, the whole session as one unit (last write wins).
+
+   Same conventions as runDayHighlightTests: every row carries what it
+   observed, each scenario gets its own clean sandbox, "device B" is the real
+   syncEngine() with its own device id against the same fake Drive blob, and a
+   scenario that throws (e.g. a hook that does not exist yet) becomes ONE
+   failing row naming the exception. Stamps a test depends on being old are
+   written explicitly (the 5s window in mergeRecords masks a wrongly written
+   tombstone otherwise). Each row's name starts with a tag (S01...) so
+   OVERNIGHT-STATUS.md can say which mutation flips which row. */
+function runSessionTests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); }
+  function J(x){ return JSON.stringify(x); }
+  var D="2026-03-02",FUT="2031-06-15";
+  var OLD="2026-04-20T09:00:00.000Z",MID="2026-04-20T09:30:00.000Z",NEW="2026-04-20T10:00:00.000Z";
+  function settle(h){
+    return delay(250).then(function(){ return waitFor(function(){ return !h.isDriveSyncInFlight(); },4000); }).then(function(){ return delay(50); });
+  }
+  function scenario(tag,fn){
+    return function(){
+      return Promise.resolve().then(fn).catch(function(e){
+        check(tag+": scenario threw before finishing",false,String(e&&e.message||e));
+      });
+    };
+  }
+  function connectedSandbox(){
+    return freshSandbox(true).then(function(f){
+      f.d.getElementById("connectDrive").click();
+      return waitFor(function(){ return f.d.getElementById("connectDrive").textContent==="Drive: synced"; },4000).then(function(ok){
+        check("setup: fake Drive connect completed",ok);
+        return f;
+      });
+    });
+  }
+  function newB(h){ return JSON.parse(JSON.stringify(h.getState())); }
+  function syncB(h,stateB){
+    var eng=h.syncEngine(stateB,h.fakeDriveRead(),"dev-B");
+    h.fakeDriveWrite(eng.toPush);
+    return eng.newLocalState;
+  }
+  function blk(offset,duration,label,cat){ return {offset:offset,duration:duration,label:label,cat:cat===undefined?null:cat}; }
+  function baseState(h){
+    var s=JSON.parse(JSON.stringify(h.getState()));
+    s.sessions={}; s.deletedSessions={};
+    s.deletedEntries=s.deletedEntries||{}; s.deletedCategories=s.deletedCategories||{};
+    return s;
+  }
+  function liveS(s,id,name,blocks,at,by){ s.sessions[id]={id:id,name:name,blocks:blocks,schedule:null,updatedAt:at,updatedBy:by}; }
+  function deadS(s,id,at,by){ s.deletedSessions[id]={updatedAt:at,updatedBy:by,deletedAt:at}; }
+  function srec(id,name,blocks,at,by){
+    return {id:id,name:name,blocks:J(blocks),schedule:"null",updatedAt:at,updatedBy:by,deleted:false,deletedAt:null};
+  }
+  function stomb(id,at,by){ return {id:id,name:null,blocks:null,schedule:null,updatedAt:at,updatedBy:by,deleted:true,deletedAt:at}; }
+  function file(arr,omitKey){
+    var f={categories:[],entries:[],verdicts:[],closeouts:[],dayHighlights:[]};
+    if(!omitKey) f.sessions=arr;
+    return f;
+  }
+  function names(s){ return Object.keys(s.sessions||{}).map(function(k){ return s.sessions[k].name; }).sort().join("|"); }
+  function remoteSess(h,id){
+    var r=h.fakeDriveRead();
+    return r&&r.sessions&&r.sessions.filter(function(x){ return x.id===id; })[0];
+  }
+  function dayEntries(h,date){
+    return (h.getState().entries[date]||[]).slice().sort(function(a,b){ return a.start-b.start||a.end-b.end; });
+  }
+  function ranges(h,date){ return dayEntries(h,date).map(function(e){ return e.start+"-"+e.end; }).join(","); }
+  function totalMinutes(h,date){ return dayEntries(h,date).reduce(function(a,e){ return a+(e.end-e.start); },0); }
+  function spyLog(f){
+    var c=f.el.contentWindow.console,orig=c.log,lines=[];
+    c.log=function(){ lines.push([].join.call(arguments," ")); };
+    return {lines:lines,restore:function(){ c.log=orig; }};
+  }
+
+  return Promise.resolve()
+
+    /* ---- S01: old data reads safely (additive, hard rule 1) and malformed leaves are dropped */
+    .then(scenario("S01",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,st=h.getState();
+        delete st.sessions; delete st.deletedSessions;
+        h.migrateSessions(st);
+        check("S01 a state with no sessions key gets an empty map",st.sessions&&typeof st.sessions==="object"&&Object.keys(st.sessions).length===0,J(st.sessions));
+        var old={version:2,settings:{startHour:6,endHour:24},categories:[{id:"c1",name:"X",color:"#27864F"}],entries:{},weeklyVerdicts:{},weekCloseouts:{}};
+        h.importBackupJson(J(old));
+        check("S01 importing a backup written before this feature leaves an empty map and the ledger intact",
+          J(h.getState().sessions)==="{}"&&h.getState().categories[0].id==="c1",J(h.getState().sessions));
+        var s3=h.getState();
+        s3.sessions={
+          a:"just a string",
+          b:{id:"b",name:"no blocks",blocks:[]},
+          c:{id:"c",name:"good",blocks:[blk(0,30,"x"),blk(-5,10,"neg"),blk(0,0,"zero"),{offset:1.5,duration:10,label:"frac",cat:null}],schedule:null},
+          d:{id:"d",name:5,blocks:[blk(0,30,"x")]}
+        };
+        h.migrateSessions(s3);
+        check("S01 malformed sessions are dropped (a bare string, no blocks, a non-string name); a good one stays",Object.keys(s3.sessions).join(",")==="c",J(Object.keys(s3.sessions)));
+        check("S01 ...and inside a good session only the invalid blocks go (negative offset, zero duration, fractional offset)",
+          s3.sessions.c&&s3.sessions.c.blocks.length===1&&s3.sessions.c.blocks[0].label==="x",J(s3.sessions.c&&s3.sessions.c.blocks));
+      });
+    }))
+    .then(scenario("S01b",function(){
+      /* the LOAD path: a ledger saved before this feature, then a ledger with a malformed stored session */
+      return freshSandbox(true).then(function(f){
+        var old={version:2,settings:{startHour:6,endHour:24},categories:[{id:"c1",name:"X",color:"#27864F"}],entries:{},weeklyVerdicts:{},weekCloseouts:{}};
+        f.el.parentNode.removeChild(f.el);
+        localStorage.setItem("hours-ledger-selftest-v2",J(old));
+        return freshSandbox();
+      }).then(function(f){
+        check("S01b loading a stored ledger that predates this feature gives an empty sessions map (ledger intact)",
+          J(f.H.getState().sessions)==="{}"&&f.H.getState().categories[0].id==="c1",J(f.H.getState().sessions));
+        var bad={version:2,settings:{startHour:6,endHour:24},categories:[{id:"c1",name:"X",color:"#27864F"}],entries:{},weeklyVerdicts:{},weekCloseouts:{},
+          sessions:{x:"nope",y:{id:"y",name:"fine",blocks:[blk(0,15,"a")],schedule:null}}};
+        f.el.parentNode.removeChild(f.el);
+        localStorage.setItem("hours-ledger-selftest-v2",J(bad));
+        return freshSandbox();
+      }).then(function(f){
+        check("S01b ...and loading a ledger with a malformed stored session drops only that one",Object.keys(f.H.getState().sessions).join(",")==="y",J(f.H.getState().sessions));
+      });
+    }))
+
+    /* ---- S02: create / validate / stamp */
+    .then(scenario("S02",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        var r=h.setSession("s1","  Muay   Thai  ",[blk(30,90,"Muay Thai","seed-training"),blk(0,10,"Get ready","seed-admin")],null);
+        check("S02 the name is trimmed and inner whitespace collapsed",r&&r.name==="Muay Thai",r&&r.name);
+        check("S02 blocks are stored ordered by offset",r&&r.blocks[0].label==="Get ready"&&r.blocks[1].label==="Muay Thai",J(r&&r.blocks));
+        check("S02 a block holds exactly offset,duration,label,cat in that key order (the canonical shape sync compares)",
+          r&&Object.keys(r.blocks[0]).join()==="offset,duration,label,cat",J(r&&Object.keys(r.blocks[0])));
+        check("S02 a never-connected device stores no sync fields and no tombstone container",
+          r&&r.updatedAt===undefined&&r.updatedBy===undefined&&h.getState().deletedSessions===undefined,J(r)+" "+J(h.getState().deletedSessions));
+        var long=new Array(90).join("x");
+        var r2=h.setSession("s2",long,[blk(0,5,"a")],null);
+        check("S02 a long name is cut to 60 characters",r2&&r2.name.length===60,r2&&r2.name.length);
+        check("S02 an empty name is refused (nothing stored)",h.setSession("s3","   ",[blk(0,5,"a")],null)===null&&!h.getState().sessions.s3);
+        check("S02 no blocks is refused",h.setSession("s4","n",[],null)===null&&!h.getState().sessions.s4);
+        var many=[]; for(var i=0;i<41;i++) many.push(blk(i*10,5,"b"+i));
+        check("S02 41 blocks is refused (40 is the cap)",h.setSession("s5","n",many,null)===null&&!h.getState().sessions.s5);
+        var r6=h.setSession("s6","two",[blk(0,10,"a")],null), r7=h.setSession("s7","two",[blk(0,10,"a")],null);
+        check("S02 two sessions with the SAME name stay two records (no name dedup, approved)",
+          r6&&r7&&Object.keys(h.getState().sessions).filter(function(k){ return h.getState().sessions[k].name==="two"; }).length===2);
+      });
+    }))
+    .then(scenario("S02b",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,dev=h.getDeviceId();
+        var r=h.setSession("s1","Stamped",[blk(0,10,"a")],null);
+        check("S02b on a connected device a new session is stamped at EDIT time with this device",
+          r&&Date.parse(r.updatedAt)>Date.now()-5000&&r.updatedBy===dev,J(r));
+        h.removeSession("s1");
+        var t=h.getState().deletedSessions&&h.getState().deletedSessions.s1;
+        check("S02b deleting it writes a tombstone from this device",t&&t.updatedBy===dev&&!!t.deletedAt&&!h.getState().sessions.s1,J(t));
+        check("S02b removing a session that does not exist writes NO tombstone (a tombstone for something never seen could delete another device's record)",
+          h.removeSession("never")===false&&!(h.getState().deletedSessions||{}).never);
+        h.setSession("s1","Back",[blk(0,10,"a")],null);
+        check("S02b creating a record removes its own tombstone (a live record and its tombstone never coexist)",
+          !(h.getState().deletedSessions||{}).s1&&!!h.getState().sessions.s1);
+      });
+    }))
+
+    /* ---- S03: save as session from a chosen day and time range */
+    .then(scenario("S03",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        h.putEntry(D,"Get ready","seed-admin",360,370,null);
+        h.putEntry(D,"Bike to gym","seed-training",370,380,null);
+        h.putEntry(D,"Muay Thai","seed-training",380,480,null);
+        h.putEntry(D,"Breakfast","seed-people",480,510,null);
+        var depth0=h.undoDepth();
+        var id=h.saveSessionFromRange(D,365,480,"Gym");
+        var s=h.getState().sessions[id];
+        check("S03 saving returns an id and creates the session",!!id&&!!s&&s.name==="Gym",String(id));
+        check("S03 offsets are measured from the first block's (clipped) start",
+          s&&J(s.blocks.map(function(b){ return [b.offset,b.duration,b.label]; }))===J([[0,5,"Get ready"],[5,10,"Bike to gym"],[15,100,"Muay Thai"]]),J(s&&s.blocks));
+        check("S03 an entry that starts exactly at the range end is NOT included (the range is [from,to))",s&&s.blocks.every(function(b){ return b.label!=="Breakfast"; }));
+        check("S03 categories are carried per block",s&&s.blocks[1].cat==="seed-training"&&s.blocks[0].cat==="seed-admin");
+        check("S03 saving is exactly one undo step",h.undoDepth()===depth0+1,h.undoDepth()+" vs "+depth0);
+        check("S03 saving does not touch the logged entries",ranges(h,D)==="360-370,370-380,380-480,480-510",ranges(h,D));
+        var d1=h.undoDepth();
+        check("S03 an empty range saves nothing and takes no snapshot",h.saveSessionFromRange("2026-03-03",0,1440,"None")===null&&h.undoDepth()===d1&&Object.keys(h.getState().sessions).length===1);
+        check("S03 an empty name saves nothing and takes no snapshot",h.saveSessionFromRange(D,360,480," ")===null&&h.undoDepth()===d1);
+        check("S03 from >= to saves nothing",h.saveSessionFromRange(D,480,360,"Bad")===null&&h.saveSessionFromRange(D,400,400,"Bad")===null&&h.undoDepth()===d1);
+        check("S03 a bad date saves nothing",h.saveSessionFromRange("2026-13-40",0,1440,"Bad")===null&&h.undoDepth()===d1);
+        h.undo();
+        check("S03 undo removes the saved session",!h.getState().sessions[id],names(h.getState()));
+      });
+    }))
+
+    /* ---- S04: apply - segments, midnight, any date, one undo step */
+    .then(scenario("S04",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        h.setSession("m","Morning",[blk(0,30,"Stretch","seed-training"),blk(30,60,"Read","seed-studies")],null);
+        var before=J(h.getState());
+        var segs=h.sessionSegments(h.getState().sessions.m,FUT,540);
+        check("S04 sessionSegments is pure: it does not change state",J(h.getState())===before);
+        check("S04 segments are the blocks shifted to the start time",J(segs.map(function(g){ return [g.date,g.start,g.end,g.label]; }))===J([[FUT,540,570,"Stretch"],[FUT,570,630,"Read"]]),J(segs));
+        var d0=h.undoDepth();
+        var n=h.applySession("m",FUT,540);
+        check("S04 apply to a FUTURE date creates ordinary entries there",n===2&&ranges(h,FUT)==="540-570,570-630",ranges(h,FUT)+" n="+n);
+        check("S04 ...with the block's label and category",dayEntries(h,FUT)[0].label==="Stretch"&&dayEntries(h,FUT)[0].cat==="seed-training");
+        check("S04 ...each with its own fresh id",dayEntries(h,FUT)[0].id!==dayEntries(h,FUT)[1].id&&!!dayEntries(h,FUT)[0].id);
+        check("S04 apply is exactly one snapshot (one undo step for the whole session)",h.undoDepth()===d0+1,h.undoDepth()+" vs "+d0);
+        h.applySession("m","2020-02-03",600);
+        check("S04 apply to a PAST date works the same way",ranges(h,"2020-02-03")==="600-630,630-690",ranges(h,"2020-02-03"));
+        h.undo();
+        check("S04 one undo removes everything that one apply created (and only that)",ranges(h,"2020-02-03")===""&&ranges(h,FUT)==="540-570,570-630",ranges(h,"2020-02-03")+" | "+ranges(h,FUT));
+        h.redo();
+        check("S04 redo puts the whole apply back",ranges(h,"2020-02-03")==="600-630,630-690",ranges(h,"2020-02-03"));
+        var d1=h.undoDepth();
+        check("S04 an unknown session id applies nothing and takes no snapshot",h.applySession("nope",FUT,540)===null&&h.undoDepth()===d1);
+        check("S04 a bad date applies nothing",h.applySession("m","2026-13-45",540)===null&&h.applySession("m","tomorrow",540)===null&&h.undoDepth()===d1);
+        check("S04 a bad start applies nothing (1440, negative, fractional)",h.applySession("m",FUT,1440)===null&&h.applySession("m",FUT,-1)===null&&h.applySession("m",FUT,1.5)===null&&h.undoDepth()===d1);
+      });
+    }))
+    .then(scenario("S04b",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,D1="2026-05-10",D2="2026-05-11";
+        h.setSession("night","Night",[blk(0,180,"Late work","seed-work")],null);
+        h.applySession("night",D1,1320);
+        check("S04b a block that crosses midnight is split across the two dates like any entry (22:00 + 3h)",
+          ranges(h,D1)==="1320-1440"&&ranges(h,D2)==="0-60",ranges(h,D1)+" | "+ranges(h,D2));
+        check("S04b ...and no minute is lost or invented in the split",totalMinutes(h,D1)+totalMinutes(h,D2)===180,totalMinutes(h,D1)+"+"+totalMinutes(h,D2));
+        h.setSession("ends","Ends at 24",[blk(0,120,"Wind down","seed-people")],null);
+        h.applySession("ends","2026-06-10",1320);
+        check("S04b a block ending exactly at 24:00 stays on its day and writes nothing on the next",ranges(h,"2026-06-10")==="1320-1440"&&ranges(h,"2026-06-11")==="",ranges(h,"2026-06-10")+" | "+ranges(h,"2026-06-11"));
+        h.setSession("next","Next day block",[blk(0,10,"First","seed-people"),blk(90,30,"Second day","seed-people")],null);
+        h.applySession("next","2026-07-04",1380);
+        check("S04b a block whose offset puts it entirely after midnight lands on the next date",ranges(h,"2026-07-04")==="1380-1390"&&ranges(h,"2026-07-05")==="30-60",ranges(h,"2026-07-04")+" | "+ranges(h,"2026-07-05"));
+        h.setSession("eom","Month end",[blk(0,60,"Late","seed-people")],null);
+        h.applySession("eom","2026-01-31",1410);
+        check("S04b crossing midnight on the last day of a month goes to the 1st of the next",ranges(h,"2026-01-31")==="1410-1440"&&ranges(h,"2026-02-01")==="0-30",ranges(h,"2026-01-31")+" | "+ranges(h,"2026-02-01"));
+        h.setSession("cat","Cat check",[blk(0,10,"Known","seed-work"),blk(10,10,"Gone","deleted-category-id"),blk(20,10,"None",null)],null);
+        h.applySession("cat","2026-08-08",600);
+        var es=dayEntries(h,"2026-08-08");
+        check("S04b a category that still exists is kept; a missing or null one becomes uncategorised",es[0].cat==="seed-work"&&es[1].cat===null&&es[2].cat===null,J(es.map(function(e){ return e.cat; })));
+      });
+    }))
+
+    /* ---- S05: overlap is allowed, previewed, and counted as double-booked */
+    .then(scenario("S05",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,date="2026-09-14";
+        h.putEntry(date,"Existing A","seed-work",555,585,null);
+        h.putEntry(date,"Existing B","seed-people",580,600,null);
+        h.putEntry(date,"Elsewhere","seed-people",700,720,null);
+        h.setSession("hr","Hour",[blk(0,60,"New block","seed-training")],null);
+        var before=J(h.getState());
+        var ov=h.sessionOverlap(h.getState().sessions.hr,date,540);
+        check("S05 the preview counts the existing entries it overlaps (2) and the minutes in the union of overlap (555-600 = 45)",ov&&ov.entries===2&&ov.minutes===45,J(ov));
+        check("S05 the preview does not change state",J(h.getState())===before);
+        var none=h.sessionOverlap(h.getState().sessions.hr,date,800);
+        check("S05 no overlap reports zero entries and zero minutes",none&&none.entries===0&&none.minutes===0,J(none));
+        var touch=h.sessionOverlap(h.getState().sessions.hr,date,600);
+        check("S05 a block that merely touches an entry's edge is not an overlap (600-660 vs 580-600)",touch&&touch.entries===0,J(touch));
+        h.setSession("late","Late",[blk(0,120,"Spans midnight","seed-work")],null);
+        h.putEntry("2026-09-15","Next morning","seed-people",0,30,null);
+        var ov2=h.sessionOverlap(h.getState().sessions.late,date,1380);
+        check("S05 the preview sees overlap on the NEXT date for a block that crosses midnight",ov2&&ov2.entries===1&&ov2.minutes===30,J(ov2));
+        h.applySession("hr",date,540);
+        check("S05 apply onto an overlap keeps EVERY existing entry and adds the new one (no overwrite, no refusal)",dayEntries(h,date).length===4,ranges(h,date));
+        var mon=h.mondayOf(h.parseIso(date)), t=h.weekTotals(mon);
+        var sum=0; for(var i=0;i<7;i++){ sum+=totalMinutes(h,h.iso(h.addDays(mon,i))); }
+        check("S05 the week then shows the double-booking: sum of entry minutes exceeds logged (union) minutes",sum>t.logged,"sum="+sum+" logged="+t.logged);
+      });
+    }))
+
+    /* ---- S06: the pure sync engine */
+    .then(scenario("S06",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,b1=[blk(0,10,"a","seed-work"),blk(10,20,"b",null)];
+        var A=baseState(h); liveS(A,"s1","One",b1,OLD,"dev-A");
+        var flat=h.flattenSessions(A);
+        check("S06 flatten emits one flat record per live session with blocks and schedule as canonical JSON TEXT",
+          flat.length===1&&typeof flat[0].blocks==="string"&&typeof flat[0].schedule==="string"&&flat[0].blocks===J(b1),J(flat));
+        var back=h.unflattenSessions(flat);
+        check("S06 flatten then unflatten round-trips the session exactly",J(back.sessions.s1.blocks)===J(b1)&&back.sessions.s1.name==="One"&&back.sessions.s1.updatedAt===OLD,J(back));
+        /* the pin the brief asks for: equal blocks arrays count as same content */
+        var B=baseState(h); liveS(B,"s1","One",JSON.parse(J(b1)),NEW,"dev-B");
+        var merged=h.mergeRecords(h.flattenSessions(A),h.flattenSessions(B),h.getSessionFields(),"dev-A");
+        check("S06 PIN: equal blocks arrays from two separately built states count as SAME content (case 2 keeps local: stamp stays OLD)",
+          merged.length===1&&merged[0].updatedAt===OLD,J(merged));
+        var rawL=[{id:"x",blocks:[1,2],updatedAt:OLD,updatedBy:"dev-A",deleted:false}], rawR=[{id:"x",blocks:[1,2],updatedAt:NEW,updatedBy:"dev-B",deleted:false}];
+        var rawM=h.mergeRecords(rawL,rawR,["blocks","deleted","deletedAt"],"dev-A");
+        check("S06 CONTROL (passes on old code too): mergeRecords compares with ===, so RAW equal arrays read as different and the newer copy wins - which is why blocks are flattened to text",
+          rawM[0].updatedAt===NEW,J(rawM));
+        var C=baseState(h); liveS(C,"s1","One",[blk(0,10,"a","seed-work"),blk(10,25,"b",null)],NEW,"dev-B");
+        var mergedDiff=h.mergeRecords(h.flattenSessions(A),h.flattenSessions(C),h.getSessionFields(),"dev-A");
+        check("S06 blocks that genuinely differ are a conflict: last write wins (the NEW copy)",mergedDiff[0].updatedAt===NEW&&mergedDiff[0].blocks.indexOf("\"duration\":25")>=0,J(mergedDiff));
+        var A2=baseState(h); liveS(A2,"s1","One",b1,OLD,"dev-A"); A2.sessions.s1.schedule={weekdays:[4],start:370,since:"2026-03-01"};
+        var B2=baseState(h); liveS(B2,"s1","One",b1,NEW,"dev-B");
+        var mSched=h.mergeRecords(h.flattenSessions(A2),h.flattenSessions(B2),h.getSessionFields(),"dev-A");
+        check("S06 a different schedule is a different record content (the schedule is in the whitelist)",mSched[0].updatedAt===NEW,J(mSched));
+        var stray=h.flattenSessions(A)[0], strayR=Object.assign({},stray,{updatedAt:NEW,updatedBy:"dev-B",foreign:"x"});
+        var mStray=h.mergeRecords([stray],[strayR],h.getSessionFields(),"dev-A");
+        check("S06 a field outside the whitelist (and the stamps) never makes two records differ",mStray[0].updatedAt===OLD,J(mStray));
+      });
+    }))
+    .then(scenario("S06b",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,bl=[blk(0,30,"x")];
+        var A=baseState(h); liveS(A,"onlyA","Only on A",bl,OLD,"dev-A");
+        var eng=h.syncEngine(A,file([srec("onlyR","Only on remote",bl,OLD,"dev-B")]),"dev-A");
+        check("S06b a session present on one side only is kept (both sides): local one survives",!!eng.newLocalState.sessions.onlyA,names(eng.newLocalState));
+        check("S06b ...and the remote-only one arrives locally",!!eng.newLocalState.sessions.onlyR,names(eng.newLocalState));
+        check("S06b ...and BOTH are in what gets pushed",eng.toPush.sessions.length===2,eng.toPush.sessions.length);
+        var eng2=h.syncEngine(A,file([],true),"dev-A");
+        check("S06b a remote file from an older device with NO sessions key does not delete local sessions (absence is not a deletion, rule 7)",
+          !!eng2.newLocalState.sessions.onlyA&&eng2.toPush.sessions.length===1,names(eng2.newLocalState)+" pushed="+eng2.toPush.sessions.length);
+        var L=baseState(h); liveS(L,"s1","Local name",bl,MID,"dev-A");
+        var spy=spyLog(f);
+        var eng3=h.syncEngine(L,file([srec("s1","Remote name",bl,NEW,"dev-B")]),"dev-A");
+        spy.restore();
+        check("S06b both edited: last write wins (remote is newer, its name survives)",eng3.newLocalState.sessions.s1.name==="Remote name",eng3.newLocalState.sessions.s1.name);
+        check("S06b ...and the name that lost is written to the console, not lost silently",spy.lines.some(function(l){ return l.indexOf("Local name")>=0; }),J(spy.lines));
+        var spy2=spyLog(f);
+        var L2=baseState(h); liveS(L2,"s1","Mine",bl,NEW,"dev-A");
+        h.syncEngine(L2,file([srec("s1","Mine, older echo",bl,OLD,"dev-A")]),"dev-A");
+        spy2.restore();
+        check("S06b my own stale echo coming back from Drive is NOT logged as another device's work",!spy2.lines.some(function(l){ return l.indexOf("superseded")>=0; }),J(spy2.lines));
+        var E1=baseState(h); liveS(E1,"s1","Edited",bl,NEW,"dev-A");
+        var eng4=h.syncEngine(E1,file([stomb("s1",OLD,"dev-B")]),"dev-A");
+        check("S06b a live edit NEWER than another device's tombstone beats the tombstone",!!eng4.newLocalState.sessions.s1,names(eng4.newLocalState));
+        var E2=baseState(h); deadS(E2,"s1",NEW,"dev-A");
+        var eng5=h.syncEngine(E2,file([srec("s1","Old live",bl,OLD,"dev-B")]),"dev-A");
+        check("S06b a tombstone NEWER than another device's live copy deletes it (and the tombstone is pushed)",
+          !eng5.newLocalState.sessions.s1&&!!eng5.newLocalState.deletedSessions.s1&&eng5.toPush.sessions.some(function(r){ return r.id==="s1"&&r.deleted; }),names(eng5.newLocalState));
+        var recent=new Date().toISOString();
+        var E3=baseState(h); deadS(E3,"s1",recent,"dev-A");
+        var eng6=h.syncEngine(E3,file([srec("s1","Live a moment ago",bl,new Date(Date.now()+1000).toISOString(),"dev-B")]),"dev-A");
+        check("S06b CONTROL (shared mergeRecords): inside the 5s window a live copy beats a tombstone - never delete on a guess",!!eng6.newLocalState.sessions.s1,names(eng6.newLocalState));
+        var G=baseState(h); liveS(G,"s1","Both",bl,OLD,"dev-A"); deadS(G,"s1",NEW,"dev-A");
+        var flatG=h.flattenSessions(G).filter(function(r){ return r.id==="s1"; });
+        check("S06b a session found in BOTH containers flattens to ONE record (the backlog-18 collision, closed here too); the strictly newer tombstone wins",
+          flatG.length===1&&flatG[0].deleted===true,J(flatG));
+        var G2=baseState(h); liveS(G2,"s1","Unstamped live",bl,undefined,undefined); delete G2.sessions.s1.updatedAt; delete G2.sessions.s1.updatedBy; deadS(G2,"s1",NEW,"dev-A");
+        var flatG2=h.flattenSessions(G2).filter(function(r){ return r.id==="s1"; });
+        check("S06b ...but an UNSTAMPED live record is kept over a tombstone (keep live on a guess)",flatG2.length===1&&flatG2[0].deleted===false,J(flatG2));
+        var badRemote=file([{id:"z",name:"Broken",blocks:"{not json",schedule:"null",updatedAt:NEW,updatedBy:"dev-B",deleted:false,deletedAt:null}]);
+        var spy3=spyLog(f), threw=null, eng7=null;
+        try{ eng7=h.syncEngine(baseState(h),badRemote,"dev-A"); }catch(e){ threw=e; }
+        spy3.restore();
+        check("S06b a malformed synced session does not throw out of the engine; it is skipped locally and kept in what is pushed",
+          !threw&&eng7&&!eng7.newLocalState.sessions.z&&eng7.toPush.sessions.some(function(r){ return r.id==="z"; }),String(threw)+" "+J(eng7&&Object.keys(eng7.newLocalState.sessions)));
+      });
+    }))
+
+    /* ---- S07: end to end through the fake Drive, both push sites */
+    .then(scenario("S07",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,blank=newB(h),stateB;
+        h.putEntry(D,"Block","seed-work",540,600,null);
+        var id=h.saveSessionFromRange(D,540,600,"Synced one");
+        return settle(h).then(function(){
+          var r=remoteSess(h,id);
+          check("S07 runDriveSync (the ongoing push site) carries the new session to Drive",r&&r.name==="Synced one"&&!r.deleted,J(r));
+          /* back-date the original stamp (state and Drive): B's edit and A's later delete must be more than the 5s
+             ambiguity window apart, or mergeRecords keeps the live copy by design and masks what is being tested */
+          var old=new Date(Date.now()-600000).toISOString();
+          h.getState().sessions[id].updatedAt=old;
+          var rf=h.fakeDriveRead(); rf.sessions.forEach(function(x){ if(x.id===id) x.updatedAt=old; }); h.fakeDriveWrite(rf);
+          stateB=syncB(h,blank);
+          check("S07 device B pulls it",stateB.sessions[id]&&stateB.sessions[id].name==="Synced one",names(stateB));
+          return delay(8);
+        }).then(function(){
+          stateB.sessions[id]=Object.assign({},stateB.sessions[id],{name:"Renamed on B",updatedAt:new Date(Date.now()-300000).toISOString(),updatedBy:"dev-B"});
+          stateB=syncB(h,stateB);
+          h.scheduleDriveSync();
+          return settle(h);
+        }).then(function(){
+          check("S07 A pulls B's edit (last write wins)",h.getState().sessions[id].name==="Renamed on B",h.getState().sessions[id].name);
+          h.deleteSession(id);
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          check("S07 A deletes: Drive holds a tombstone and B applies the delete",!stateB.sessions[id]&&!!stateB.deletedSessions[id]&&remoteSess(h,id).deleted===true,names(stateB));
+        });
+      });
+    }))
+    .then(scenario("S07b",function(){
+      /* the OTHER push site: connectDrive's first connect. Sessions that exist before connecting must reach Drive. */
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        h.putEntry(D,"Block","seed-work",540,600,null);
+        var id=h.saveSessionFromRange(D,540,600,"Before connect");
+        f.d.getElementById("connectDrive").click();
+        return waitFor(function(){ return f.d.getElementById("connectDrive").textContent==="Drive: synced"; },4000).then(function(){
+          var r=remoteSess(h,id);
+          check("S07b connectDrive (the first-connect push site) carries a pre-existing session to Drive",r&&r.name==="Before connect",J(r));
+          check("S07b ...and the session got its sync stamp at connect",h.getState().sessions[id]&&!!h.getState().sessions[id].updatedAt&&h.getState().sessions[id].updatedBy===h.getDeviceId(),J(h.getState().sessions[id]));
+        });
+      });
+    }))
+
+    /* ---- S08: category remaps */
+    .then(scenario("S08",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,dev="dev-A";
+        var cats=[
+          {id:"keep",name:"Training",color:"#111111",updatedAt:OLD,updatedBy:dev,deleted:false,deletedAt:null},
+          {id:"dup",name:"training ",color:"#111111",updatedAt:NEW,updatedBy:dev,deleted:false,deletedAt:null},
+          {id:"other",name:"Other",color:"#222222",updatedAt:OLD,updatedBy:dev,deleted:false,deletedAt:null}];
+        var sess=[srec("sa","Uses dup",[blk(0,10,"x","dup"),blk(10,10,"y","other"),blk(20,10,"z",null)],OLD,"dev-B"),
+                  srec("sb","Untouched",[blk(0,10,"x","other")],OLD,"dev-B")];
+        var out=h.dedupeCategoriesByName(cats,[],[],dev,sess);
+        var sa=out.sessions.filter(function(r){ return r.id==="sa"; })[0], sb=out.sessions.filter(function(r){ return r.id==="sb"; })[0];
+        var sab=JSON.parse(sa.blocks);
+        check("S08 a name-collision merge remaps a block's category to the surviving id (otherwise the block orphans)",sab[0].cat==="keep",J(sab));
+        check("S08 ...leaves the other blocks (another category, no category) alone",sab[1].cat==="other"&&sab[2].cat===null,J(sab));
+        check("S08 ...and restamps the edited session from this device so the remap propagates",sa.updatedBy===dev&&Date.parse(sa.updatedAt)>Date.parse(NEW),J(sa));
+        check("S08 a session the merge did not touch keeps its stamp and text exactly",sb.updatedAt===OLD&&sb.updatedBy==="dev-B"&&sb.blocks===sess[1].blocks,J(sb));
+        var tomb=stomb("st",OLD,"dev-B");
+        var out2=h.dedupeCategoriesByName(cats,[],[],dev,[tomb]);
+        check("S08 a tombstone passes through the remap unchanged",out2.sessions[0].deleted===true&&out2.sessions[0].updatedAt===OLD);
+        var out3=h.dedupeCategoriesByName(cats.slice(0,1).concat(cats.slice(2)),[],[],dev,sess);
+        check("S08 with no duplicate categories nothing is remapped or restamped",out3.sessions.every(function(r,i){ return r.blocks===sess[i].blocks&&r.updatedAt===OLD; }));
+      });
+    }))
+    .then(scenario("S08b",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        h.setSession("s1","Gym",[blk(0,30,"a","seed-training"),blk(30,30,"b","seed-people")],null);
+        h.setSession("s2","Other",[blk(0,30,"a","seed-people")],null);
+        var c=h.catById("seed-training");
+        h.doDeleteCategory(c,"seed-work");
+        var s1=h.getState().sessions.s1;
+        check("S08b deleting a category WITH reassignment moves its blocks to the target (like its entries)",s1.blocks[0].cat==="seed-work"&&s1.blocks[1].cat==="seed-people",J(s1.blocks));
+        check("S08b ...and leaves sessions that did not use it alone",h.getState().sessions.s2.blocks[0].cat==="seed-people");
+        h.undo();
+        check("S08b ...and the whole category delete is one undo step that restores the blocks too",h.getState().sessions.s1.blocks[0].cat==="seed-training",J(h.getState().sessions.s1.blocks));
+        var c2=h.catById("seed-people");
+        h.doDeleteCategory(c2,null);
+        check("S08b deleting WITHOUT a target leaves block ids alone, exactly as it leaves entries (apply then shows them uncategorised)",
+          h.getState().sessions.s2.blocks[0].cat==="seed-people",J(h.getState().sessions.s2.blocks));
+      });
+    }))
+    .then(scenario("S08c",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,dev=h.getDeviceId();
+        h.setSession("s1","Gym",[blk(0,30,"a","seed-training")],null);
+        var stampBefore=h.getState().sessions.s1.updatedAt;
+        return delay(15).then(function(){
+          h.doDeleteCategory(h.catById("seed-training"),"seed-work");
+          var s1=h.getState().sessions.s1;
+          check("S08c on a connected device a category-delete remap restamps the session (it is a real edit that must sync)",
+            s1.blocks[0].cat==="seed-work"&&s1.updatedAt>stampBefore&&s1.updatedBy===dev,J(s1));
+        });
+      });
+    }))
+
+    /* ---- S09: undo / redo of sessions is a FORWARD edit once the device syncs */
+    .then(scenario("S09",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,blank=newB(h),stateB,id;
+        h.putEntry(D,"Block","seed-work",540,600,null);
+        id=h.saveSessionFromRange(D,540,600,"Undo me");
+        return settle(h).then(function(){
+          check("S09 setup: the session reached Drive",remoteSess(h,id)&&!remoteSess(h,id).deleted);
+          h.undo();
+          check("S09 undoing the creation removes it locally AND writes a tombstone from this device (no ghost on the next sync)",
+            !h.getState().sessions[id]&&!!(h.getState().deletedSessions||{})[id]&&h.getState().deletedSessions[id].updatedBy===h.getDeviceId(),J(h.getState().deletedSessions));
+          return settle(h);
+        }).then(function(){
+          h.scheduleDriveSync();
+          return settle(h);
+        }).then(function(){
+          check("S09 after the syncs the session has NOT come back (the ghost-entry class of bug, for sessions)",!h.getState().sessions[id],names(h.getState()));
+          check("S09 ...and Drive holds the tombstone",remoteSess(h,id)&&remoteSess(h,id).deleted===true,J(remoteSess(h,id)));
+          h.redo();
+          return settle(h);
+        }).then(function(){
+          h.scheduleDriveSync();
+          return settle(h);
+        }).then(function(){
+          check("S09 redo brings it back and it stays (live on A and on Drive)",!!h.getState().sessions[id]&&remoteSess(h,id)&&!remoteSess(h,id).deleted,J(remoteSess(h,id)));
+          var oldStamp=new Date(Date.now()-600000).toISOString();
+          h.getState().sessions[id].updatedAt=oldStamp; /* the snapshot taken by delete will carry this OLD stamp */
+          h.deleteSession(id);
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,blank);
+          check("S09 setup: B holds the delete too",!stateB.sessions[id]);
+          h.undo();
+          check("S09 undoing a DELETE revives the session on A with a FRESH stamp and removes its tombstone",
+            !!h.getState().sessions[id]&&!(h.getState().deletedSessions||{})[id]&&Date.parse(h.getState().sessions[id].updatedAt)>Date.now()-5000,J(h.getState().sessions[id]));
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          check("S09 ...and B ends with it live too (an undone delete reaches a device that already applied the delete)",!!stateB.sessions[id],names(stateB));
+        });
+      });
+    }))
+    .then(scenario("S09b",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,blank=newB(h),stateB,id;
+        h.putEntry(D,"Block","seed-work",540,600,null);
+        id=h.saveSessionFromRange(D,540,600,"Original name");
+        return settle(h).then(function(){
+          stateB=syncB(h,blank);
+          return delay(8);
+        }).then(function(){
+          h.snapshot("some unrelated action"); /* taken while A still holds the ORIGINAL name: restoring it would roll B back */
+          stateB.sessions[id]=Object.assign({},stateB.sessions[id],{name:"B's newer name",updatedAt:new Date().toISOString(),updatedBy:"dev-B"});
+          stateB=syncB(h,stateB);
+          h.scheduleDriveSync();
+          return settle(h);
+        }).then(function(){
+          check("S09b setup: A has B's newer name",h.getState().sessions[id].name==="B's newer name",h.getState().sessions[id].name);
+          h.undo();
+          check("S09b undoing something UNRELATED does not roll another device's newer edit back (the owner guard)",h.getState().sessions[id].name==="B's newer name"&&h.getState().sessions[id].updatedBy==="dev-B",J(h.getState().sessions[id]));
+          return settle(h);
+        }).then(function(){
+          stateB=syncB(h,stateB);
+          check("S09b ...and B still has its own edit after the sync",stateB.sessions[id].name==="B's newer name");
+        });
+      });
+    }))
+    .then(scenario("S09c",function(){
+      /* an undo stack that predates this feature must never wipe sessions made after it */
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        var preFeature=JSON.parse(JSON.stringify(h.getState())); delete preFeature.sessions; delete preFeature.deletedSessions;
+        h.snapshot("placeholder"); /* index 0 of the stack is replaced below by a pre-feature snapshot */
+        h.setSession("keep","Made after the feature",[blk(0,10,"a")],null);
+        h.getUndoStack()[h.getUndoStack().length-1].s=J(preFeature);
+        h.undo();
+        check("S09c undoing onto a snapshot taken BEFORE sessions existed keeps the current sessions (never part of what that snapshot can undo) - not connected",
+          !!h.getState().sessions&&!!h.getState().sessions.keep,names(h.getState()));
+      }).then(function(){ return connectedSandbox(); }).then(function(f){
+        var h=f.H;
+        var preFeature=JSON.parse(JSON.stringify(h.getState())); delete preFeature.sessions; delete preFeature.deletedSessions;
+        h.snapshot("placeholder");
+        h.setSession("keep","Made after the feature",[blk(0,10,"a")],null);
+        h.getUndoStack()[h.getUndoStack().length-1].s=J(preFeature);
+        h.undo();
+        check("S09c ...the same on a connected device (no tombstone is written for it either)",
+          !!h.getState().sessions.keep&&!(h.getState().deletedSessions||{}).keep,names(h.getState())+" "+J(h.getState().deletedSessions));
+      });
+    }))
+
+    /* ---- S10: the Sessions sheet (UI). Reads DOM/state and dispatches synthetic events;
+            cannot prove layout, tap targets or how a phone renders it. */
+    .then(scenario("S10",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,d=f.d;
+        function q(sel){ return d.querySelector(sel); }
+        function setV(id,v){ var el=d.getElementById(id); el.value=v; el.dispatchEvent(new f.el.contentWindow.Event("input",{bubbles:true})); }
+        h.putEntry(D,"Warm up","seed-training",360,375,null);
+        h.putEntry(D,"Lift","seed-training",375,435,null);
+        check("S10 the Sessions button exists in the data tools",!!d.getElementById("sessionsBtn"));
+        d.getElementById("sessionsBtn").click();
+        check("S10 clicking it opens the sheet",d.getElementById("sessScrim").classList.contains("on"));
+        check("S10 with no sessions the list says so",/no sessions/i.test(d.getElementById("sessList").textContent),d.getElementById("sessList").textContent);
+        var depth0=h.undoDepth();
+        d.getElementById("sessSaveGo").click();
+        check("S10 saving with an empty form creates nothing and takes no snapshot",Object.keys(h.getState().sessions).length===0&&h.undoDepth()===depth0);
+        setV("sessSaveDate",D); setV("sessSaveFrom","06:00"); setV("sessSaveTo","07:15"); setV("sessSaveName","Gym morning");
+        d.getElementById("sessSaveGo").click();
+        var ids=Object.keys(h.getState().sessions);
+        check("S10 save-as-session from the form creates the session with the right blocks",ids.length===1&&h.getState().sessions[ids[0]].name==="Gym morning"&&h.getState().sessions[ids[0]].blocks.length===2,J(h.getState().sessions));
+        check("S10 ...as one undo step",h.undoDepth()===depth0+1);
+        check("S10 ...and the list shows it",/Gym morning/.test(d.getElementById("sessList").textContent));
+        var row=q('.sessrow[data-id="'+ids[0]+'"]');
+        check("S10 each row has Apply and Delete buttons",!!row&&!!row.querySelector(".sess-apply")&&!!row.querySelector(".sess-del"));
+        row.querySelector(".sess-apply").click();
+        check("S10 Apply opens the apply panel",!d.getElementById("sessApply").hidden);
+        var depth1=h.undoDepth();
+        d.getElementById("sessApplyGo").click();
+        check("S10 applying with no date chosen does nothing (no entries, no snapshot)",h.undoDepth()===depth1&&Object.keys(h.getState().entries).length===1);
+        setV("sessApplyDate","2026-04-06"); setV("sessApplyTime","09:00");
+        check("S10 the preview says there is no overlap on an empty day",/no overlap/i.test(d.getElementById("sessApplyPreview").textContent),d.getElementById("sessApplyPreview").textContent);
+        h.putEntry("2026-04-06","Already there","seed-work",540,570,null);
+        setV("sessApplyTime","09:10");
+        check("S10 the preview names the overlap with existing entries before anything is applied",/overlap/i.test(d.getElementById("sessApplyPreview").textContent)&&!/no overlap/i.test(d.getElementById("sessApplyPreview").textContent),d.getElementById("sessApplyPreview").textContent);
+        var go=d.getElementById("sessApplyGo"), depth2=h.undoDepth();
+        go.click(); go.click();
+        check("S10 DOUBLE-SUBMIT: two rapid clicks on Apply apply the session exactly once (3 entries: 1 existing + 2 blocks)",
+          dayEntries(h,"2026-04-06").length===3&&h.undoDepth()===depth2+1,dayEntries(h,"2026-04-06").length+" entries, depth +"+(h.undoDepth()-depth2));
+        check("S10 after applying, the apply panel is closed again",d.getElementById("sessApply").hidden===true);
+        check("S10 a toast confirms and offers Undo",/applied/i.test(d.getElementById("toastText").textContent)&&!d.getElementById("toastUndo").hidden,d.getElementById("toastText").textContent);
+        row=q('.sessrow[data-id="'+ids[0]+'"]');
+        row.querySelector(".sess-del").click();
+        check("S10 Delete removes the session without a confirm dialog (it is undoable)",!h.getState().sessions[ids[0]]);
+        check("S10 ...and the toast offers Undo",/deleted/i.test(d.getElementById("toastText").textContent)&&!d.getElementById("toastUndo").hidden,d.getElementById("toastText").textContent);
+        h.undo();
+        check("S10 Undo brings the deleted session back",!!h.getState().sessions[ids[0]],names(h.getState()));
+        d.getElementById("sessClose").click();
+        check("S10 Close closes the sheet",!d.getElementById("sessScrim").classList.contains("on"));
+      });
+    }))
+
+    /* ---- S11: nothing leaves the browser (hard rule 4) and privacy.html says it */
+    .then(scenario("S11",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,w=f.el.contentWindow,calls=0;
+        w.fetch=function(){ calls++; return Promise.reject(new Error("blocked")); };
+        w.XMLHttpRequest=function(){ calls++; throw new Error("blocked"); };
+        w.navigator.sendBeacon=function(){ calls++; return false; };
+        h.putEntry(D,"x","seed-work",540,600,null);
+        var id=h.saveSessionFromRange(D,540,600,"Quiet");
+        h.sessionSegments(h.getState().sessions[id],D,600);
+        h.sessionOverlap(h.getState().sessions[id],D,600);
+        h.applySession(id,D,700);
+        h.deleteSession(id);
+        h.undo();
+        check("S11 saving, previewing, applying, deleting and undoing a session make no network call",calls===0,String(calls));
+      });
+    }))
+    .then(function(){
+      return fetch("privacy.html?v="+Date.now()).then(function(r){ return r.text(); }).then(function(t){
+        check("S11 privacy.html says what sessions are, that they sync with the rest only if Drive is connected",/sessions/i.test(t)&&/saved sessions/i.test(t)&&/connect/i.test(t));
+      });
+    })
     .then(function(){ return results; });
 }
 

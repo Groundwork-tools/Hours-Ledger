@@ -366,6 +366,16 @@ function migrateSyncFields(s){
     if(!h.updatedAt){ h.updatedAt=stamp; h.updatedBy=dev; }
   });
 
+  /* sessions: inline stamp + real tombstones, same shape as the day highlights. One written on a
+     connected device is already stamped at edit time; this stamps the ones made before the device
+     ever synced. */
+  migrateSessions(s);
+  if(!s.deletedSessions) s.deletedSessions={};
+  Object.keys(s.sessions).forEach(function(id){
+    var r=s.sessions[id];
+    if(!r.updatedAt){ r.updatedAt=stamp; r.updatedBy=dev; }
+  });
+
   return s;
 }
 
@@ -660,6 +670,274 @@ function logSupersededHighlights(localFlat,remoteFlat,mergedFlat,deviceId){
   });
 }
 
+/* ---------------- sessions (backlog 31) ----------------
+   A session is a named, ordered set of blocks stored as OFFSETS from a start time, so the
+   same session can be applied at any start time on any date (past or future):
+     state.sessions[id] = {id, name, blocks:[{offset,duration,label,cat}], schedule, updatedAt?, updatedBy?}
+   offset/duration are whole minutes; cat is a category id or null. Applying a session creates
+   ORDINARY entries - no link back to the session, no planned/confirmed state, no new entry field.
+   Both keys are new and optional: a ledger without them reads as "no sessions" (migrateSessions
+   runs on load, import and undo/redo), `hours-ledger-v2` and every existing field are unchanged
+   (hard rule 1), and an older build that re-saves the state keeps the unknown keys.
+
+   Sync (hard rule 7). The sync unit is the WHOLE session (decision, approved): a session is edited
+   as a unit, and per-block records would let two devices produce an interleaved session nobody
+   wrote. Last write wins on the whole record; the text that lost goes to console.log
+   (logSupersededSessions - same precedent as the day highlights). Ids are random (uid()), like
+   entries and categories: nothing is seeded, so there are no fixed ids, and there is deliberately
+   NO name-based dedup - nothing references a session id (entries carry no back-link), so a
+   duplicate cannot silently reassign anything, and the user can simply delete it.
+   Stamped at EDIT time, but only once the device has sync fields (state.deletedEntries exists,
+   the removeEntry gate); a never-connected device stores no stamps and no tombstone container,
+   and migrateSyncFields stamps its sessions at first connect.
+   Tombstones: removeSession writes one only for a session that exists on this device (a tombstone
+   for an id this device never saw could delete another device's record); setSession removes the
+   id's tombstone, and flattenSessions resolves an id found in both containers to ONE record.
+   mergeRecords compares content with === (sameContent), so an array or object field from two
+   separately built states would NEVER read as equal. blocks and schedule are therefore flattened to
+   canonical JSON TEXT (cleanBlocks writes a fixed key order and a fixed block order): equal blocks
+   are then equal strings and take case 2 ("same content") instead of a pointless last-write-wins.
+   Category ids inside blocks are remapped wherever entries' are: dedupeCategoriesByName and
+   doDeleteCategory with a target - otherwise a block orphans on a dead id. */
+var SESSION_NAME_MAX=60, SESSION_MAX_BLOCKS=40, SESSION_MAX_OFFSET=2879, SESSION_MAX_DURATION=1439;
+var SESSION_FIELDS=["name","blocks","schedule","deleted","deletedAt"];
+function isMapObj(x){ return !!x&&typeof x==="object"&&!Array.isArray(x); }
+function cleanBlock(b){
+  if(!isMapObj(b)) return null;
+  if(!Number.isInteger(b.offset)||b.offset<0||b.offset>SESSION_MAX_OFFSET) return null;
+  if(!Number.isInteger(b.duration)||b.duration<1||b.duration>SESSION_MAX_DURATION) return null;
+  return {offset:b.offset,duration:b.duration,label:typeof b.label==="string"?b.label:"",cat:typeof b.cat==="string"&&b.cat?b.cat:null};
+}
+/* valid blocks only, in the canonical order (by offset; ties keep their given order) - the order is
+   part of the content sync compares, so two devices must always write the same one */
+function cleanBlocks(arr){
+  if(!Array.isArray(arr)) return [];
+  return arr.map(cleanBlock).filter(Boolean)
+    .map(function(b,i){ return {b:b,i:i}; })
+    .sort(function(x,y){ return x.b.offset-y.b.offset||x.i-y.i; })
+    .map(function(x){ return x.b; });
+}
+function normalizeSessionName(raw){
+  var t=String(raw==null?"":raw).replace(/\s+/g," ").trim();
+  var cps=Array.from(t);
+  if(cps.length>SESSION_NAME_MAX) t=cps.slice(0,SESSION_NAME_MAX).join("").trim();
+  return t;
+}
+function cleanSchedule(x){ return isMapObj(x)?x:null; }   /* stage 2 gives the schedule its real shape */
+function migrateSessions(s){
+  if(!isMapObj(s.sessions)) s.sessions={};
+  Object.keys(s.sessions).forEach(function(id){
+    var r=s.sessions[id];
+    var blocks=isMapObj(r)?cleanBlocks(r.blocks):[];
+    if(!isMapObj(r)||typeof r.name!=="string"||!r.name.trim()||!blocks.length){
+      console.log("[session] dropped a malformed stored session "+id+": "+JSON.stringify(r));
+      delete s.sessions[id];
+      return;
+    }
+    r.id=id; r.blocks=blocks; r.schedule=cleanSchedule(r.schedule);
+  });
+  if(s.deletedSessions!==undefined){
+    if(!isMapObj(s.deletedSessions)) s.deletedSessions={};
+    Object.keys(s.deletedSessions).forEach(function(id){
+      if(!isMapObj(s.deletedSessions[id])) delete s.deletedSessions[id];
+    });
+  }
+  return s;
+}
+/* create or replace one session (the edit primitive). Returns the stored record, or null when the
+   name or blocks are unusable - nothing is stored then. The CALLER takes the snapshot. */
+function setSession(id,name,blocks,schedule){
+  var nm=normalizeSessionName(name),bl=cleanBlocks(blocks);
+  if(!nm||!bl.length||bl.length>SESSION_MAX_BLOCKS) return null;
+  if(!state.sessions) state.sessions={};
+  var rec={id:id,name:nm,blocks:bl,schedule:cleanSchedule(schedule)};
+  if(state.deletedEntries){ rec.updatedAt=nowIso(); rec.updatedBy=getDeviceId(); }
+  state.sessions[id]=rec;
+  /* a live record and its own tombstone must never coexist - see flattenSessions */
+  if(state.deletedSessions) delete state.deletedSessions[id];
+  return rec;
+}
+function removeSession(id){
+  if(!state.sessions||!state.sessions[id]) return false;
+  delete state.sessions[id];
+  if(state.deletedEntries){
+    if(!state.deletedSessions) state.deletedSessions={};
+    var now=nowIso();
+    state.deletedSessions[id]={updatedAt:now,updatedBy:getDeviceId(),deletedAt:now};
+  }
+  return true;
+}
+function sessionTombstoneWins(r,t){
+  return !!(r.updatedAt&&t.updatedAt&&Date.parse(t.updatedAt)>Date.parse(r.updatedAt));
+}
+function flattenSessions(s){
+  var liveMap=s.sessions||{},deadMap=s.deletedSessions||{},out=[];
+  Object.keys(liveMap).forEach(function(id){
+    var r=liveMap[id],t=deadMap[id];
+    if(t&&sessionTombstoneWins(r,t)) return;
+    out.push({id:id,name:r.name,blocks:JSON.stringify(cleanBlocks(r.blocks)),schedule:JSON.stringify(cleanSchedule(r.schedule)),
+      updatedAt:r.updatedAt,updatedBy:r.updatedBy,deleted:false,deletedAt:null});
+  });
+  Object.keys(deadMap).forEach(function(id){
+    var r=liveMap[id],t=deadMap[id];
+    if(r&&!sessionTombstoneWins(r,t)) return;
+    out.push({id:id,name:null,blocks:null,schedule:null,updatedAt:t.updatedAt,updatedBy:t.updatedBy,deleted:true,deletedAt:t.deletedAt});
+  });
+  return out;
+}
+function unflattenSessions(flat){
+  var sessions={},deleted={};
+  flat.forEach(function(r){
+    if(r.deleted){
+      deleted[r.id]={updatedAt:r.updatedAt,updatedBy:r.updatedBy,deletedAt:r.deletedAt};
+      return;
+    }
+    var blocks=null,schedule=null;
+    try{ blocks=cleanBlocks(JSON.parse(r.blocks)); schedule=cleanSchedule(JSON.parse(r.schedule)); }catch(e){ blocks=null; }
+    if(typeof r.name!=="string"||!blocks||!blocks.length){
+      /* can't be shown or applied. It stays on Drive (toPush is built from the merged flat list, not
+         from this); only the local copy is skipped. */
+      console.log("[session] ignored a synced session "+r.id+" that can't be read: "+JSON.stringify(r));
+      return;
+    }
+    sessions[r.id]={id:r.id,name:r.name,blocks:blocks,schedule:schedule,updatedAt:r.updatedAt,updatedBy:r.updatedBy};
+  });
+  return {sessions:sessions,deletedSessions:deleted};
+}
+/* last-write-wins decides which version of a session survives a same-id conflict (no UI notice,
+   same precedent as the day highlights); the version that LOST goes to the console so it stays
+   recoverable. Not logged: my own stale echo coming back (mergeRecords case 3), and a loser whose
+   content equals the winner's. */
+function logSupersededSessions(localFlat,remoteFlat,mergedFlat,deviceId){
+  var win={},remoteById={};
+  mergedFlat.forEach(function(r){ win[r.id]=r; });
+  remoteFlat.forEach(function(r){ remoteById[r.id]=r; });
+  localFlat.forEach(function(L){
+    var R=remoteById[L.id],W=win[L.id];
+    if(!R||!W) return;
+    [{rec:L,remote:false},{rec:R,remote:true}].forEach(function(x){
+      var X=x.rec;
+      if(X===W||X.deleted) return;
+      if(x.remote&&X.updatedBy===deviceId) return;
+      if(!W.deleted&&sameContent(W,X,SESSION_FIELDS)) return;
+      console.log("[session] superseded (last write wins) on "+X.id+": \""+X.name+"\" "+X.blocks+" (written "+X.updatedAt+" by "+X.updatedBy+", "+(x.remote?"from Drive":"on this device")+")");
+    });
+  });
+}
+/* rewrite block category ids in flat session records (dedupeCategoriesByName). A record that changes
+   is restamped from this device: the remap is a real edit, and without a fresh stamp another device's
+   copy with the old ids could win the next merge. */
+function remapSessionCategories(sessionsFlat,idRemap,deviceId){
+  return sessionsFlat.map(function(r){
+    if(r.deleted||typeof r.blocks!=="string") return r;
+    var bl; try{ bl=JSON.parse(r.blocks); }catch(e){ return r; }
+    if(!Array.isArray(bl)) return r;
+    var changed=false;
+    bl=bl.map(function(b){
+      if(b&&b.cat&&idRemap[b.cat]){ changed=true; return Object.assign({},b,{cat:idRemap[b.cat]}); }
+      return b;
+    });
+    if(!changed) return r;
+    return Object.assign({},r,{blocks:JSON.stringify(cleanBlocks(bl)),updatedAt:nowIso(),updatedBy:deviceId});
+  });
+}
+/* category delete WITH a target moves blocks the way it moves entries; without a target both are left
+   alone (a dangling id reads as "No category", see doDeleteCategory). A session that changes is
+   restamped, once the device has sync fields. */
+function reassignCategorySessions(fromCatId,toCatId){
+  Object.keys(state.sessions||{}).forEach(function(id){
+    var r=state.sessions[id];
+    if(!r.blocks.some(function(b){ return b.cat===fromCatId; })) return;
+    r.blocks=r.blocks.map(function(b){ return b.cat===fromCatId?Object.assign({},b,{cat:toCatId||null}):b; });
+    if(state.deletedEntries){ r.updatedAt=nowIso(); r.updatedBy=getDeviceId(); }
+  });
+}
+
+/* ---- save as session / apply ---- */
+function isIsoDate(s){
+  if(typeof s!=="string"||!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  return iso(parseIso(s))===s;
+}
+function validMinute(m){ return Number.isInteger(m)&&m>=0&&m<=1440; }
+/* the blocks for the logged entries of ONE date that overlap [from,to): clipped to the range, offsets
+   measured from the first block's (clipped) start. [] when nothing overlaps. */
+function sessionBlocksFromRange(dateStr,from,to){
+  var list=(state.entries[dateStr]||[]).filter(function(e){ return e.start<to&&e.end>from; })
+    .map(function(e){ return {s:Math.max(e.start,from),e:Math.min(e.end,to),label:e.label,cat:e.cat}; })
+    .sort(function(a,b){ return a.s-b.s||a.e-b.e; });
+  if(!list.length) return [];
+  var origin=list[0].s;
+  return list.map(function(g){ return {offset:g.s-origin,duration:g.e-g.s,label:g.label||"",cat:g.cat||null}; });
+}
+function saveSessionFromRange(dateStr,from,to,name){
+  if(!isIsoDate(dateStr)||!validMinute(from)||!validMinute(to)||from>=to) return null;
+  var nm=normalizeSessionName(name),blocks=sessionBlocksFromRange(dateStr,from,to);
+  if(!nm||!blocks.length||blocks.length>SESSION_MAX_BLOCKS) return null;
+  snapshot('save session "'+nm+'"');
+  var id=uid();
+  setSession(id,nm,blocks,null);
+  persist();
+  return id;
+}
+function deleteSession(id){
+  var r=state.sessions&&state.sessions[id];
+  if(!r) return false;
+  snapshot('delete session "'+r.name+'"');
+  removeSession(id);
+  persist();
+  return true;
+}
+/* the entries applying a session would create: one per block, already split at midnight exactly like
+   putEntry does (a block past 24:00 moves to the next date; one that straddles it becomes two). Pure -
+   changes nothing. A block category that is no longer a live category becomes uncategorised. */
+function sessionSegments(sess,dateStr,startMin){
+  var out=[];
+  sess.blocks.forEach(function(b){
+    var abs=startMin+b.offset,shift=Math.floor(abs/1440),s=abs-shift*1440,e=s+b.duration;
+    var date=iso(addDays(parseIso(dateStr),shift));
+    var cat=(b.cat&&catById(b.cat))?b.cat:null;
+    if(e<=1440) out.push({date:date,label:b.label,cat:cat,start:s,end:e});
+    else{
+      out.push({date:date,label:b.label,cat:cat,start:s,end:1440});
+      out.push({date:iso(addDays(parseIso(dateStr),shift+1)),label:b.label,cat:cat,start:0,end:e-1440});
+    }
+  });
+  return out;
+}
+/* how much of what is ALREADY logged a session would sit on top of: the number of distinct existing
+   entries it overlaps, and the minutes in the union of the overlapped stretches */
+function sessionOverlap(sess,dateStr,startMin){
+  var segs=sessionSegments(sess,dateStr,startMin),ids={},byDate={};
+  segs.forEach(function(g){
+    (state.entries[g.date]||[]).forEach(function(e){
+      var s=Math.max(e.start,g.start),en=Math.min(e.end,g.end);
+      if(s<en){ ids[e.id]=1; (byDate[g.date]=byDate[g.date]||[]).push([s,en]); }
+    });
+  });
+  var minutes=0;
+  Object.keys(byDate).forEach(function(date){
+    var iv=byDate[date].sort(function(a,b){ return a[0]-b[0]; }),curS=null,curE=null;
+    iv.forEach(function(x){
+      if(curE===null||x[0]>curE){ if(curE!==null) minutes+=curE-curS; curS=x[0]; curE=x[1]; }
+      else curE=Math.max(curE,x[1]);
+    });
+    if(curE!==null) minutes+=curE-curS;
+  });
+  return {entries:Object.keys(ids).length,minutes:minutes};
+}
+/* apply = one snapshot, then ordinary entries. Overlap with what is already logged is allowed (the
+   app has always allowed it and shows it as double-booked); the sheet previews it first. Returns the
+   number of entries created, or null when nothing was applied. */
+function applySession(id,dateStr,startMin){
+  var sess=state.sessions&&state.sessions[id];
+  if(!sess||!isIsoDate(dateStr)||!Number.isInteger(startMin)||startMin<0||startMin>=1440) return null;
+  var segs=sessionSegments(sess,dateStr,startMin);
+  snapshot('apply session "'+sess.name+'"');
+  segs.forEach(function(g){ push(g.date,g.label,g.cat,g.start,g.end); });
+  persist();
+  return segs.length;
+}
+
 /* the merge itself - compares records, never files. Ported from Money Ledger's
    mergeRecords (see SYNC-LESSONS.md) with the same six-case shape; only the
    caller-supplied contentFields whitelist changes per record type. */
@@ -751,7 +1029,7 @@ function collapseVerdictCollisions(verdictsFlat,deviceId){
     });
   });
 }
-function dedupeCategoriesByName(catsFlat,entriesFlat,verdictsFlat,deviceId){
+function dedupeCategoriesByName(catsFlat,entriesFlat,verdictsFlat,deviceId,sessionsFlat){
   var groups={};
   catsFlat.filter(function(r){ return !r.deleted; }).forEach(function(r){
     var key=normalizeName(r.name);
@@ -774,7 +1052,7 @@ function dedupeCategoriesByName(catsFlat,entriesFlat,verdictsFlat,deviceId){
     });
     mergeLog.push({name:winner.name,survivorId:winner.id,mergedIds:losers.map(function(l){ return l.id; }),entriesReassigned:reassignedCount});
   });
-  if(!mergeLog.length) return {categories:catsFlat,entries:entriesFlat,verdicts:verdictsFlat};
+  if(!mergeLog.length) return {categories:catsFlat,entries:entriesFlat,verdicts:verdictsFlat,sessions:sessionsFlat};
 
   mergeLog.forEach(function(g){
     console.log('Hours Ledger sync: merged duplicate category "'+g.name+'" - kept '+g.survivorId+
@@ -795,7 +1073,8 @@ function dedupeCategoriesByName(catsFlat,entriesFlat,verdictsFlat,deviceId){
     return Object.assign({},v,{catId:newCatId,id:v.weekIso+"|"+newCatId});
   });
   var newVerdicts=collapseVerdictCollisions(remappedVerdicts,deviceId);
-  return {categories:newCats,entries:newEntries,verdicts:newVerdicts};
+  var newSessions=sessionsFlat?remapSessionCategories(sessionsFlat,idRemap,deviceId):sessionsFlat;
+  return {categories:newCats,entries:newEntries,verdicts:newVerdicts,sessions:newSessions};
 }
 
 /* the whole engine in one call: migrate, merge all four collections by id
@@ -809,8 +1088,8 @@ function dedupeCategoriesByName(catsFlat,entriesFlat,verdictsFlat,deviceId){
    remoteFile is null for a genuine first-ever sync (nothing to merge
    against, every local record trivially survives via case 1); its shape
    otherwise is {categories:[...flat...], entries:[...flat...],
-   verdicts:[...flat...], closeouts:[...flat...], dayHighlights:[...flat...]}
-   (dayHighlights absent in a file an older device wrote - read as []), tombstones inline via
+   verdicts:[...flat...], closeouts:[...flat...], dayHighlights:[...flat...], sessions:[...flat...]}
+   (dayHighlights/sessions absent in a file an older device wrote - read as []), tombstones inline via
    deleted:true. */
 function syncEngine(localStateIn,remoteFile,deviceId){
   /* migrateSyncFields mutates in place - clone first so a failure anywhere
@@ -821,7 +1100,7 @@ function syncEngine(localStateIn,remoteFile,deviceId){
      as a side effect no matter what happens after. */
   var localState=JSON.parse(JSON.stringify(localStateIn));
   migrateSyncFields(localState);
-  var remote=remoteFile||{categories:[],entries:[],verdicts:[],closeouts:[],dayHighlights:[]};
+  var remote=remoteFile||{categories:[],entries:[],verdicts:[],closeouts:[],dayHighlights:[],sessions:[]};
 
   var localCatsFlat=flattenCategories(localState);
   var mergedCatsFlat=mergeRecords(localCatsFlat,remote.categories,CATEGORY_FIELDS,deviceId);
@@ -843,10 +1122,16 @@ function syncEngine(localStateIn,remoteFile,deviceId){
   var mergedHighlightsFlat=mergeRecords(localHighlightsFlat,remoteHighlightsFlat,DAYHIGHLIGHT_FIELDS,deviceId);
   logSupersededHighlights(localHighlightsFlat,remoteHighlightsFlat,mergedHighlightsFlat,deviceId);
 
-  var deduped=dedupeCategoriesByName(mergedCatsFlat,mergedEntriesFlat,mergedVerdictsFlat,deviceId);
+  var localSessionsFlat=flattenSessions(localState);
+  var remoteSessionsFlat=remote.sessions||[];
+  var mergedSessionsFlat=mergeRecords(localSessionsFlat,remoteSessionsFlat,SESSION_FIELDS,deviceId);
+  logSupersededSessions(localSessionsFlat,remoteSessionsFlat,mergedSessionsFlat,deviceId);
+
+  var deduped=dedupeCategoriesByName(mergedCatsFlat,mergedEntriesFlat,mergedVerdictsFlat,deviceId,mergedSessionsFlat);
   mergedCatsFlat=deduped.categories;
   mergedEntriesFlat=deduped.entries;
   mergedVerdictsFlat=deduped.verdicts;
+  mergedSessionsFlat=deduped.sessions;
   var sweepResult=sweepCompressVerdicts(mergedVerdictsFlat,deviceId);
   mergedVerdictsFlat=sweepResult.records;
 
@@ -855,6 +1140,7 @@ function syncEngine(localStateIn,remoteFile,deviceId){
   var verdictsResult=unflattenVerdicts(mergedVerdictsFlat);
   var closeoutsResult=unflattenCloseouts(mergedCloseoutsFlat);
   var highlightsResult=unflattenDayHighlights(mergedHighlightsFlat);
+  var sessionsResult=unflattenSessions(mergedSessionsFlat);
 
   return {
     newLocalState:Object.assign({},localState,{
@@ -862,9 +1148,10 @@ function syncEngine(localStateIn,remoteFile,deviceId){
       entries:entriesResult.entries,deletedEntries:entriesResult.deletedEntries,
       weeklyVerdicts:verdictsResult.weeklyVerdicts,verdictMeta:verdictsResult.verdictMeta,deletedVerdicts:verdictsResult.deletedVerdicts,
       weekCloseouts:closeoutsResult.weekCloseouts,
-      dayHighlights:highlightsResult.dayHighlights,deletedDayHighlights:highlightsResult.deletedDayHighlights
+      dayHighlights:highlightsResult.dayHighlights,deletedDayHighlights:highlightsResult.deletedDayHighlights,
+      sessions:sessionsResult.sessions,deletedSessions:sessionsResult.deletedSessions
     }),
-    toPush:{categories:mergedCatsFlat,entries:mergedEntriesFlat,verdicts:mergedVerdictsFlat,closeouts:mergedCloseoutsFlat,dayHighlights:mergedHighlightsFlat},
+    toPush:{categories:mergedCatsFlat,entries:mergedEntriesFlat,verdicts:mergedVerdictsFlat,closeouts:mergedCloseoutsFlat,dayHighlights:mergedHighlightsFlat,sessions:mergedSessionsFlat},
     /* surfaced separately from newLocalState/toPush - this is the ONE thing
        this otherwise-pure engine hands back specifically so its caller can
        tell the user something happened, not data the caller needs to apply.
@@ -1234,6 +1521,7 @@ if(!state.settings) state.settings={startHour:6,endHour:24};
 if(!state.entries) state.entries={};
 if(!state.weekCloseouts) state.weekCloseouts={};
 migrateDayHighlights(state);
+migrateSessions(state);
 migrateVerdicts(state);
 migrateVerdictScale(state);
 migrateVerdictTombstoneCollisions(state);
@@ -1465,7 +1753,7 @@ function connectDrive(){
          succeeds, so both branches mention it if it happened. */
       var sweptNote=(syncResult.sweptCompress&&syncResult.sweptCompress.length)?
         " "+describeCompressSweep(syncResult.sweptCompress):"";
-      driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts,dayHighlights:syncResult.toPush.dayHighlights}).then(function(){
+      driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts,dayHighlights:syncResult.toPush.dayHighlights,sessions:syncResult.toPush.sessions}).then(function(){
         setStatus(syncedStatusText());
         document.getElementById("connectDrive").textContent="Drive: synced";
         showToast("Connected — your weeks are syncing."+sweptNote,false);
@@ -1571,7 +1859,7 @@ function runDriveSync(manual){
          surfaced outside DevTools. state is already reassigned above, so
          catById resolves against the just-merged categories. */
       if(syncResult.sweptCompress&&syncResult.sweptCompress.length) showToast(describeCompressSweep(syncResult.sweptCompress),false);
-      return driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts,dayHighlights:syncResult.toPush.dayHighlights}).then(function(){
+      return driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts,dayHighlights:syncResult.toPush.dayHighlights,sessions:syncResult.toPush.sessions}).then(function(){
         driveSyncInFlight=false;
         setStatus(syncedStatusText());
         document.getElementById("connectDrive").disabled=false;
@@ -1812,6 +2100,35 @@ function undoDayHighlightsAsForwardEdits(snap,cur){
   });
   return {live:live,dead:dead};
 }
+/* Undo/redo of sessions is a FORWARD edit once the device syncs, like the day highlights (and for the
+   same reason): restoring a snapshot would bring back the OLD stamp, so an undone create would be
+   absent locally rather than tombstoned (a ghost on the next sync) and an undone edit would lose
+   last-write-wins forever against a device that already holds the newer one. Per id: same content as
+   now -> keep the current record untouched (no restamp); different -> write the snapshot's content
+   (or a tombstone if the snapshot had none) with a fresh stamp from this device - unless the current
+   record (or its tombstone) was last written by ANOTHER device: it is theirs, and an undo of something
+   unrelated must not roll it back. Only runs once the device has sync fields. */
+function sessionSig(r){ return r?JSON.stringify([r.name,r.blocks,r.schedule||null]):null; }
+function undoSessionsAsForwardEdits(snap,cur){
+  var dev=getDeviceId(),now=nowIso();
+  var snapLive=snap.sessions||{},curLive=cur.sessions||{},curDead=cur.deletedSessions||{};
+  var live=Object.assign({},curLive),dead=Object.assign({},curDead),ids={};
+  [snapLive,curLive,curDead].forEach(function(m){ Object.keys(m).forEach(function(id){ ids[id]=true; }); });
+  Object.keys(ids).forEach(function(id){
+    var c=curLive[id],sn=snapLive[id];
+    if(sessionSig(c)===sessionSig(sn)) return;
+    var owner=c||curDead[id];
+    if(owner&&owner.updatedBy&&owner.updatedBy!==dev) return;
+    if(sn){
+      live[id]=Object.assign({},sn,{updatedAt:now,updatedBy:dev});
+      delete dead[id];
+    }else{
+      delete live[id];
+      dead[id]={updatedAt:now,updatedBy:dev,deletedAt:now};
+    }
+  });
+  return {live:live,dead:dead};
+}
 function carrySyncContainers(prev,snap){
   if(!prev) return;
   if(prev.deletedCategories&&!snap.deletedCategories){
@@ -1838,6 +2155,12 @@ function applyState(json){
   if(prev&&("driveConnected" in prev)) state.driveConnected=prev.driveConnected;
   else delete state.driveConnected;
   carrySyncContainers(prev,state);
+  /* a snapshot taken before sessions existed has no sessions key: sessions are not part of what it can
+     undo, so the current ones stay (otherwise undoing across the release would silently drop them) */
+  if(prev&&prev.sessions&&!("sessions" in state)){
+    state.sessions=prev.sessions;
+    if(prev.deletedSessions) state.deletedSessions=prev.deletedSessions;
+  }
   if(prev&&prev.deletedEntries){
     var fwd=undoEntriesAsForwardEdits(state,prev);
     state.entries=fwd.entries;
@@ -1845,11 +2168,15 @@ function applyState(json){
     var hl=undoDayHighlightsAsForwardEdits(state,prev);
     state.dayHighlights=hl.live;
     state.deletedDayHighlights=hl.dead;
+    var ss=undoSessionsAsForwardEdits(state,prev);
+    state.sessions=ss.live;
+    state.deletedSessions=ss.dead;
   }
   if(!state.settings) state.settings={startHour:6,endHour:24};
   if(!state.entries) state.entries={};
   if(!state.weekCloseouts) state.weekCloseouts={};
   migrateDayHighlights(state);
+  migrateSessions(state);
   migrateVerdicts(state);
   migrateVerdictScale(state);
   migrateVerdictTombstoneCollisions(state);
@@ -2534,7 +2861,7 @@ function reassignCategoryEntries(fromCatId,toCatId){
 function doDeleteCategory(c,reassignToId){
   var n=countCategoryEntries(c.id);
   snapshot('delete category "'+c.name+'"');
-  if(reassignToId) reassignCategoryEntries(c.id,reassignToId);
+  if(reassignToId){ reassignCategoryEntries(c.id,reassignToId); reassignCategorySessions(c.id,reassignToId); }
   if(state.deletedCategories) state.deletedCategories[c.id]={id:c.id,updatedAt:nowIso(),updatedBy:getDeviceId(),deletedAt:nowIso()};
   state.categories=state.categories.filter(function(x){ return x.id!==c.id; });
   persist(); render();
@@ -2557,7 +2884,7 @@ function openCategoryDeleteChooser(row,c,n){
   panel.hidden=false;
 }
 
-function render(){ renderGrid(); renderTotals(); renderCats(); refreshHint(); updateCloseoutAvailability(); }
+function render(){ renderGrid(); renderTotals(); renderCats(); refreshHint(); updateCloseoutAvailability(); renderSessionsIfOpen(); }
 /* Drive-sync bug (reported from a real laptop, 2026-08-21): a spectrum-box
    drag calls persist() on a pause in movement, which arms
    scheduleDriveSync's 2s debounce same as any other edit - correct,
@@ -3060,6 +3387,7 @@ document.addEventListener("keydown",function(ev){
   if(tag==="INPUT"||tag==="TEXTAREA"||tag==="SELECT"||tag==="BUTTON"||tag==="A"||ev.target.isContentEditable) return;
   if(document.getElementById("closeoutScrim").classList.contains("on")) return;
   if(document.getElementById("dayScrim").classList.contains("on")) return;
+  if(document.getElementById("sessScrim").classList.contains("on")) return;
   if(introEl.classList.contains("on")) return;
   if(!document.getElementById("reviewSection").hidden) return;
   if(cats.querySelector(".picker:not([hidden])")||cats.querySelector(".catdelete:not([hidden])")) return;
@@ -4010,6 +4338,7 @@ function importBackupJson(jsonText){
   if(!state.settings) state.settings={startHour:6,endHour:24};
   if(!state.weekCloseouts) state.weekCloseouts={};
   migrateDayHighlights(state);
+  migrateSessions(state);
   migrateVerdicts(state);
   migrateVerdictScale(state);
   migrateVerdictTombstoneCollisions(state);
@@ -4154,6 +4483,117 @@ if(state.driveConnected){
    blockers actually key their "was this a real user gesture" check on. */
 if(!TEST_MODE&&state.driveConnected) loadGisScript(function(){});
 
+/* ---------------- Sessions sheet ----------------
+   One sheet: the saved sessions (Apply / Delete), an apply panel (date + start time, with a preview of
+   what it would overlap), and a form that saves logged time as a session. Delete and apply both take
+   a snapshot (hard rule 5) and offer Undo in the toast. Nothing in here is sent anywhere. */
+var sessScrimEl=document.getElementById("sessScrim"), sessApplyId=null;
+function sessionSpan(r){ return r.blocks.reduce(function(m,b){ return Math.max(m,b.offset+b.duration); },0); }
+function renderSessions(){
+  var ids=Object.keys(state.sessions||{}).sort(function(a,b){
+    return state.sessions[a].name.toLowerCase()<state.sessions[b].name.toLowerCase()?-1:1;
+  });
+  document.getElementById("sessList").innerHTML=ids.length?ids.map(function(id){
+    var r=state.sessions[id];
+    return '<div class="sessrow" data-id="'+escapeHtml(id)+'"><div class="sess-main"><b>'+escapeHtml(r.name)+'</b>'+
+      '<span class="sess-meta">'+r.blocks.length+(r.blocks.length===1?" block":" blocks")+" &middot; "+dur(sessionSpan(r))+'</span></div>'+
+      '<div class="sess-btns"><button class="ghost sess-apply">Apply&hellip;</button><button class="ghost sess-del">Delete</button></div></div>';
+  }).join(""):'<p class="emptyhint">No sessions yet. Log a stretch of time, then save it below.</p>';
+}
+/* render() calls this on every redraw (a sync landing, an undo): the list is read-only, so redrawing
+   it can never replace something being typed - the forms live outside #sessList */
+function renderSessionsIfOpen(){
+  if(sessScrimEl&&sessScrimEl.classList.contains("on")) renderSessions();
+}
+function sessApplyPreview(){
+  var r=sessApplyId&&state.sessions[sessApplyId],date=document.getElementById("sessApplyDate").value,t=document.getElementById("sessApplyTime").value;
+  var el=document.getElementById("sessApplyPreview");
+  if(!r||!date||!t||!isIsoDate(date)){ el.textContent="Pick a date and a start time."; return; }
+  var ov=sessionOverlap(r,date,fromHM(t));
+  el.textContent=ov.entries?("Overlaps "+ov.entries+(ov.entries===1?" entry":" entries")+" already logged ("+dur(ov.minutes)+"). They stay; the week will show that time as double-booked."):
+    "No overlap with what is already logged.";
+}
+function closeSessApply(){ sessApplyId=null; document.getElementById("sessApply").hidden=true; }
+function openSessions(){
+  hideToast();
+  closeSessApply();
+  var dateEl=document.getElementById("sessSaveDate");
+  if(!dateEl.value) dateEl.value=iso(new Date());
+  renderSessions();
+  sessScrimEl.querySelector(".sheet").scrollTop=0;
+  sessScrimEl.classList.add("on");
+  lockBodyScroll();
+}
+function closeSessions(){
+  if(!sessScrimEl.classList.contains("on")) return;
+  sessScrimEl.classList.remove("on");
+  closeSessApply();
+  unlockBodyScroll();
+}
+wireOutsideClose(sessScrimEl,closeSessions);
+wireScrimTouchBlock(sessScrimEl);
+document.getElementById("sessionsBtn").addEventListener("click",openSessions);
+document.getElementById("sessClose").addEventListener("click",closeSessions);
+document.addEventListener("keydown",function(ev){
+  if(ev.key==="Escape"&&sessScrimEl.classList.contains("on")) closeSessions();
+});
+document.getElementById("sessList").addEventListener("click",function(ev){
+  var row=ev.target.closest&&ev.target.closest(".sessrow");
+  if(!row) return;
+  var id=row.dataset.id,r=state.sessions[id];
+  if(!r) return;
+  if(ev.target.closest(".sess-apply")){
+    sessApplyId=id;
+    document.getElementById("sessApplyTitle").textContent='Apply "'+r.name+'"';
+    document.getElementById("sessApplyDate").value="";
+    document.getElementById("sessApplyTime").value="";
+    document.getElementById("sessApplyGo").disabled=false;
+    document.getElementById("sessApply").hidden=false;
+    sessApplyPreview();
+  }else if(ev.target.closest(".sess-del")){
+    var name=r.name;
+    if(sessApplyId===id) closeSessApply();
+    deleteSession(id);
+    renderSessions();
+    showToast('Deleted session "'+name+'"',true);
+  }
+});
+document.getElementById("sessApplyDate").addEventListener("input",sessApplyPreview);
+document.getElementById("sessApplyTime").addEventListener("input",sessApplyPreview);
+document.getElementById("sessApplyCancel").addEventListener("click",closeSessApply);
+/* double-submit guard (the category double-tap lesson in SYNC-LESSONS.md): the first click takes the
+   session id out of sessApplyId BEFORE doing anything, so a second click that arrives before the
+   panel has closed finds nothing to apply; the button is also disabled. The apply itself is
+   synchronous, so there is no in-flight state that could stay stuck (hard rule 9): reopening the panel
+   sets the id and enables the button again. */
+document.getElementById("sessApplyGo").addEventListener("click",function(){
+  var id=sessApplyId;
+  if(!id) return;
+  var date=document.getElementById("sessApplyDate").value,t=document.getElementById("sessApplyTime").value;
+  if(!date||!t||!isIsoDate(date)){ document.getElementById("sessApplyPreview").textContent="Pick a date and a start time first."; return; }
+  var r=state.sessions[id],name=r&&r.name;
+  sessApplyId=null;
+  this.disabled=true;
+  var n=applySession(id,date,fromHM(t));
+  closeSessApply();
+  render();
+  if(n===null){ showToast("Could not apply that session.",false); return; }
+  if(localSaveFailed){ showToast("Not saved on this device — storage is full",false); return; }
+  showToast('Applied "'+name+'" — '+n+(n===1?" entry":" entries")+" on "+dayLabel(date),true);
+});
+document.getElementById("sessSaveGo").addEventListener("click",function(){
+  var date=document.getElementById("sessSaveDate").value,from=document.getElementById("sessSaveFrom").value,
+      to=document.getElementById("sessSaveTo").value,nameEl=document.getElementById("sessSaveName");
+  if(!date||!from||!to||!nameEl.value.trim()){ showToast("Pick a day, a start and end time, and give the session a name.",false); return; }
+  var name=normalizeSessionName(nameEl.value);
+  var id=saveSessionFromRange(date,fromHM(from),fromHM(to),nameEl.value);
+  if(!id){ showToast("Nothing is logged between those times on that day, so there is nothing to save.",false); return; }
+  nameEl.value="";
+  renderSessions();
+  if(localSaveFailed){ showToast("Not saved on this device — storage is full",false); return; }
+  showToast('Saved session "'+name+'"',true);
+});
+
 /* only present when opened as index.html?hltest=1 — see selftest.html.
    Exposes real functions so tests exercise actual app logic instead of a
    copy of it; storage is already isolated above via TEST_MODE. */
@@ -4182,6 +4622,19 @@ if(TEST_MODE){
     setDayHighlight:setDayHighlight,
     saveDayHighlight:saveDayHighlight,
     getDayHighlightMax:function(){ return DAY_HIGHLIGHT_MAX; },
+    migrateSessions:migrateSessions,
+    setSession:setSession,
+    removeSession:removeSession,
+    deleteSession:deleteSession,
+    saveSessionFromRange:saveSessionFromRange,
+    sessionSegments:sessionSegments,
+    sessionOverlap:sessionOverlap,
+    applySession:applySession,
+    flattenSessions:flattenSessions,
+    unflattenSessions:unflattenSessions,
+    getSessionFields:function(){ return SESSION_FIELDS; },
+    undoDepth:function(){ return undoStack.length; },
+    getUndoStack:function(){ return undoStack; },
     dayTotals:dayTotals,
     dayElapsedMinutes:dayElapsedMinutes,
     dayUnloggedMinutes:dayUnloggedMinutes,

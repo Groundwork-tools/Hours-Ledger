@@ -282,6 +282,13 @@ button{cursor:pointer}
 .repeat button{flex:1;border:1px solid var(--rule);background:transparent;padding:5px 0;font-family:var(--mono);font-size:10px;text-transform:uppercase}
 .repeat button[aria-pressed=true]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
 .sheet-actions{display:flex;gap:8px;margin-top:20px;align-items:center}
+.sheet h3{font-family:var(--mono);font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);margin:22px 0 10px;font-weight:600}
+#sessList{margin-bottom:6px}
+.sessrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--rule)}
+.sess-main{display:flex;flex-direction:column;min-width:0}
+.sess-main b{font-size:14px;overflow-wrap:anywhere}
+.sess-meta{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.sess-btns{display:flex;gap:6px;flex-shrink:0}
 .sheet-actions .solid{flex:1;padding:11px}
 .linkbtn{border:0;background:transparent;color:var(--flag);font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em}
 
