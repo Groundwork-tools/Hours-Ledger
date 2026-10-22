@@ -19,7 +19,7 @@ and reads `id="summary"`).
 |---|---|
 | 1 sessions | DONE, gate passed (see below) |
 | 2 schedule + banner | DONE, gate passed (see below) |
-| 3 detection | not started |
+| 3 detection | DONE, gate passed (see below) |
 
 ## Log
 
@@ -156,6 +156,90 @@ in the same commit (run made with the constant at 985; the only later change is 
 timer and the focus/visibility refresh (they are skipped under TEST_MODE on purpose, so they are REASONED ONLY),
 real clock behaviour around midnight, real Drive.
 
+## Stage 3 log — pattern detection (pure function, ranked top 3, proposes creating a session only)
+
+**Fail-first (RAN)** against the stage-2 code (scratch harness, detection block only): `FAIL - 19 failing / 291 total`.
+Verbatim: `D00: scenario threw before finishing [observed: h.getDetectConstants is not a function]`,
+`D01: ... [observed: h.detectPatterns is not a function]` (and 13 more scenarios, same cause),
+`D14 with the planted history the sheet offers at most 3 suggestions ... [observed: 0 undefined]` (UI assertion),
+`D15 privacy.html says that spotting patterns happens in the browser and only ever proposes a session` (static assertion).
+
+**First runs with the code (RAN):** `FAIL - 1 failing / 337` — `D01b ... [observed: [0,0,13,0,12,1,0]]`: my fixture
+arithmetic, not the detector (an 88-day span from a Monday holds 13 Wednesdays and 12 Fridays; the observation is exactly
+right). Corrected the expected counts. Then my D12 restructure left a stale "two dismissals stored" assertion after an
+intermediate clear; re-dismissed both before it (intent unchanged). Then `PASS - 0 failing / 338`.
+
+**Design, fixed BEFORE looking at numbers:** per category, the 15-minute window (inclusive) holding the most DISTINCT DATES is a
+cluster; remove and repeat; one occurrence per date (its earliest start); excluded: uncategorised, unknown category, entries
+starting at 00:00. Rank by weekday concentration p = min(1, 7 x P(Bin(n,1/7) >= busiest weekday count)); ties: more dates,
+earlier start, category id. No p cutoff. `suggestSessions` = detect, minus device-local dismissals, top 3. Accepting creates one
+one-block session with no schedule and logs nothing. I replaced "window anchored at the first start" with "densest window"
+while writing the tests: a stray entry just before a real cluster would otherwise split the cluster's own jitter.
+
+### Deriving the minimum-dates number (RAN, read-only copy of the real export, never committed)
+Rule written down BEFORE running: shift each day's entries by an independent random offset (keeps each day's contents, breaks
+time-of-day alignment), 15-minute tolerance, N seeds; the minimum number of dates is the smallest k such that, in at most 5% of
+seeds, chance produces ANY same-category start-time cluster of k dates.
+- First run (anchored clustering, 300 seeds): k=9 46.3%, k=10 13.3%, **k=11 2.3%**, k=12 0.3% -> 11.
+- Rebuilt with the detector's real (densest-window) clustering, 300 seeds: k=10 22.7%, k=11 4.7%, k=12 0.7% -> 11 (borderline).
+- Same, **1000 seeds**: k=9 (not printed), k=10 22.3%, **k=11 5.2%**, k=12 1.1%, k=13 0.5% -> the rule gives **12**.
+- Result: `DETECT_MIN_DATES = 12`. **I changed this number after having used 11** (D00/D06 and the code comment moved with it). Reason:
+  the pre-declared rule, applied to the detector's own clustering with enough seeds to resolve 4.7% vs 5.3%. It was not changed
+  to get a test green (the tests pass with either; they were updated to match).
+- Caveat that matters: this is a property of ~88 logged days. More days -> bigger chance clusters -> re-run
+  `tools/derive-min-dates.py <export>` (committed, contains no data) every few months.
+- Tolerance 15: from ONE real pattern (Muay Thai start spread 10 min). n=1; weakest number in the design.
+
+### What the detector finds in the real data (RAN: a faithful Python replica of detectPatterns on the read-only export copy; NOT the JS on real data)
+At MIN=12: 25 candidates. Top two, p = 0.0115, n = 14 days each, Mon..Sun = [2,2,3,0,7,0,0] and [2,3,2,0,7,0,0]:
+Errands/Shower ~05:50 ("get ready for muay thai") and Training ~06:10 ("bike to muay thai"). Everything after has p >= 0.257.
+At MIN=11 a third (Training ~08:00 "bike home", n=11, p=0.09) also appears; k=12 drops it. So: the real Muay Thai habit IS ranked first;
+the habit appears as TWO suggestions (its get-ready and its bike), not as one three-block session (grouping blocks into one session is
+the cut multi-block step). The main "Muay Thai" block shares the 06:10 cluster with the bike entry on the same dates, so the
+Training suggestion is labelled by its most frequent label ("bike to muay thai"), not "Muay Thai".
+
+### Test results on generated fixtures (RAN)
+- D01 (a): a pattern planted on every Friday of 88 noisy days + 3 daily routines is ranked first in **30 of 30** seeded fixtures.
+- D02 (b): **0 of 200** pure-noise fixtures (88 days x 21 entries x 19 categories) produced any candidate; stated bound <= 5% (10).
+  Precondition: fixtures non-empty (min 1848 entries) and 20 of 20 planted-pattern fixtures DO produce a candidate.
+- D03 (b2): routine-only fixtures: the 3 routines are seen in **200 of 200**; **0 of 200** had a candidate at p <= 0.05; bound 3 x 5% = 15% (30).
+  The margins are wide (0 observed vs 10/30 allowed); the mutation table below is what shows these rows can still flip (P02).
+
+### Mutation checks (RAN, final code, 31 mutants, all killed; 0 survivors; unmutated `PASS - 0 failing / 339`)
+First pass on the k=11 code: 28 killed, 1 SURVIVED (P29, no tie-break after p): my tie fixture had the "right" order by insertion alone.
+Rebuilt with the order inverted (earlier start at a later category id; more dates at an earlier category id), and added P29b/P29c
+(tie-break parts in the wrong order). Then the threshold moved to 12 and the whole set was re-run against the final code.
+
+| Mutant | Rows that flipped |
+|---|---|
+| P01 min dates 11 / P02 min dates 3 | D00, D06 / D00, D02, D03, D06, D08 |
+| P03 tolerance 16 / P04 tolerance 14 | D00, D06, D12 / D00, D06 |
+| P06 rank by count not p | D01, D01b, D09 |
+| P07 no union-bound factor | D09, D10 |
+| P08 weekday numbering Sunday=0 | D01, D01b, D14 |
+| P09 no per-date dedupe | D01, D08 |
+| P10 uncategorised / P11 start 00:00 / P12 unknown category included | D07 (each) |
+| P13 latest instead of earliest per date / P14 first label not most frequent | D08 (each) |
+| P15 sessions never cover / P16 scheduled coverage by label | D11, D14 / D11 |
+| P18 detect reorders its input | D04, D12, D14 |
+| P19 no top 3 / P20 gate on p<=0.05 | D10 / D10 |
+| P21 exact-start dismissal / P22 uncapped | D12 / D12 |
+| P23 accept also logs an entry / P24 no snapshot / P25 sets a schedule | D13, D14 / D13, D14 / D13 |
+| P26 no double-submit guard on Save | D14 |
+| P27 network call / P28 writes a dismissal | D15 / D04, D12 |
+| P29, P29b, P29c tie-break variants | D09 (each) |
+| P30 occurrences unsorted / P31 first-found window | D01, D01b, D02, D05, D08 / D01, D01b, D02, D03, D04, D05 |
+
+**Gate (RAN):** full `selftest.html`: `PASS - 0 failing / 1132 total` (1064 + 68). `EXPECTED_MIN_ROWS` raised 1064 -> 1132 in the
+same commit; the run was made with the constant at 1064.
+
+**Cut from stage 3 (smallest shippable):** grouping the clusters of one habit into one multi-block session; the dead-pattern filter
+(a habit you stopped is still proposed while it has 12+ dates); patterns that cross midnight; duration as part of the key;
+schedule suggestion on accept (accepting never sets one).
+
+**Not verified on any real device:** the Suggestions cards and the prefill form on a phone, and whether the proposals FEEL useful
+(only use shows that; the test suite cannot).
+
 
 ## Open issues (decided NOT to fix, listed only)
 
@@ -175,5 +259,52 @@ real clock behaviour around midnight, real Drive.
    `SESSION_DISMISSED_MAX`, `SESSION_PROMPT_LOOKBACK_DAYS`.
 3. **Weekday numbering Mon=0..Sun=6** in `schedule.weekdays`, matching `DAYNAMES` and the rest of the app.
 4. **The save-as-session range is one calendar day** (apply handles midnight; saving a range across midnight is cut).
+6. **`DETECT_MIN_DATES` was changed from 11 to 12 during stage 3** (see the derivation above) - flagged here because I used 11 first.
+7. **A suggestion for a habit that has stopped** is still proposed while it holds 12+ dates (no recency filter; cut).
+8. **tools/derive-min-dates.py is new in the repo** (a dev tool, loaded by nothing, no data in it). Delete it if you would rather keep the repo to the three app files.
 5. **Entries created by the banner's Yes use the scheduled start.** The toast tells the person to adjust; the typical
    duration is logged as if it were exact until they do. (Same "log reality" tension as the open issue above.)
+
+## Final state and what is NOT proven
+
+Branch `feature/sessions` has three stage commits on top of `main` (7f69904). Nothing pushed, merged or deployed.
+Final full run on the final tree: see the last line of this section.
+
+**Verified (RAN, headless Chrome, TEST_MODE, fake Drive):** every claim in the three stage logs above.
+**Not verified on any real device, any real Drive, or by any person using it:**
+- The Sessions sheet, its Apply/Schedule/Suggestion panels, the banner and the toast: layout, tap targets, the date and time
+  pickers, the on-screen keyboard, a phone below 820 px. The test iframe is `display:none`; it reads DOM and state only.
+- Real two-device Drive sync of sessions, schedules and tombstones. The tests use the real `syncEngine()` for "device B" against a
+  fake Drive; Google sign-in only completes on the production origin and on localhost.
+- The 60-second banner refresh and the focus/visibility refresh (deliberately off under TEST_MODE).
+- Behaviour around a real midnight with the real clock (the clock is injected in tests).
+- Whether the suggestions are useful, and whether `schedule.since = today` feels right.
+- Any browser other than headless Chrome (no Safari, no WebKit).
+
+## MORNING CHECKLIST — do these before anything merges
+
+**Setup.** Do NOT test against your real ledger or the real Drive file from a branch you have not backed up. Take a downloaded
+copy of `hours-ledger-sync.json` and an "Export a copy" on each device first. Serve the branch from the laptop on a port other than
+8000 and use `?hltest=1` on the phone (`http://<laptop-LAN-IP>:<port>/index.html?hltest=1`): test-mode storage is suffixed and the
+Drive functions never reach the network. Real Drive sign-in does not work on a preview origin, so the two-device check below needs
+either `localhost` in a fresh incognito window against a throwaway Google account/Drive file, or waiting until after a merge.
+
+1. [ ] **Sessions sheet, phone and laptop.** Open Sessions. Save a session from a logged stretch of a real day (date, from, to, name).
+   It appears in the list. Layout is readable below 820 px; the time pickers do not auto-close mid-entry.
+2. [ ] **Apply a FUTURE session.** Apply it to tomorrow at a start time. Check the entries on tomorrow's grid, one undo step removes
+   them all, and see what the 168-hour bar does for the current week (the open issue: this should NOT be hidden from you).
+3. [ ] **Overlap.** Apply onto a day that already has entries: the preview names the overlap, the entries all stay, undo works.
+4. [ ] **Midnight.** Apply a 22:00 start with a block of 3 hours: two entries on two dates, totals right.
+5. [ ] **Delete and undo.** Delete a session, press Undo in the toast and with Ctrl/Cmd+Z; the session comes back.
+6. [ ] **Banner.** Schedule a session whose window ends in a few minutes (today's weekday, start a few minutes ago) with nothing logged in
+   it. The banner appears only AFTER the window ends. "Yes, log it" logs at the scheduled time and offers Undo; "No" makes it go away and
+   it does not return after a reload. Then log something inside the window by hand and confirm the banner disappears without pressing anything.
+7. [ ] **Two real devices (needs the real Drive path, after a backup).** Create a session on device A; it reaches B. Edit its name on B;
+   A gets it. Delete it on A; B loses it. Apply it ahead on A, sync, and confirm B shows no banner for that window. Ctrl+Z an apply on
+   A and confirm no ghost entries come back from Drive.
+8. [ ] **A suggestion.** Open Sessions on a device with your real history: the Muay Thai get-ready and bike entries should be the
+   top proposals (expected from the read-only replica; not seen in the app). "Create session from this" opens a prefilled form; saving
+   makes a one-block session and logs NOTHING; "Not now" hides it and it stays hidden after a reload.
+9. [ ] **Old tab.** With a pre-branch build still open in another tab, confirm you understand the known gap: that tab's next save drops
+   `sessions` from the local ledger (connected devices recover them from Drive).
+10. [ ] **Decide the open questions** above (esp. 1, 5, 6) and the open issue about future entries counting as logged.

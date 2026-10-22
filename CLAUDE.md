@@ -3133,4 +3133,27 @@ before the build and is recorded with its reason so it is not reopened by accide
   declared and that day counts (a question recorded in OVERNIGHT-STATUS.md).
 - **Not tested because it cannot be under TEST_MODE:** the 60 s timer and the focus/visibility refresh (skipped there).
 
+**Stage 3 - pattern detection (proposes creating a session, nothing else)**
+- **A pure function, `detectPatterns(entries, categories, sessions)`**, returns the full ranked candidate list; it never logs, writes
+  state or touches storage. `suggestSessions(state)` drops this device's dismissals and keeps the top 3. Accepting
+  (`createSessionFromSuggestion`) makes ONE one-block session with no schedule and logs nothing.
+- **Cluster = category + the 15-minute window (inclusive) holding the most distinct dates; at least 12 dates; one occurrence per date.**
+  Excluded: uncategorised entries, entries whose category is gone, entries starting at 00:00 (the morning half of a split-at-midnight entry).
+  Why the densest window rather than one anchored at the first start: a stray entry just before a real cluster would slice its natural jitter.
+- **Ranked by weekday concentration**, p = min(1, 7 x P(Bin(n,1/7) >= busiest weekday count)); ties: more dates, earlier start, category id.
+  **No p cutoff:** the weekday-shuffle null on the real export showed none separates the real habit (p about 0.0035-0.0115) from noise at
+  this size (the null's best p has median 0.013, 5th percentile 0.0007). A ranked list the owner can say "Not now" to, not a gate.
+- **Where the numbers come from.** 15 min: the real Muay Thai block's start spread was 10 min (ONE pattern: the weakest number here).
+  12 dates: the smallest k for which scrambling each day's times (1000 seeds, the detector's own clustering) gave ANY cluster of k dates in at
+  most 5% of seeds (k=11: 5.2%, k=12: 1.1%). It was 11 on a first, simpler derivation and was corrected to 12 by the same rule. It is a
+  property of ~88 logged days and must be re-derived as history grows (`tools/derive-min-dates.py`, which holds no data). Tests pin the
+  three constants (D00) so changing one without redoing the derivation fails loudly.
+- **A session covers a pattern** when a block has the same category and, if the session is scheduled, a block start within 15 min of the
+  pattern's; if it is unscheduled, the same label (case-insensitive).
+- **Dismissals ("Not now") are device-local** (`hours-ledger-sessions-dismissed-suggestions-v1`, capped at 50, matched by category and start
+  within 15 min), never synced; no data is changed by dismissing.
+- **Known limits, said plainly:** the real Muay Thai habit shows up as TWO proposals (its get-ready and its bike), not one three-block
+  session (grouping is cut); a stopped habit is still proposed while it holds 12+ dates; nothing crossing midnight is found. `LEARNING-NOTES.md`
+  explains the method in plain language.
+
 Feature creep is the known failure mode of this project.

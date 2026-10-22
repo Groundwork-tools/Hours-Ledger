@@ -277,6 +277,8 @@ var DEVICE_KEY=TEST_MODE?"hours-ledger-device-id-TESTMODE":"hours-ledger-device-
 /* sessions: the prompts this device's owner dismissed ("sessionId|date"). Device-local on purpose, never
    part of state and never synced (see CLAUDE.md, Sessions design decisions). Tiny and capped (rule 10). */
 var SDKEY=TEST_MODE?"hours-ledger-selftest-sessions-dismissed-v1":"hours-ledger-sessions-dismissed-v1";
+/* the same for suggestions the owner said "Not now" to ("category@start"); device-local, capped, never synced */
+var SGKEY=TEST_MODE?"hours-ledger-selftest-sessions-dismissed-suggestions-v1":"hours-ledger-sessions-dismissed-suggestions-v1";
 function getDeviceId(){
   var id=readStore(DEVICE_KEY);
   if(!id){ id=uid()+uid(); writeStore(DEVICE_KEY,id); }
@@ -933,6 +935,130 @@ function setSessionSchedule(id,weekdays,start){
   setSession(id,r.name,r.blocks,sched);
   persist();
   return true;
+}
+
+/* ---------------- pattern detection (stage 3) ----------------
+   Proposes CREATING a session - nothing else. detectPatterns() is PURE: it reads the entries, the
+   categories and the existing sessions it is handed and returns the full ranked list of candidates; it
+   never logs an entry, writes state or touches storage. suggestSessions() then drops what this device has
+   dismissed and keeps the top DETECT_TOP. There is NO pass/fail gate: a ranked list the owner can say "not
+   now" to, not a verdict that something is or is not a habit.
+
+   What a candidate is. Entries are grouped by category (uncategorised entries, entries whose category no
+   longer exists, and entries starting at 00:00 - the morning half of a split-at-midnight entry - are left
+   out). Within a category the start times are searched for the 15-minute window (DETECT_TOLERANCE_MIN,
+   inclusive) that holds the most DISTINCT DATES; that window is a cluster, its occurrences are removed, and
+   the search repeats. A cluster needs DETECT_MIN_DATES distinct dates; each date counts once (its earliest
+   start in the window). Why the densest window and not one anchored at the first start: a stray entry
+   just before a real cluster would otherwise slice the cluster's natural jitter in two.
+
+   How a candidate is ranked: WEEKDAY CONCENTRATION. If a thing happened on n dates, and weekdays were
+   irrelevant, each date would fall on a given weekday with probability 1/7. m is the busiest weekday's
+   count; p = min(1, 7 * P(Binomial(n,1/7) >= m)) is how surprising that is (the 7 is a union bound over
+   "which weekday", so p is conservative). Small p = tied to particular weekdays. A routine done every day
+   gets p near 1 and ranks last, which is why a big every-day cluster does not outrank a smaller weekly one.
+   Ties: more dates, then earlier start, then category id.
+
+   Where the numbers come from (OVERNIGHT-STATUS.md has the run): 15 min = the real Muay Thai block's start
+   spread was 10 min; 12 dates = the smallest k for which a time-shift null on the real export (each day's
+   entries moved by an independent random offset, 1000 seeds, this very clustering) produced ANY cluster of k
+   dates in at most 5% of seeds (k=10: 22.3%, k=11: 5.2%, k=12: 1.1%). The first derivation, with a simpler
+   clustering and 300 seeds, read k=11 at 2.3%; the real clustering finds bigger chance clusters and 1000
+   seeds settled the borderline, so the rule gave 12. That 12 is a property of ~88 logged days: more history makes the
+   null's biggest cluster larger, so re-derive it (tools/derive-min-dates.py) as the ledger grows. There is
+   deliberately no p cutoff: the weekday-shuffle null showed none separates the real pattern from noise
+   at this data size (the real best p, 0.0035, sat between the null's median 0.013 and its 5th percentile 0.0007). */
+var DETECT_TOLERANCE_MIN=15, DETECT_MIN_DATES=12, DETECT_TOP=3;
+function weekdayOfIso(d){ var q=d.split("-"); return (new Date(+q[0],+q[1]-1,+q[2]).getDay()+6)%7; }
+function binomTailAtLeast(n,m,p){
+  var pmf=Math.pow(1-p,n),sum=0;
+  for(var i=0;i<=n;i++){
+    if(i>=m) sum+=pmf;
+    pmf=pmf*(n-i)/(i+1)*(p/(1-p));
+  }
+  return Math.min(1,sum);
+}
+function lowMedian(arr){ var a=arr.slice().sort(function(x,y){ return x-y; }); return a[(a.length-1)>>1]; }
+function normLabel(l){ return String(l==null?"":l).replace(/\s+/g," ").trim().toLowerCase(); }
+function sessionsCoverPattern(sessions,cat,start,label){
+  return Object.keys(sessions||{}).some(function(id){
+    var sx=sessions[id];
+    if(!sx||!Array.isArray(sx.blocks)) return false;
+    return sx.blocks.some(function(b){
+      if(b.cat!==cat) return false;
+      if(sx.schedule&&Number.isInteger(sx.schedule.start)) return Math.abs((sx.schedule.start+b.offset)%1440-start)<=DETECT_TOLERANCE_MIN;
+      return normLabel(b.label)===normLabel(label);
+    });
+  });
+}
+function detectPatterns(entriesByDate,categories,sessions){
+  var known={},byCat={},out=[];
+  (categories||[]).forEach(function(c){ known[c.id]=c.name; });
+  Object.keys(entriesByDate||{}).sort().forEach(function(date){
+    (entriesByDate[date]||[]).forEach(function(e){
+      if(!e||typeof e.cat!=="string"||!Object.prototype.hasOwnProperty.call(known,e.cat)||!(e.start>0)||!(e.end>e.start)) return;
+      (byCat[e.cat]=byCat[e.cat]||[]).push({date:date,start:e.start,end:e.end,label:typeof e.label==="string"?e.label:""});
+    });
+  });
+  Object.keys(byCat).sort().forEach(function(cat){
+    var occ=byCat[cat].sort(function(a,b){
+      return a.start-b.start||(a.date<b.date?-1:a.date>b.date?1:0)||a.end-b.end||(a.label<b.label?-1:a.label>b.label?1:0);
+    });
+    while(occ.length>=DETECT_MIN_DATES){
+      var cnt={},dist=0,j=0,bestD=0,bestI=-1,bestJ=-1,i;
+      for(i=0;i<occ.length;i++){
+        while(j<occ.length&&occ[j].start-occ[i].start<=DETECT_TOLERANCE_MIN){ if(!cnt[occ[j].date]){ cnt[occ[j].date]=0; dist++; } cnt[occ[j].date]++; j++; }
+        if(dist>bestD){ bestD=dist; bestI=i; bestJ=j; }
+        if(!--cnt[occ[i].date]) dist--;
+      }
+      if(bestD<DETECT_MIN_DATES) break;
+      var cluster=occ.splice(bestI,bestJ-bestI),seen={},first=[];
+      cluster.forEach(function(o){ if(!seen[o.date]){ seen[o.date]=1; first.push(o); } });
+      var dates=first.map(function(o){ return o.date; }).sort(),wdc=[0,0,0,0,0,0,0];
+      dates.forEach(function(d){ wdc[weekdayOfIso(d)]++; });
+      var m=Math.max.apply(null,wdc),n=dates.length;
+      var start=lowMedian(first.map(function(o){ return o.start; })),duration=lowMedian(first.map(function(o){ return o.end-o.start; }));
+      var tally={},rep={};
+      first.forEach(function(o){ var k=normLabel(o.label); tally[k]=(tally[k]||0)+1; if(!(k in rep)) rep[k]=o.label; });
+      var bestK=Object.keys(tally).sort(function(a,b){ return tally[b]-tally[a]||(a<b?-1:a>b?1:0); })[0];
+      if(sessionsCoverPattern(sessions,cat,start,rep[bestK])) continue;
+      out.push({cat:cat,catName:known[cat],start:start,duration:duration,label:rep[bestK],count:n,dates:dates,weekdayCounts:wdc,p:Math.min(1,7*binomTailAtLeast(n,m,1/7))});
+    }
+  });
+  return out.sort(function(a,b){
+    return a.p-b.p||b.count-a.count||a.start-b.start||(a.cat<b.cat?-1:a.cat>b.cat?1:0);
+  });
+}
+function dismissedSuggestions(){
+  try{ var a=JSON.parse(readStore(SGKEY)||"[]"); return Array.isArray(a)?a.filter(function(x){ return typeof x==="string"; }):[]; }catch(e){ return []; }
+}
+function dismissSuggestion(sug){
+  if(!sug||typeof sug.cat!=="string"||!Number.isInteger(sug.start)) return;
+  var key=sug.cat+"@"+sug.start,list=dismissedSuggestions().filter(function(x){ return x!==key; });
+  list.push(key);
+  writeStore(SGKEY,JSON.stringify(list.slice(-SESSION_DISMISSED_MAX)));
+}
+function suggestionDismissed(sug,list){
+  return list.some(function(k){
+    var at=k.lastIndexOf("@");
+    return k.slice(0,at)===sug.cat&&Math.abs(+k.slice(at+1)-sug.start)<=DETECT_TOLERANCE_MIN;
+  });
+}
+function suggestSessions(st){
+  var dismissed=dismissedSuggestions();
+  return detectPatterns(st.entries,st.categories,st.sessions).filter(function(x){ return !suggestionDismissed(x,dismissed); }).slice(0,DETECT_TOP);
+}
+/* accept = create ONE session with ONE block (offset 0, the pattern's median duration, its label and
+   category), no schedule. It logs nothing. The CALLER's name; one snapshot. */
+function createSessionFromSuggestion(sug,name){
+  if(!sug||typeof sug.cat!=="string"||!Number.isInteger(sug.duration)||sug.duration<1||typeof sug.label!=="string") return null;
+  var nm=normalizeSessionName(name);
+  if(!nm) return null;
+  snapshot('create session "'+nm+'" from a suggestion');
+  var id=uid();
+  setSession(id,nm,[{offset:0,duration:Math.min(sug.duration,SESSION_MAX_DURATION),label:sug.label,cat:sug.cat}],null);
+  persist();
+  return id;
 }
 
 /* ---- save as session / apply ---- */
@@ -4571,7 +4697,25 @@ if(!TEST_MODE&&state.driveConnected) loadGisScript(function(){});
    a snapshot (hard rule 5) and offer Undo in the toast. Nothing in here is sent anywhere. */
 var sessScrimEl=document.getElementById("sessScrim"), sessApplyId=null;
 function sessionSpan(r){ return r.blocks.reduce(function(m,b){ return Math.max(m,b.offset+b.duration); },0); }
+var suggestCurrent=[], suggestPending=null;
+function weekdayEvidence(wdc){
+  return wdc.map(function(c,i){ return {c:c,i:i}; }).filter(function(x){ return x.c>0; })
+    .sort(function(a,b){ return b.c-a.c||a.i-b.i; }).map(function(x){ return DAYNAMES[x.i]+" \u00d7"+x.c; }).join(", ");
+}
+function renderSuggestions(){
+  var el=document.getElementById("sessSuggest");
+  suggestCurrent=suggestSessions(state);
+  if(!suggestCurrent.length){ el.innerHTML=""; return; }
+  el.innerHTML='<h3>Patterns in your log</h3><p class="hint">Proposals only &mdash; nothing is logged. Each is something you logged at about the same time of day on several days; weekdays it leans toward come first.</p>'+
+    suggestCurrent.map(function(x,i){
+      return '<div class="sugg" data-i="'+i+'"><div class="sess-main"><b>'+escapeHtml(x.label||x.catName)+'</b>'+
+        '<span class="sess-meta">'+escapeHtml(x.catName)+" &middot; about "+toHM(x.start)+" &middot; "+dur(x.duration)+" &middot; "+x.count+" days &middot; "+weekdayEvidence(x.weekdayCounts)+'</span>'+
+        '<span class="sess-meta">e.g. '+x.dates.slice(-3).join(", ")+'</span></div>'+
+        '<div class="sess-btns"><button class="ghost sugg-create">Create session from this</button><button class="ghost sugg-no">Not now</button></div></div>';
+    }).join("");
+}
 function renderSessions(){
+  renderSuggestions();
   var ids=Object.keys(state.sessions||{}).sort(function(a,b){
     return state.sessions[a].name.toLowerCase()<state.sessions[b].name.toLowerCase()?-1:1;
   });
@@ -4598,11 +4742,13 @@ function sessApplyPreview(){
 }
 function closeSessApply(){ sessApplyId=null; document.getElementById("sessApply").hidden=true; }
 var sessSchedId=null;
+function closeSessSuggest(){ suggestPending=null; document.getElementById("sessSuggestForm").hidden=true; }
 function closeSessSched(){ sessSchedId=null; document.getElementById("sessSched").hidden=true; }
 function openSessions(){
   hideToast();
   closeSessApply();
   closeSessSched();
+  closeSessSuggest();
   var dateEl=document.getElementById("sessSaveDate");
   if(!dateEl.value) dateEl.value=iso(new Date());
   renderSessions();
@@ -4615,6 +4761,7 @@ function closeSessions(){
   sessScrimEl.classList.remove("on");
   closeSessApply();
   closeSessSched();
+  closeSessSuggest();
   unlockBodyScroll();
 }
 wireOutsideClose(sessScrimEl,closeSessions);
@@ -4677,6 +4824,35 @@ document.getElementById("sessApplyGo").addEventListener("click",function(){
   if(n===null){ showToast("Could not apply that session.",false); return; }
   if(localSaveFailed){ showToast("Not saved on this device — storage is full",false); return; }
   showToast('Applied "'+name+'" — '+n+(n===1?" entry":" entries")+" on "+dayLabel(date),true);
+});
+document.getElementById("sessSuggest").addEventListener("click",function(ev){
+  var card=ev.target.closest&&ev.target.closest(".sugg");
+  if(!card) return;
+  var x=suggestCurrent[+card.dataset.i];
+  if(!x) return;
+  if(ev.target.closest(".sugg-no")){ dismissSuggestion(x); renderSessions(); return; }
+  if(!ev.target.closest(".sugg-create")) return;
+  closeSessApply(); closeSessSched();
+  suggestPending=x;
+  document.getElementById("sessSuggestName").value=normalizeSessionName(x.label||x.catName);
+  document.getElementById("sessSuggestSummary").textContent=x.catName+", about "+toHM(x.start)+", "+dur(x.duration)+" ("+x.count+" days). This creates a session with that one block. It logs nothing and sets no schedule.";
+  document.getElementById("sessSuggestForm").hidden=false;
+});
+document.getElementById("sessSuggestCancel").addEventListener("click",closeSessSuggest);
+/* double-submit guard, same shape as Apply: the first click takes the pending suggestion out before doing
+   anything, so a second click finds nothing to create; the create is synchronous (no stuck flag, rule 9) */
+document.getElementById("sessSuggestGo").addEventListener("click",function(){
+  var x=suggestPending;
+  if(!x) return;
+  var nm=normalizeSessionName(document.getElementById("sessSuggestName").value);
+  if(!nm) return;
+  suggestPending=null;
+  var id=createSessionFromSuggestion(x,nm);
+  closeSessSuggest();
+  renderSessions();
+  if(!id){ showToast("Could not create that session.",false); return; }
+  if(localSaveFailed){ showToast("Not saved on this device — storage is full",false); return; }
+  showToast('Created session "'+nm+'" — nothing was logged',true);
 });
 document.getElementById("sessSchedCancel").addEventListener("click",closeSessSched);
 document.getElementById("sessSchedGo").addEventListener("click",function(){
@@ -4779,6 +4955,13 @@ if(TEST_MODE){
     saveDayHighlight:saveDayHighlight,
     getDayHighlightMax:function(){ return DAY_HIGHLIGHT_MAX; },
     migrateSessions:migrateSessions,
+    detectPatterns:detectPatterns,
+    suggestSessions:suggestSessions,
+    dismissSuggestion:dismissSuggestion,
+    getDismissedSuggestions:dismissedSuggestions,
+    clearDismissedSuggestionsForTest:function(){ try{ localStorage.removeItem(SGKEY); }catch(e){} },
+    createSessionFromSuggestion:createSessionFromSuggestion,
+    getDetectConstants:function(){ return {tolerance:DETECT_TOLERANCE_MIN,minDates:DETECT_MIN_DATES,top:DETECT_TOP}; },
     setTestNow:function(d){ testNow=d; },
     setSessionSchedule:setSessionSchedule,
     pendingSessionPrompts:pendingSessionPrompts,
@@ -4896,6 +5079,7 @@ if(TEST_MODE){
       try{ localStorage.removeItem(DEVICE_KEY); }catch(e){}
       try{ localStorage.removeItem(UKEY); }catch(e){}
       try{ localStorage.removeItem(SDKEY); }catch(e){}
+      try{ localStorage.removeItem(SGKEY); }catch(e){}
     },
     persist:persist,
     doDeleteCategory:doDeleteCategory,

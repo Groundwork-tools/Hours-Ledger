@@ -271,6 +271,19 @@
         <button class="ghost" id="sessSchedCancel">Cancel</button>
       </div>
     </div>
+    <div id="sessSuggest"></div>
+    <div id="sessSuggestForm" hidden>
+      <h3>Create a session from this pattern</h3>
+      <p class="hint" id="sessSuggestSummary"></p>
+      <div class="field">
+        <label for="sessSuggestName">Name</label>
+        <input type="text" id="sessSuggestName" maxlength="60" autocomplete="off">
+      </div>
+      <div class="sheet-actions">
+        <button class="solid" id="sessSuggestGo">Save session</button>
+        <button class="ghost" id="sessSuggestCancel">Cancel</button>
+      </div>
+    </div>
     <h3>Save logged time as a session</h3>
     <div class="field">
       <label for="sessSaveDate">Day</label>
