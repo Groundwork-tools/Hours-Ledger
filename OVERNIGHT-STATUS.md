@@ -5,6 +5,13 @@ Everything runs in TEST_MODE (fake Drive, fake token). No real Drive, no real OA
 
 **Legend:** RAN = I executed it this session and the output is quoted. REASONED ONLY = read from code, not run.
 
+## Summary (read this first)
+
+All three stages built, each gated on a full `selftest.html` run: 853 -> 985 -> 1064 -> 1132 rows, 0 failing at every gate and on the final tree.
+No stop condition was hit. `selftest.html` CAN be run here. Nothing is pushed, merged or deployed. Nothing has been seen on a real device
+or against real Drive: scroll to "MORNING CHECKLIST" at the bottom.
+One number changed after I had used it: `DETECT_MIN_DATES` 11 -> 12 (stage 3 log explains why; Questions item 6).
+
 ## Top of file: can selftest.html be run?
 
 YES. RAN: headless Chrome (`/Applications/Google Chrome.app`, outside the repo) + `python3 -m http.server`,
@@ -268,7 +275,7 @@ schedule suggestion on accept (accepting never sets one).
 ## Final state and what is NOT proven
 
 Branch `feature/sessions` has three stage commits on top of `main` (7f69904). Nothing pushed, merged or deployed.
-Final full run on the final tree: see the last line of this section.
+**Final full run on the final committed tree (RAN, row-count guard at 1132, headless Chrome, scratch copy of the repo outside it): `PASS - 0 failing / 1132 total`.** Branch head at that run: `1754934`.
 
 **Verified (RAN, headless Chrome, TEST_MODE, fake Drive):** every claim in the three stage logs above.
 **Not verified on any real device, any real Drive, or by any person using it:**
