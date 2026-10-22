@@ -3113,4 +3113,24 @@ before the build and is recorded with its reason so it is not reopened by accide
 - **Known gap, same as the day highlights:** an already-open tab running pre-feature code has no `sessions` in
   memory; its next save rewrites the ledger without them. Connected devices recover them from Drive.
 
+**Stage 2 - the optional schedule and the "Did this happen?" banner**
+- **Shape.** `schedule = {weekdays:[0..6, Mon=0], start:minutes, since:"YYYY-MM-DD"}` inside the session record (so it
+  syncs with it, and is in the content whitelist); anything malformed is null (the session stays, unscheduled).
+- **The prompt is DERIVED, never stored.** An occurrence (session, date) prompts only when: the schedule names that weekday;
+  date >= `since`; date is today or yesterday; the window (start .. start + the session's length) is over - strictly,
+  `now > end`; NO entry overlaps the window by even a minute; and this device has not dismissed it. Why "any overlap
+  silences it": someone who logged anything there has spoken for that time; asking again would be inferring. Why derived:
+  logging by hand, applying ahead, or another device's apply arriving by sync all make it vanish with no flag to sync or to
+  get stuck (rules 7 and 9). Cost: a neighbouring entry that ran one minute into the window silences it (the safe direction:
+  no nag). Why strictly after the end: the question is about something that has finished.
+- **Yes logs the session at its scheduled start on that date** as ordinary entries (one snapshot), and the toast says to
+  adjust them if it ran differently. The click handler re-derives the prompt before acting, so a stale row (window filled
+  since it rendered, e.g. by a sync) does nothing. No is a dismissal, not an edit: no snapshot.
+- **Dismissals** live in their own device-local key (`hours-ledger-sessions-dismissed-v1`, capped at 50, newest kept), not in
+  `state`, never pushed. Two devices can therefore ask the same question once each; if both press Yes before syncing, both
+  sets of entries survive (double-booked, visible, undoable) - documented and tested, not prevented.
+- **Declaring a schedule is an undoable edit** (`setSessionSchedule`, one snapshot, restamped). `since` is the day it is
+  declared and that day counts (a question recorded in OVERNIGHT-STATUS.md).
+- **Not tested because it cannot be under TEST_MODE:** the 60 s timer and the focus/visibility refresh (skipped there).
+
 Feature creep is the known failure mode of this project.

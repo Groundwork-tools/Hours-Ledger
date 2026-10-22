@@ -18,7 +18,7 @@ and reads `id="summary"`).
 | Stage | State |
 |---|---|
 | 1 sessions | DONE, gate passed (see below) |
-| 2 schedule + banner | not started |
+| 2 schedule + banner | DONE, gate passed (see below) |
 | 3 detection | not started |
 
 ## Log
@@ -102,6 +102,60 @@ midnight; save takes one calendar day).
 a phone, the date/time pickers, tap targets, the toast on a phone, real Drive, real two-device sync. The test
 iframe is `display:none`, so it cannot prove layout.
 
+## Stage 2 log — schedule and the "Did this happen?" banner
+
+**Fail-first (RAN)** against the stage-1 `app.js` (scratch harness, schedule block only):
+`FAIL - 12 failing` (+1 GUARD row from my scratch harness's row-count constant, since fixed). Verbatim examples:
+`B01 weekdays are sorted and de-duplicated [observed: {"weekdays":[4,0,4,2],"start":370,"since":"2026-10-01"}]`,
+`B01 a malformed schedule found in stored state is dropped by the load migration, the blocks stay [observed: {"weekdays":[9],"start":5,"since":"x"}]`,
+`B02: scenario threw before finishing [observed: h.setTestNow is not a function]` (9 scenarios, same cause: the injectable clock does not exist yet).
+
+**First run with the code (RAN):** `FAIL - 1 failing / 344 total` — `B04 it survives a reload [observed: ]`. Diagnosis: my
+test called `setSession` (the in-memory primitive; the UI paths call `persist()` themselves) and never saved, so the
+reloaded page legitimately had no session. Test setup bug; assertion unchanged, `h.persist()` added before the reload.
+After: `PASS - 0 failing / 344 total` (schedule-only harness; 344 = 277 always-run + 67 schedule rows).
+
+**Mutation checks (RAN, 22 mutants).** First pass: 19 killed, 3 SURVIVED — N15, N23, N25. All three were weaknesses in
+my tests: N23 (prompts mutating state) — my "changes nothing" row took its snapshot AFTER earlier calls had already
+done the mutation; N25 (coverage ignoring other devices' entries) — B05's entries were authored by the sandbox's own
+device so the mutation made no difference; N15 (Yes does not re-check) — a double click on a detached DOM node never
+reaches the delegated handler, so the re-check was untested; the case it exists for is a STALE row whose window was
+filled (e.g. by a sync) after it rendered. Added B03d (pure, snapshot before the first call), a dev-X variant in B05,
+and B06c (stale row). Re-ran those three mutants: N15 `FAIL - 1`, N23 `FAIL - 1`, N25 `FAIL - 1`; unmutated `PASS - 0 failing / 350`.
+Final: all 22 killed.
+
+| Mutant | Rows that flipped |
+|---|---|
+| N01 prompt fires AT the window end (>=) | B03 |
+| N02 schedule.since ignored | B03 |
+| N03 lookback 3 days | B03 |
+| N04 lookback 1 day | B03, B03c, B04 |
+| N05 edge-touching entry counts as covering | B03b, B03c |
+| N06 coverage ignores the next-date part of the window | B03c |
+| N07 weekday check removed | B03, B03b, B05, B06 |
+| N09 dismissals ignored | B04, B06 |
+| N10 dismissal also written into synced state | B04 |
+| N11 dismissal list not capped | B04 |
+| N12 setSessionSchedule takes no snapshot | B02, B06b |
+| N13 since is not today | B02, B06b |
+| N14 window end = start + last block only | B03 |
+| N15 Yes does not re-derive before acting | B06c (after strengthening) |
+| N16 Yes logs at 00:00 not the scheduled start | B06 |
+| N17 render() does not refresh the banner | B06 |
+| N19 computing prompts makes a network call | B07 |
+| N20 cleanSchedule accepts start 1440 | B01, B02 |
+| N21 weekdays not sorted | B01, B02 |
+| N23 computing prompts mutates state | B03d (after strengthening) |
+| N25 coverage ignores other devices' entries | B05 (after strengthening) |
+| N26 "No" does not dismiss | B06 |
+
+**Gate (RAN):** full `selftest.html`: `PASS - 0 failing / 1064 total` (985 + 79). `EXPECTED_MIN_ROWS` raised 985 -> 1064
+in the same commit (run made with the constant at 985; the only later change is the constant).
+
+**Not verified on any real device:** the banner's layout on a phone, the schedule panel's day checkboxes, the 60 s
+timer and the focus/visibility refresh (they are skipped under TEST_MODE on purpose, so they are REASONED ONLY),
+real clock behaviour around midnight, real Drive.
+
 
 ## Open issues (decided NOT to fix, listed only)
 
@@ -112,4 +166,14 @@ iframe is `display:none`, so it cannot prove layout.
 
 ## Questions (decisions not covered by the brief; conservative option taken)
 
-(none yet)
+1. **schedule.since = the day the schedule is declared (today), and that day counts.** Not covered by the brief ("schedule.since
+   respected"). Alternative: tomorrow (never ask about the day you set it up). Chose today because the morning checklist
+   needs a banner to be verifiable in one sitting, and a prompt needs an empty window anyway. Cost: declaring a schedule at
+   10:00 for a 06:00 session you did not log can raise a banner immediately. One constant-free line in `setSessionSchedule`.
+2. **Dismissal list cap = 50, lookback = today and yesterday (2 days).** The brief said "capped" and "lookback today and
+   yesterday"; the number 50 is mine (the banner can only ever look 2 days back, so 50 is far more than needed). Named constants
+   `SESSION_DISMISSED_MAX`, `SESSION_PROMPT_LOOKBACK_DAYS`.
+3. **Weekday numbering Mon=0..Sun=6** in `schedule.weekdays`, matching `DAYNAMES` and the rest of the app.
+4. **The save-as-session range is one calendar day** (apply handles midnight; saving a range across midnight is cut).
+5. **Entries created by the banner's Yes use the scheduled start.** The toast tells the person to adjust; the typical
+   duration is logged as if it were exact until they do. (Same "log reality" tension as the open issue above.)

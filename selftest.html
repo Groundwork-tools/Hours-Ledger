@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=985;
+var EXPECTED_MIN_ROWS=1064;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -2098,7 +2098,7 @@ function freshSandbox(clean,extraQuery){
   if(clean){
     ["hours-ledger-selftest-v2","hours-ledger-device-id-TESTMODE",
      "hours-ledger-selftest-undo-v1","hours-ledger-fakedrive-TESTMODE",
-     "hours-ledger-access-token-TESTMODE"].forEach(function(k){
+     "hours-ledger-access-token-TESTMODE","hours-ledger-selftest-sessions-dismissed-v1"].forEach(function(k){
       try{ localStorage.removeItem(k); }catch(e){}
     });
   }
@@ -3008,7 +3008,8 @@ function runAsyncTests(H,d){
     .then(function(r){ return runExportWeekTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runDayHighlightTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runDayCloseoutUITests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runSessionTests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runSessionTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runSessionScheduleTests().then(function(more){ return r.concat(more); }); });
 }
 
 /* ---------------------------------------------------------------------
@@ -4338,6 +4339,369 @@ function runSessionTests(){
         check("S11 privacy.html says what sessions are, that they sync with the rest only if Drive is connected",/sessions/i.test(t)&&/saved sessions/i.test(t)&&/connect/i.test(t));
       });
     })
+    .then(function(){ return results; });
+}
+
+/* ---------------------------------------------------------------------
+   Sessions - stage 2: the optional declared schedule and the "Did this happen?" banner.
+   Written BEFORE the code and watched to fail against the stage-1 app.js.
+
+   schedule = {weekdays:[0..6, Mon=0], start:minutes, since:"YYYY-MM-DD"} inside the session record (so it
+   syncs with it). A banner for one occurrence (session, date) shows only when ALL of: the schedule names that
+   weekday, the date is not before schedule.since, the date is today or yesterday, the window (start ..
+   start+length of the session) is over (strictly: now > end), NO entry overlaps the window at all, and this
+   device has not dismissed that (session, date). Dismissals are device-local and capped, never synced.
+   The clock is injectable under TEST_MODE only (setTestNow). Rows are tagged B01...; OVERNIGHT-STATUS.md has
+   the mutation table. */
+function runSessionScheduleTests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); }
+  function J(x){ return JSON.stringify(x); }
+  function settle(h){
+    return delay(250).then(function(){ return waitFor(function(){ return !h.isDriveSyncInFlight(); },4000); }).then(function(){ return delay(50); });
+  }
+  function scenario(tag,fn){
+    return function(){
+      return Promise.resolve().then(fn).catch(function(e){
+        check(tag+": scenario threw before finishing",false,String(e&&e.message||e));
+      });
+    };
+  }
+  function connectedSandbox(){
+    return freshSandbox(true).then(function(f){
+      f.d.getElementById("connectDrive").click();
+      return waitFor(function(){ return f.d.getElementById("connectDrive").textContent==="Drive: synced"; },4000).then(function(ok){
+        check("setup: fake Drive connect completed",ok);
+        return f;
+      });
+    });
+  }
+  function blk(offset,duration,label,cat){ return {offset:offset,duration:duration,label:label,cat:cat===undefined?null:cat}; }
+  function dayEntries(h,date){
+    return (h.getState().entries[date]||[]).slice().sort(function(a,b){ return a.start-b.start||a.end-b.end; });
+  }
+  function ranges(h,date){ return dayEntries(h,date).map(function(e){ return e.start+"-"+e.end; }).join(","); }
+  /* 2026-10-16 is a Friday (weekday index 4). The session below is 06:00 - 07:40. */
+  var FRI="2026-10-16",SAT="2026-10-17",SUN="2026-10-18",THU="2026-10-15";
+  var SCHED={weekdays:[4],start:360,since:"2026-10-01"};
+  var MT=[blk(0,10,"Get ready","seed-admin"),blk(10,10,"Bike","seed-training"),blk(20,80,"Muay Thai","seed-training")];
+  function at(y,m,d,hh,mm,ss){ return new Date(y,m-1,d,hh,mm,ss||0,0); }
+  function ids(list){ return list.map(function(p){ return p.id+"@"+p.date; }).join(","); }
+  function mk(h,id,name,blocks,sched){ return h.setSession(id,name,blocks||MT,sched===undefined?SCHED:sched); }
+
+  return Promise.resolve()
+
+    /* ---- B01: the schedule shape */
+    .then(scenario("B01",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        var r=mk(h,"s1","Muay Thai");
+        check("B01 a valid schedule is stored in the session in the canonical key order weekdays,start,since",
+          r&&J(r.schedule)===J({weekdays:[4],start:360,since:"2026-10-01"})&&Object.keys(r.schedule).join()==="weekdays,start,since",J(r&&r.schedule));
+        var r2=mk(h,"s2","Many days",MT,{weekdays:[4,0,4,2],start:370,since:"2026-10-01"});
+        check("B01 weekdays are sorted and de-duplicated",r2&&J(r2.schedule.weekdays)==="[0,2,4]",J(r2&&r2.schedule));
+        var bad=[
+          {weekdays:[],start:360,since:"2026-10-01"},
+          {weekdays:[7],start:360,since:"2026-10-01"},
+          {weekdays:[-1],start:360,since:"2026-10-01"},
+          {weekdays:[1.5],start:360,since:"2026-10-01"},
+          {weekdays:[4],start:1440,since:"2026-10-01"},
+          {weekdays:[4],start:-1,since:"2026-10-01"},
+          {weekdays:[4],start:360,since:"2026-13-01"},
+          {weekdays:[4],start:360,since:"tomorrow"},
+          {weekdays:"4",start:360,since:"2026-10-01"},
+          {start:360,since:"2026-10-01"},
+          "Fridays at six"
+        ];
+        var allNull=bad.every(function(b,i){ var x=mk(h,"b"+i,"Bad "+i,MT,b); return x&&x.schedule===null; });
+        check("B01 every malformed schedule becomes null (the session itself is still saved, just unscheduled)",allNull);
+        var s=h.getState(); s.sessions.s1.schedule={weekdays:[9],start:5,since:"x"};
+        h.migrateSessions(s);
+        check("B01 a malformed schedule found in stored state is dropped by the load migration, the blocks stay",
+          s.sessions.s1.schedule===null&&s.sessions.s1.blocks.length===3,J(s.sessions.s1.schedule));
+      });
+    }))
+
+    /* ---- B02: declaring / removing a schedule is an undoable edit */
+    .then(scenario("B02",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,dev=h.getDeviceId();
+        h.setTestNow(at(2026,10,12,9,0));
+        mk(h,"s1","Muay Thai",MT,null);
+        var d0=h.undoDepth();
+        var ok=h.setSessionSchedule("s1",[4,0],360);
+        var s=h.getState().sessions.s1;
+        check("B02 declaring a schedule sets weekdays and start and takes since from TODAY",
+          ok===true&&J(s.schedule)===J({weekdays:[0,4],start:360,since:"2026-10-12"}),J(s.schedule));
+        check("B02 ...as exactly one undo step",h.undoDepth()===d0+1,h.undoDepth()+" vs "+d0);
+        check("B02 ...stamped at edit time from this device (it is a real edit that must sync)",s.updatedBy===dev&&Date.parse(s.updatedAt)>Date.now()-5000,J(s));
+        h.undo();
+        check("B02 undo takes the schedule back off",h.getState().sessions.s1.schedule===null,J(h.getState().sessions.s1.schedule));
+        h.redo();
+        check("B02 redo puts it back",h.getState().sessions.s1.schedule&&h.getState().sessions.s1.schedule.start===360);
+        var d1=h.undoDepth();
+        check("B02 an empty weekday list is refused (no change, no snapshot)",h.setSessionSchedule("s1",[],360)===false&&h.undoDepth()===d1);
+        check("B02 a bad start is refused",h.setSessionSchedule("s1",[1],1440)===false&&h.setSessionSchedule("s1",[1],-5)===false&&h.undoDepth()===d1);
+        check("B02 an unknown session is refused",h.setSessionSchedule("nope",[1],360)===false&&h.undoDepth()===d1);
+        check("B02 removing the schedule works and is one undo step",h.setSessionSchedule("s1",null,null)===true&&h.getState().sessions.s1.schedule===null&&h.undoDepth()===d1+1);
+        h.setTestNow(null);
+      });
+    }))
+
+    /* ---- B03: when a prompt exists (the pure rule) */
+    .then(scenario("B03",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        mk(h,"mt","Muay Thai");
+        function P(y,m,d,hh,mm,ss){ h.setTestNow(at(y,m,d,hh,mm,ss)); return ids(h.pendingSessionPrompts()); }
+        check("B03 before the window ends there is no prompt (Fri 07:39)",P(2026,10,16,7,39)==="",P(2026,10,16,7,39));
+        check("B03 at EXACTLY the window end there is still no prompt (strictly after, Fri 07:40:00)",P(2026,10,16,7,40,0)==="",P(2026,10,16,7,40,0));
+        check("B03 one minute after the window end there is one (Fri 07:41)",P(2026,10,16,7,41)==="mt@"+FRI,P(2026,10,16,7,41));
+        check("B03 later the same day it is still there (Fri 22:00)",P(2026,10,16,22,0)==="mt@"+FRI,P(2026,10,16,22,0));
+        check("B03 the next day it is still there (lookback: yesterday, Sat 10:00)",P(2026,10,17,10,0)==="mt@"+FRI,P(2026,10,17,10,0));
+        check("B03 two days later it is gone (lookback is today and yesterday only, Sun 10:00)",P(2026,10,18,10,0)==="",P(2026,10,18,10,0));
+        check("B03 a day the schedule does not name has no prompt (Thu 12:00)",P(2026,10,15,12,0)==="",P(2026,10,15,12,0));
+        mk(h,"mt","Muay Thai",MT,{weekdays:[4],start:360,since:FRI});
+        check("B03 the schedule's since date is respected: an occurrence ON since counts (Fri 07:41)",P(2026,10,16,7,41)==="mt@"+FRI,P(2026,10,16,7,41));
+        mk(h,"mt","Muay Thai",MT,{weekdays:[4],start:360,since:SAT});
+        check("B03 ...but an occurrence BEFORE since does not (since Sat, asked on Sat 10:00 about Fri)",P(2026,10,17,10,0)==="",P(2026,10,17,10,0));
+        mk(h,"mt","Muay Thai",MT,SCHED);
+        mk(h,"nosched","No schedule",MT,null);
+        check("B03 a session with no schedule never prompts",P(2026,10,16,12,0)==="mt@"+FRI,P(2026,10,16,12,0));
+        h.removeSession("mt");
+        check("B03 a deleted session never prompts",P(2026,10,16,12,0)==="",P(2026,10,16,12,0));
+        mk(h,"mt","Muay Thai");
+        var before=J(h.getState());
+        h.pendingSessionPrompts();
+        check("B03 computing prompts changes nothing in state",J(h.getState())===before);
+        h.setTestNow(null);
+      });
+    }))
+    .then(scenario("B03d",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        mk(h,"mt","Muay Thai");
+        h.setTestNow(at(2026,10,16,12,0));
+        var before=J(h.getState()),beforeStore=J(h.getDismissedSessionPrompts());
+        var first=h.pendingSessionPrompts(), again=h.pendingSessionPromptsFor(h.getState());
+        check("B03d setup: there is a prompt to compute",first.length===1&&again.length===1,String(first.length));
+        check("B03d PURE: computing prompts (twice, both entry points) leaves the ledger byte-for-byte unchanged - the first call is the one that would mutate",J(h.getState())===before);
+        check("B03d ...and writes nothing to the device-local dismissal list",J(h.getDismissedSessionPrompts())===beforeStore);
+        h.setTestNow(null);
+      });
+    }))
+    .then(scenario("B03b",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        mk(h,"mt","Muay Thai");
+        function now(hh,mm){ h.setTestNow(at(2026,10,16,hh,mm)); }
+        now(12,0);
+        check("B03b setup: nothing logged -> a prompt",ids(h.pendingSessionPrompts())==="mt@"+FRI);
+        h.putEntry(FRI,"Slept in","seed-sleep",350,361,null);
+        check("B03b ONE minute of overlap with any entry silences it (361 > 360): the person has spoken for that time",ids(h.pendingSessionPrompts())==="",ids(h.pendingSessionPrompts()));
+        h.removeEntry(h.getState().entries[FRI][0].id);
+        h.putEntry(FRI,"Before","seed-sleep",300,360,null);
+        h.putEntry(FRI,"After","seed-sleep",460,520,null);
+        check("B03b entries that only TOUCH the window's edges (end at 06:00, start at 07:40) do not silence it",ids(h.pendingSessionPrompts())==="mt@"+FRI,ids(h.pendingSessionPrompts()));
+        h.putEntry(FRI,"Something else entirely","seed-work",400,410,null);
+        check("B03b any entry inside the window silences it, whatever it is (even a different category)",ids(h.pendingSessionPrompts())==="",ids(h.pendingSessionPrompts()));
+        h.getState().entries={};
+        h.putEntry(SAT,"Next day","seed-work",360,460,null);
+        check("B03b an entry on ANOTHER day at the same time does not silence it",ids(h.pendingSessionPrompts())==="mt@"+FRI,ids(h.pendingSessionPrompts()));
+        h.getState().entries={};
+        h.applySession("mt",FRI,360);
+        check("B03b APPLIED AHEAD (the session was applied to that date earlier) -> no prompt",ids(h.pendingSessionPrompts())==="",ids(h.pendingSessionPrompts()));
+        h.getState().entries={};
+        h.putEntry(FRI,"Logged by hand","seed-training",375,445,null);
+        check("B03b LOGGED BY HAND at roughly the time -> no prompt",ids(h.pendingSessionPrompts())==="");
+        h.getState().entries={};
+        mk(h,"p2","Second",[blk(0,30,"x")],{weekdays:[4],start:600,since:"2026-10-01"});
+        check("B03b two scheduled sessions are judged independently (second is later: 10:00-10:30, now 12:00)",ids(h.pendingSessionPrompts()).split(",").sort().join()==="mt@"+FRI+",p2@"+FRI,ids(h.pendingSessionPrompts()));
+        h.putEntry(FRI,"covers the second only","seed-work",600,630,null);
+        check("B03b ...and silencing one leaves the other",ids(h.pendingSessionPrompts())==="mt@"+FRI,ids(h.pendingSessionPrompts()));
+        h.setTestNow(null);
+      });
+    }))
+    .then(scenario("B03c",function(){
+      /* a window that crosses midnight: 23:00 + 2h = 23:00 .. 01:00 next day */
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        mk(h,"late","Late one",[blk(0,120,"Work","seed-work")],{weekdays:[4],start:1380,since:"2026-10-01"});
+        h.setTestNow(at(2026,10,17,0,30));
+        check("B03c before a midnight-crossing window has ended there is no prompt (Sat 00:30, window ends 01:00)",ids(h.pendingSessionPrompts())==="",ids(h.pendingSessionPrompts()));
+        h.setTestNow(at(2026,10,17,1,1));
+        check("B03c after it ends the prompt belongs to the day the window STARTED (Fri), asked on Sat 01:01",ids(h.pendingSessionPrompts())==="late@"+FRI,ids(h.pendingSessionPrompts()));
+        h.putEntry(SAT,"Up late","seed-work",0,30,null);
+        check("B03c an entry in the part of the window that falls on the NEXT date silences it",ids(h.pendingSessionPrompts())==="",ids(h.pendingSessionPrompts()));
+        h.getState().entries={};
+        h.putEntry(FRI,"Evening","seed-people",1300,1380,null);
+        check("B03c an entry that ends where the window starts does not",ids(h.pendingSessionPrompts())==="late@"+FRI,ids(h.pendingSessionPrompts()));
+        h.setTestNow(null);
+      });
+    }))
+
+    /* ---- B04: dismissals are device-local, capped, never synced */
+    .then(scenario("B04",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H;
+        mk(h,"mt","Muay Thai");
+        h.setTestNow(at(2026,10,17,10,0));
+        mk(h,"mt","Muay Thai",MT,{weekdays:[4,5],start:360,since:"2026-10-01"});
+        check("B04 setup: Fri and Sat are both pending on Sat 10:00? (Sat 06:00-07:40 is over too)",ids(h.pendingSessionPrompts()).split(",").sort().join()==="mt@"+FRI+",mt@"+SAT,ids(h.pendingSessionPrompts()));
+        var d0=h.undoDepth();
+        h.dismissSessionPrompt("mt",FRI);
+        check("B04 dismissing one occurrence removes only that one",ids(h.pendingSessionPrompts())==="mt@"+SAT,ids(h.pendingSessionPrompts()));
+        check("B04 a dismissal is not an edit: no snapshot, no change to the ledger",h.undoDepth()===d0);
+        var st=J(h.getState());
+        check("B04 the dismissal is NOT in the synced state (no key in state names it)",st.indexOf("dismiss")<0&&st.indexOf(FRI+"|")<0);
+        h.persist(); /* setSession is the in-memory primitive; the UI paths persist themselves. Without this the reloaded page has no session at all. */
+        return settle(h).then(function(){
+          var drive=J(h.fakeDriveRead());
+          check("B04 ...and NOT in what is pushed to Drive",drive.indexOf("dismiss")<0&&drive.indexOf("mt|")<0);
+          check("B04 it is kept under its own device-local storage key",h.getDismissedSessionPrompts().indexOf("mt|"+FRI)>=0,J(h.getDismissedSessionPrompts()));
+          return killSandboxAndOpenFresh(f.d);
+        }).then(function(f2){
+          var h2=f2.H;
+          h2.setTestNow(at(2026,10,17,10,0));
+          check("B04 it survives a reload (still dismissed, Saturday still pending)",ids(h2.pendingSessionPrompts())==="mt@"+SAT,ids(h2.pendingSessionPrompts()));
+          for(var i=0;i<h2.getDismissedMax()+10;i++) h2.dismissSessionPrompt("x"+i,"2026-01-01");
+          var list=h2.getDismissedSessionPrompts();
+          check("B04 the list is capped (newest kept)",list.length===h2.getDismissedMax()&&list[list.length-1]==="x"+(h2.getDismissedMax()+9)+"|2026-01-01"&&list.indexOf("x0|2026-01-01")<0,list.length+" last="+list[list.length-1]);
+          h2.setTestNow(null);
+        });
+      });
+    }))
+
+    /* ---- B05: two devices */
+    .then(scenario("B05",function(){
+      return connectedSandbox().then(function(f){
+        var h=f.H,blank=JSON.parse(JSON.stringify(h.getState()));
+        mk(h,"mt","Muay Thai");
+        h.setTestNow(at(2026,10,16,12,0));
+        h.applySession("mt",FRI,360);
+        return settle(h).then(function(){
+          var eng=h.syncEngine(blank,h.fakeDriveRead(),"dev-B");
+          h.fakeDriveWrite(eng.toPush);
+          var stB=eng.newLocalState;
+          var entriesB=(stB.entries[FRI]||[]).length;
+          check("B05 device B pulled A's applied entries",entriesB===3,String(entriesB));
+          /* the prompt is DERIVED from entries, so B (which has them) has none; a B without them would */
+          check("B05 on B, with the synced entries present, there is no prompt (derived from the data, no flag to sync)",ids(h.pendingSessionPromptsFor(stB))==="",ids(h.pendingSessionPromptsFor(stB)));
+          var stBX=JSON.parse(JSON.stringify(stB));
+          stBX.entries[FRI].forEach(function(e){ e.updatedBy="dev-X"; });
+          check("B05 entries written by ANOTHER device silence the prompt just like one's own (the rule looks at the data, not at who wrote it)",ids(h.pendingSessionPromptsFor(stBX))==="",ids(h.pendingSessionPromptsFor(stBX)));
+          var stB2=JSON.parse(JSON.stringify(stB)); stB2.entries={};
+          check("B05 CONTROL: the same B without those entries WOULD be asked",ids(h.pendingSessionPromptsFor(stB2))==="mt@"+FRI,ids(h.pendingSessionPromptsFor(stB2)));
+          /* both press Yes before either has synced: both sets of entries survive (documented, visible, undoable) */
+          var A0=h.getState();
+          var bEntries=h.sessionSegments(A0.sessions.mt,FRI,360).map(function(g,i){
+            return {id:"B"+i,label:g.label,cat:g.cat,start:g.start,end:g.end,updatedAt:new Date().toISOString(),updatedBy:"dev-B"};
+          });
+          var stB3=JSON.parse(JSON.stringify(blank)); stB3.entries={}; stB3.entries[FRI]=bEntries;
+          var eng2=h.syncEngine(stB3,h.fakeDriveRead(),"dev-B");
+          check("B05 if both devices apply before syncing, BOTH sets of entries are kept (6, double-booked, nothing silently lost)",
+            (eng2.newLocalState.entries[FRI]||[]).length===6,String((eng2.newLocalState.entries[FRI]||[]).length));
+          h.setTestNow(null);
+        });
+      });
+    }))
+
+    /* ---- B06: the banner and the schedule form (UI) */
+    .then(scenario("B06",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,d=f.d;
+        function q(sel){ return d.querySelector(sel); }
+        function setV(id,v){ var el=d.getElementById(id); el.value=v; el.dispatchEvent(new f.el.contentWindow.Event("input",{bubbles:true})); }
+        h.setTestNow(at(2026,10,16,12,0));
+        mk(h,"mt","Muay Thai");
+        h.renderSessionBanner();
+        var b=d.getElementById("sessBanner");
+        check("B06 a pending prompt shows the banner, naming the session and the day",b&&!b.hidden&&/Muay Thai/.test(b.textContent)&&/Fri 16 Oct/.test(b.textContent),b&&b.textContent);
+        check("B06 ...with a Yes and a No button",!!q(".sessprompt .sessprompt-yes")&&!!q(".sessprompt .sessprompt-no"));
+        var d0=h.undoDepth();
+        q(".sessprompt-no").click();
+        check("B06 No dismisses it: banner hidden, ledger untouched, no snapshot",b.hidden&&Object.keys(h.getState().entries).length===0&&h.undoDepth()===d0,"hidden="+b.hidden+" depth+"+(h.undoDepth()-d0));
+        h.clearDismissedSessionPromptsForTest();
+        h.renderSessionBanner();
+        check("B06 setup: banner back after clearing the dismissal",!b.hidden);
+        var yes=q(".sessprompt-yes"),d1=h.undoDepth();
+        yes.click(); yes.click();
+        check("B06 Yes logs the session at its SCHEDULED time on that date, as ordinary entries (06:00 -> 3 blocks)",ranges(h,FRI)==="360-370,370-380,380-460",ranges(h,FRI));
+        check("B06 DOUBLE-SUBMIT: two rapid clicks on Yes log it exactly once, one undo step",dayEntries(h,FRI).length===3&&h.undoDepth()===d1+1,dayEntries(h,FRI).length+" entries, depth +"+(h.undoDepth()-d1));
+        check("B06 the banner is gone once it has been logged",b.hidden);
+        check("B06 the toast says it was logged, tells the person to adjust it, and offers Undo",/Muay Thai/.test(d.getElementById("toastText").textContent)&&/adjust/i.test(d.getElementById("toastText").textContent)&&!d.getElementById("toastUndo").hidden,d.getElementById("toastText").textContent);
+        h.undo();
+        check("B06 Undo removes what Yes logged, and the banner comes back",dayEntries(h,FRI).length===0&&!b.hidden,"entries="+dayEntries(h,FRI).length+" hidden="+b.hidden);
+        h.putEntry(FRI,"I did something at that time","seed-work",370,380,null);
+        h.render();
+        check("B06 logging anything in the window and re-rendering hides the banner",b.hidden);
+        h.setTestNow(at(2026,10,16,6,30));
+        h.getState().entries={}; h.render();
+        check("B06 and with the window not over yet the banner stays hidden",b.hidden);
+        h.setTestNow(null);
+      });
+    }))
+    .then(scenario("B06c",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,d=f.d;
+        h.setTestNow(at(2026,10,16,12,0));
+        mk(h,"mt","Muay Thai");
+        h.renderSessionBanner();
+        var yes=d.querySelector(".sessprompt-yes");
+        check("B06c setup: the banner row is on screen",!!yes);
+        h.putEntry(FRI,"Arrived by sync after the banner rendered","seed-work",360,460,null); /* no render(): the row is now STALE */
+        var d0=h.undoDepth(), n0=dayEntries(h,FRI).length;
+        yes.click();
+        check("B06c a click on a STALE row (its window has been filled since it rendered) logs nothing and takes no snapshot",dayEntries(h,FRI).length===n0&&h.undoDepth()===d0,dayEntries(h,FRI).length+" entries, depth +"+(h.undoDepth()-d0));
+        h.setTestNow(null);
+      });
+    }))
+    .then(scenario("B06b",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,d=f.d;
+        function setV(id,v){ var el=d.getElementById(id); el.value=v; el.dispatchEvent(new f.el.contentWindow.Event("input",{bubbles:true})); }
+        h.setTestNow(at(2026,10,12,9,0));
+        mk(h,"mt","Muay Thai",MT,null);
+        d.getElementById("sessionsBtn").click();
+        var row=d.querySelector('.sessrow[data-id="mt"]');
+        check("B06b each session row has a Schedule button",!!row&&!!row.querySelector(".sess-sched"));
+        row.querySelector(".sess-sched").click();
+        check("B06b it opens the schedule panel",!d.getElementById("sessSched").hidden);
+        var d0=h.undoDepth();
+        d.getElementById("sessSchedGo").click();
+        check("B06b saving with no weekday ticked or no time changes nothing (no snapshot)",h.getState().sessions.mt.schedule===null&&h.undoDepth()===d0);
+        d.getElementById("sessSchedDay4").checked=true; d.getElementById("sessSchedDay0").checked=true;
+        setV("sessSchedTime","06:00");
+        d.getElementById("sessSchedGo").click();
+        var sc=h.getState().sessions.mt.schedule;
+        check("B06b ticking Mon and Fri at 06:00 and saving declares the schedule (since = today)",sc&&J(sc)===J({weekdays:[0,4],start:360,since:"2026-10-12"}),J(sc));
+        check("B06b ...as one undo step",h.undoDepth()===d0+1);
+        check("B06b ...and the row now says when it is scheduled",/Mon/.test(d.querySelector('.sessrow[data-id="mt"]').textContent)&&/Fri/.test(d.querySelector('.sessrow[data-id="mt"]').textContent)&&/06:00/.test(d.querySelector('.sessrow[data-id="mt"]').textContent),d.querySelector('.sessrow[data-id="mt"]').textContent);
+        d.querySelector('.sessrow[data-id="mt"] .sess-sched').click();
+        check("B06b reopening the panel shows the current schedule",d.getElementById("sessSchedDay4").checked&&d.getElementById("sessSchedDay0").checked&&!d.getElementById("sessSchedDay2").checked&&d.getElementById("sessSchedTime").value==="06:00");
+        d.getElementById("sessSchedRemove").click();
+        check("B06b Remove schedule clears it",h.getState().sessions.mt.schedule===null);
+        h.setTestNow(null);
+      });
+    }))
+
+    /* ---- B07: nothing leaves the browser */
+    .then(scenario("B07",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,w=f.el.contentWindow,calls=0;
+        w.fetch=function(){ calls++; return Promise.reject(new Error("blocked")); };
+        w.XMLHttpRequest=function(){ calls++; throw new Error("blocked"); };
+        w.navigator.sendBeacon=function(){ calls++; return false; };
+        h.setTestNow(at(2026,10,16,12,0));
+        mk(h,"mt","Muay Thai");
+        h.pendingSessionPrompts(); h.renderSessionBanner(); h.dismissSessionPrompt("mt",FRI); h.setSessionSchedule("mt",[1],100);
+        check("B07 computing, showing, dismissing and declaring prompts make no network call",calls===0,String(calls));
+        h.setTestNow(null);
+      });
+    }))
     .then(function(){ return results; });
 }
 

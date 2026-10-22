@@ -274,6 +274,9 @@ function migrateFromOldKey(){
    anything actually needs it (a migration or a merge), not at every page load -
    so a browser that never touches sync never gets even this one extra key. */
 var DEVICE_KEY=TEST_MODE?"hours-ledger-device-id-TESTMODE":"hours-ledger-device-id";
+/* sessions: the prompts this device's owner dismissed ("sessionId|date"). Device-local on purpose, never
+   part of state and never synced (see CLAUDE.md, Sessions design decisions). Tiny and capped (rule 10). */
+var SDKEY=TEST_MODE?"hours-ledger-selftest-sessions-dismissed-v1":"hours-ledger-sessions-dismissed-v1";
 function getDeviceId(){
   var id=readStore(DEVICE_KEY);
   if(!id){ id=uid()+uid(); writeStore(DEVICE_KEY,id); }
@@ -723,7 +726,16 @@ function normalizeSessionName(raw){
   if(cps.length>SESSION_NAME_MAX) t=cps.slice(0,SESSION_NAME_MAX).join("").trim();
   return t;
 }
-function cleanSchedule(x){ return isMapObj(x)?x:null; }   /* stage 2 gives the schedule its real shape */
+/* schedule = {weekdays:[0..6, Mon=0, sorted, unique], start:minutes 0..1439, since:"YYYY-MM-DD"} or null.
+   Anything else is null (the session itself stays, just unscheduled). Fixed key order: it is part of the
+   canonical text sync compares. */
+function cleanSchedule(x){
+  if(!isMapObj(x)||!Array.isArray(x.weekdays)||!x.weekdays.length) return null;
+  if(!x.weekdays.every(function(d){ return Number.isInteger(d)&&d>=0&&d<=6; })) return null;
+  if(!Number.isInteger(x.start)||x.start<0||x.start>=1440||!isIsoDate(x.since)) return null;
+  var wd=x.weekdays.filter(function(d,i,a){ return a.indexOf(d)===i; }).sort(function(a,b){ return a-b; });
+  return {weekdays:wd,start:x.start,since:x.since};
+}
 function migrateSessions(s){
   if(!isMapObj(s.sessions)) s.sessions={};
   Object.keys(s.sessions).forEach(function(id){
@@ -851,6 +863,76 @@ function reassignCategorySessions(fromCatId,toCatId){
     r.blocks=r.blocks.map(function(b){ return b.cat===fromCatId?Object.assign({},b,{cat:toCatId||null}):b; });
     if(state.deletedEntries){ r.updatedAt=nowIso(); r.updatedBy=getDeviceId(); }
   });
+}
+
+
+/* ---- schedule and the "Did this happen?" prompt (stage 2) ----
+   A prompt for one occurrence (session, date) exists only when ALL hold: the schedule names that weekday;
+   the date is not before schedule.since; the date is today or yesterday (SESSION_PROMPT_LOOKBACK_DAYS);
+   the window (start .. start + the session's length) is OVER - strictly, now > end; NO entry overlaps the
+   window at all (whoever logged anything there has spoken for that time; asking again would be inferring);
+   and this device has not dismissed it. It is DERIVED from the entries every time it is asked, so there is
+   no "done" flag to sync or to get stuck: logging by hand, applying ahead, or another device's apply
+   arriving by sync all make it disappear on their own. Two devices that both press Yes before syncing
+   leave two sets of entries, visibly double-booked and undoable - documented, not prevented. */
+var SESSION_PROMPT_LOOKBACK_DAYS=2, SESSION_DISMISSED_MAX=50;
+var testNow=null;
+function sessionNow(){ return (TEST_MODE&&testNow)||new Date(); }
+function sessionWindow(sess,dateStr){
+  var sc=sess.schedule;
+  if(!sc||dateStr<sc.since) return null;
+  if(sc.weekdays.indexOf((parseIso(dateStr).getDay()+6)%7)<0) return null;
+  return {start:sc.start,end:sc.start+sessionSpan(sess)};
+}
+function sessionWindowCovered(st,dateStr,w){
+  for(var k=0;k*1440<w.end;k++){
+    var date=iso(addDays(parseIso(dateStr),k)),lo=Math.max(w.start-k*1440,0),hi=Math.min(w.end-k*1440,1440);
+    if(lo>=hi) continue;
+    if((st.entries[date]||[]).some(function(e){ return e.start<hi&&e.end>lo; })) return true;
+  }
+  return false;
+}
+function dismissedPrompts(){
+  try{ var a=JSON.parse(readStore(SDKEY)||"[]"); return Array.isArray(a)?a.filter(function(x){ return typeof x==="string"; }):[]; }catch(e){ return []; }
+}
+function dismissSessionPrompt(id,dateStr){
+  var key=id+"|"+dateStr,list=dismissedPrompts().filter(function(x){ return x!==key; });
+  list.push(key);
+  writeStore(SDKEY,JSON.stringify(list.slice(-SESSION_DISMISSED_MAX)));
+}
+function pendingSessionPromptsFor(st,nowArg){
+  var now=nowArg||sessionNow(),out=[],dismissed=dismissedPrompts();
+  var today=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+  Object.keys(st.sessions||{}).forEach(function(id){
+    var sess=st.sessions[id];
+    if(!sess.schedule) return;
+    for(var k=0;k<SESSION_PROMPT_LOOKBACK_DAYS;k++){
+      var dateStr=iso(addDays(today,-k)),w=sessionWindow(sess,dateStr);
+      if(!w) continue;
+      var d=parseIso(dateStr);
+      if(!(now.getTime()>new Date(d.getFullYear(),d.getMonth(),d.getDate(),0,w.end,0,0).getTime())) continue;
+      if(dismissed.indexOf(id+"|"+dateStr)>=0||sessionWindowCovered(st,dateStr,w)) continue;
+      out.push({id:id,date:dateStr,name:sess.name,start:w.start,end:w.end});
+    }
+  });
+  return out.sort(function(a,b){ return a.date<b.date?-1:a.date>b.date?1:a.start-b.start; });
+}
+function pendingSessionPrompts(){ return pendingSessionPromptsFor(state); }
+/* declare (weekdays, start) or remove (weekdays === null) a schedule: an undoable edit of the session.
+   since = today: an occurrence on the day it was declared counts. Returns false (no snapshot) when nothing
+   valid would change. */
+function setSessionSchedule(id,weekdays,start){
+  var r=state.sessions&&state.sessions[id];
+  if(!r) return false;
+  var sched=null;
+  if(weekdays!==null){
+    sched=cleanSchedule({weekdays:weekdays,start:start,since:iso(sessionNow())});
+    if(!sched) return false;
+  }else if(r.schedule===null) return false;
+  snapshot((sched?"schedule":"unschedule")+' session "'+r.name+'"');
+  setSession(id,r.name,r.blocks,sched);
+  persist();
+  return true;
 }
 
 /* ---- save as session / apply ---- */
@@ -2884,7 +2966,7 @@ function openCategoryDeleteChooser(row,c,n){
   panel.hidden=false;
 }
 
-function render(){ renderGrid(); renderTotals(); renderCats(); refreshHint(); updateCloseoutAvailability(); renderSessionsIfOpen(); }
+function render(){ renderGrid(); renderTotals(); renderCats(); refreshHint(); updateCloseoutAvailability(); renderSessionsIfOpen(); renderSessionBanner(); }
 /* Drive-sync bug (reported from a real laptop, 2026-08-21): a spectrum-box
    drag calls persist() on a pause in movement, which arms
    scheduleDriveSync's 2s debounce same as any other edit - correct,
@@ -4496,8 +4578,9 @@ function renderSessions(){
   document.getElementById("sessList").innerHTML=ids.length?ids.map(function(id){
     var r=state.sessions[id];
     return '<div class="sessrow" data-id="'+escapeHtml(id)+'"><div class="sess-main"><b>'+escapeHtml(r.name)+'</b>'+
-      '<span class="sess-meta">'+r.blocks.length+(r.blocks.length===1?" block":" blocks")+" &middot; "+dur(sessionSpan(r))+'</span></div>'+
-      '<div class="sess-btns"><button class="ghost sess-apply">Apply&hellip;</button><button class="ghost sess-del">Delete</button></div></div>';
+      '<span class="sess-meta">'+r.blocks.length+(r.blocks.length===1?" block":" blocks")+" &middot; "+dur(sessionSpan(r))+
+      (r.schedule?" &middot; "+r.schedule.weekdays.map(function(d){ return DAYNAMES[d]; }).join(", ")+" "+toHM(r.schedule.start):"")+'</span></div>'+
+      '<div class="sess-btns"><button class="ghost sess-sched">Schedule&hellip;</button><button class="ghost sess-apply">Apply&hellip;</button><button class="ghost sess-del">Delete</button></div></div>';
   }).join(""):'<p class="emptyhint">No sessions yet. Log a stretch of time, then save it below.</p>';
 }
 /* render() calls this on every redraw (a sync landing, an undo): the list is read-only, so redrawing
@@ -4514,9 +4597,12 @@ function sessApplyPreview(){
     "No overlap with what is already logged.";
 }
 function closeSessApply(){ sessApplyId=null; document.getElementById("sessApply").hidden=true; }
+var sessSchedId=null;
+function closeSessSched(){ sessSchedId=null; document.getElementById("sessSched").hidden=true; }
 function openSessions(){
   hideToast();
   closeSessApply();
+  closeSessSched();
   var dateEl=document.getElementById("sessSaveDate");
   if(!dateEl.value) dateEl.value=iso(new Date());
   renderSessions();
@@ -4528,6 +4614,7 @@ function closeSessions(){
   if(!sessScrimEl.classList.contains("on")) return;
   sessScrimEl.classList.remove("on");
   closeSessApply();
+  closeSessSched();
   unlockBodyScroll();
 }
 wireOutsideClose(sessScrimEl,closeSessions);
@@ -4542,7 +4629,16 @@ document.getElementById("sessList").addEventListener("click",function(ev){
   if(!row) return;
   var id=row.dataset.id,r=state.sessions[id];
   if(!r) return;
-  if(ev.target.closest(".sess-apply")){
+  if(ev.target.closest(".sess-sched")){
+    closeSessApply();
+    sessSchedId=id;
+    document.getElementById("sessSchedTitle").textContent='Schedule "'+r.name+'"';
+    for(var i=0;i<7;i++) document.getElementById("sessSchedDay"+i).checked=!!(r.schedule&&r.schedule.weekdays.indexOf(i)>=0);
+    document.getElementById("sessSchedTime").value=r.schedule?toHM(r.schedule.start):"";
+    document.getElementById("sessSchedRemove").hidden=!r.schedule;
+    document.getElementById("sessSched").hidden=false;
+  }else if(ev.target.closest(".sess-apply")){
+    closeSessSched();
     sessApplyId=id;
     document.getElementById("sessApplyTitle").textContent='Apply "'+r.name+'"';
     document.getElementById("sessApplyDate").value="";
@@ -4553,6 +4649,7 @@ document.getElementById("sessList").addEventListener("click",function(ev){
   }else if(ev.target.closest(".sess-del")){
     var name=r.name;
     if(sessApplyId===id) closeSessApply();
+    if(sessSchedId===id) closeSessSched();
     deleteSession(id);
     renderSessions();
     showToast('Deleted session "'+name+'"',true);
@@ -4581,6 +4678,65 @@ document.getElementById("sessApplyGo").addEventListener("click",function(){
   if(localSaveFailed){ showToast("Not saved on this device — storage is full",false); return; }
   showToast('Applied "'+name+'" — '+n+(n===1?" entry":" entries")+" on "+dayLabel(date),true);
 });
+document.getElementById("sessSchedCancel").addEventListener("click",closeSessSched);
+document.getElementById("sessSchedGo").addEventListener("click",function(){
+  var id=sessSchedId,r=id&&state.sessions[id];
+  if(!r) return;
+  var days=[];
+  for(var i=0;i<7;i++) if(document.getElementById("sessSchedDay"+i).checked) days.push(i);
+  var t=document.getElementById("sessSchedTime").value;
+  if(!days.length||!t) return;
+  if(!setSessionSchedule(id,days,fromHM(t))) return;
+  closeSessSched();
+  renderSessions();
+  renderSessionBanner();
+  showToast('Scheduled "'+r.name+'" — after the window ends you\'ll be asked if it happened, only if nothing is logged there',true);
+});
+document.getElementById("sessSchedRemove").addEventListener("click",function(){
+  var id=sessSchedId,r=id&&state.sessions[id];
+  if(!r||!setSessionSchedule(id,null,null)) return;
+  closeSessSched();
+  renderSessions();
+  renderSessionBanner();
+  showToast('Removed the schedule from "'+r.name+'"',true);
+});
+
+/* the "Did this happen?" banner. Yes logs the session at its scheduled start on that date (ordinary
+   entries, one snapshot) and tells the person to adjust it: the default path is edit, never trust. The
+   handler re-derives the prompt before acting, so a second click on a row that has already been logged
+   (or dismissed, or synced away) finds nothing and does nothing. */
+function renderSessionBanner(){
+  var el=document.getElementById("sessBanner");
+  if(!el) return;
+  var list=pendingSessionPromptsFor(state);
+  if(!list.length){ el.hidden=true; el.innerHTML=""; return; }
+  el.innerHTML=list.map(function(p){
+    return '<div class="sessprompt" data-id="'+escapeHtml(p.id)+'" data-date="'+p.date+'"><span>Did &ldquo;'+escapeHtml(p.name)+'&rdquo; happen on '+
+      dayLabel(p.date)+", "+toHM(p.start)+"&ndash;"+toHM(p.end%1440)+'?</span>'+
+      '<span class="sessprompt-btns"><button class="ghost sessprompt-yes">Yes, log it</button><button class="ghost sessprompt-no">No</button></span></div>';
+  }).join("");
+  el.hidden=false;
+}
+document.getElementById("sessBanner").addEventListener("click",function(ev){
+  var row=ev.target.closest&&ev.target.closest(".sessprompt");
+  if(!row) return;
+  var id=row.dataset.id,date=row.dataset.date;
+  if(!pendingSessionPrompts().some(function(p){ return p.id===id&&p.date===date; })) return;
+  if(ev.target.closest(".sessprompt-no")){ dismissSessionPrompt(id,date); renderSessionBanner(); return; }
+  if(!ev.target.closest(".sessprompt-yes")) return;
+  var sess=state.sessions[id],name=sess.name;
+  var n=applySession(id,date,sess.schedule.start);
+  render();
+  if(n===null){ showToast("Could not log that session.",false); return; }
+  if(localSaveFailed){ showToast("Not saved on this device — storage is full",false); return; }
+  showToast('Logged "'+name+'" for '+dayLabel(date)+" ("+n+(n===1?" entry":" entries")+") — adjust the entries if it ran differently",true);
+});
+if(!TEST_MODE){
+  setInterval(renderSessionBanner,60000);
+  document.addEventListener("visibilitychange",function(){ if(!document.hidden) renderSessionBanner(); });
+  window.addEventListener("focus",renderSessionBanner);
+}
+
 document.getElementById("sessSaveGo").addEventListener("click",function(){
   var date=document.getElementById("sessSaveDate").value,from=document.getElementById("sessSaveFrom").value,
       to=document.getElementById("sessSaveTo").value,nameEl=document.getElementById("sessSaveName");
@@ -4623,6 +4779,15 @@ if(TEST_MODE){
     saveDayHighlight:saveDayHighlight,
     getDayHighlightMax:function(){ return DAY_HIGHLIGHT_MAX; },
     migrateSessions:migrateSessions,
+    setTestNow:function(d){ testNow=d; },
+    setSessionSchedule:setSessionSchedule,
+    pendingSessionPrompts:pendingSessionPrompts,
+    pendingSessionPromptsFor:pendingSessionPromptsFor,
+    dismissSessionPrompt:dismissSessionPrompt,
+    getDismissedSessionPrompts:dismissedPrompts,
+    getDismissedMax:function(){ return SESSION_DISMISSED_MAX; },
+    clearDismissedSessionPromptsForTest:function(){ try{ localStorage.removeItem(SDKEY); }catch(e){} },
+    renderSessionBanner:renderSessionBanner,
     setSession:setSession,
     removeSession:removeSession,
     deleteSession:deleteSession,
@@ -4730,6 +4895,7 @@ if(TEST_MODE){
       try{ localStorage.removeItem(KEY); }catch(e){}
       try{ localStorage.removeItem(DEVICE_KEY); }catch(e){}
       try{ localStorage.removeItem(UKEY); }catch(e){}
+      try{ localStorage.removeItem(SDKEY); }catch(e){}
     },
     persist:persist,
     doDeleteCategory:doDeleteCategory,

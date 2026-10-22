@@ -284,6 +284,13 @@ button{cursor:pointer}
 .sheet-actions{display:flex;gap:8px;margin-top:20px;align-items:center}
 .sheet h3{font-family:var(--mono);font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);margin:22px 0 10px;font-weight:600}
 #sessList{margin-bottom:6px}
+.sess-banner{margin-top:16px;border:1px solid var(--ink)}
+.sessprompt{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;font-size:13px;font-weight:600}
+.sessprompt+.sessprompt{border-top:1px solid var(--rule)}
+.sessprompt-btns{display:flex;gap:6px}
+.daychks{display:flex;flex-wrap:wrap;gap:6px 12px}
+/* .field label is display:block + uppercase; the more specific rule wins (same lesson as .breaktoggle) */
+.field .daychk{display:inline-flex;align-items:center;gap:5px;font-size:13px;letter-spacing:0;text-transform:none;margin-bottom:0;cursor:pointer}
 .sessrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--rule)}
 .sess-main{display:flex;flex-direction:column;min-width:0}
 .sess-main b{font-size:14px;overflow-wrap:anywhere}
@@ -349,7 +356,7 @@ button{cursor:pointer}
   .colophon.trio{display:flex;justify-content:space-between}
 }
 @media print{
-  .weeknav,.tools,.hint,.emptyhint,.status,.panel-label button,.cat .sw,.cat .del,.verdict,.warn{display:none!important}
+  .weeknav,.tools,.sess-banner,.hint,.emptyhint,.status,.panel-label button,.cat .sw,.cat .del,.verdict,.warn{display:none!important}
   body{background:#fff}.wrap{padding:0}.cols{grid-template-columns:1fr 240px}.grid{min-width:0}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}

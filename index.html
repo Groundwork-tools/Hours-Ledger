@@ -40,6 +40,8 @@
     </div>
   </header>
 
+  <div class="sess-banner" id="sessBanner" hidden></div>
+
   <div class="closeout-banner" id="closeoutBanner" hidden>
     <span>Last week's ready to close out.</span>
     <button class="ghost" id="closeoutBannerBtn">Close out last week</button>
@@ -250,6 +252,23 @@
       <div class="sheet-actions">
         <button class="solid" id="sessApplyGo">Apply</button>
         <button class="ghost" id="sessApplyCancel">Cancel</button>
+      </div>
+    </div>
+    <div id="sessSched" hidden>
+      <h3 id="sessSchedTitle"></h3>
+      <div class="field">
+        <label>Days</label>
+        <div class="daychks"><label class="daychk"><input type="checkbox" id="sessSchedDay0"> Mon</label><label class="daychk"><input type="checkbox" id="sessSchedDay1"> Tue</label><label class="daychk"><input type="checkbox" id="sessSchedDay2"> Wed</label><label class="daychk"><input type="checkbox" id="sessSchedDay3"> Thu</label><label class="daychk"><input type="checkbox" id="sessSchedDay4"> Fri</label><label class="daychk"><input type="checkbox" id="sessSchedDay5"> Sat</label><label class="daychk"><input type="checkbox" id="sessSchedDay6"> Sun</label></div>
+      </div>
+      <div class="field">
+        <label for="sessSchedTime">Start time</label>
+        <input type="time" id="sessSchedTime">
+      </div>
+      <p class="hint">Once the session&rsquo;s time has passed, if nothing is logged in that window you&rsquo;ll be asked &ldquo;Did this happen?&rdquo;. Never automatic.</p>
+      <div class="sheet-actions">
+        <button class="solid" id="sessSchedGo">Save schedule</button>
+        <button class="ghost" id="sessSchedRemove">Remove schedule</button>
+        <button class="ghost" id="sessSchedCancel">Cancel</button>
       </div>
     </div>
     <h3>Save logged time as a session</h3>
