@@ -193,8 +193,13 @@ seeds, chance produces ANY same-category start-time cluster of k dates.
 - Result: `DETECT_MIN_DATES = 12`. **I changed this number after having used 11** (D00/D06 and the code comment moved with it). Reason:
   the pre-declared rule, applied to the detector's own clustering with enough seeds to resolve 4.7% vs 5.3%. It was not changed
   to get a test green (the tests pass with either; they were updated to match).
-- Caveat that matters: this is a property of ~88 logged days. More days -> bigger chance clusters -> re-run
-  `tools/derive-min-dates.py <export>` (committed, contains no data) every few months.
+- Caveat that matters: this is a property of ~88 logged days. More days -> bigger chance clusters.
+  **CORRECTION 2026-10-23 (RAN, same null, 1000 scrambles per size; sizes above 88 resample the real 88 days):** the false-positive rate
+  at the fixed k=12 is 1.0% at 88 days, 3.3% at 100, 8.3% at 110, 20.5% at 120, 75.3% at 150 and 100% at 250. It crosses the 5% line at
+  about 105 logged days, i.e. in WEEKS (about early November 2026 for a ledger logged every day since 2026-07-25), not "every few months".
+  The smallest k within 5% is 11-12 at 88 days, 12 at 100, 13 at 110, 14 at 120, 15 at 150, 21 at 250. (An earlier version of this line said
+  to re-run `tools/derive-min-dates.py` every few months; that understated the problem by an order of magnitude.) The fixed 12 is
+  being replaced: the threshold has to depend on the length of the log.
 - Tolerance 15: from ONE real pattern (Muay Thai start spread 10 min). n=1; weakest number in the design.
 
 ### What the detector finds in the real data (RAN: a faithful Python replica of detectPatterns on the read-only export copy; NOT the JS on real data)

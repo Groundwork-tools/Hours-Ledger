@@ -3146,7 +3146,9 @@ before the build and is recorded with its reason so it is not reopened by accide
 - **Where the numbers come from.** 15 min: the real Muay Thai block's start spread was 10 min (ONE pattern: the weakest number here).
   12 dates: the smallest k for which scrambling each day's times (1000 seeds, the detector's own clustering) gave ANY cluster of k dates in at
   most 5% of seeds (k=11: 5.2%, k=12: 1.1%). It was 11 on a first, simpler derivation and was corrected to 12 by the same rule. It is a
-  property of ~88 logged days and must be re-derived as history grows (`tools/derive-min-dates.py`, which holds no data). Tests pin the
+  property of ~88 logged days and does NOT hold as history grows: measured 2026-10-23 with the same null, the false-positive rate at the fixed 12
+  is 1.0% at 88 days, 3.3% at 100, 8.3% at 110, 20.5% at 120, 75.3% at 150, 100% at 250 - it crosses 5% at about 105 logged days (weeks away,
+  not months; `tools/derive-min-dates.py` holds no data). The stage 3 design is being replaced because of this. Tests pin the
   three constants (D00) so changing one without redoing the derivation fails loudly.
 - **A session covers a pattern** when a block has the same category and, if the session is scheduled, a block start within 15 min of the
   pattern's; if it is unscheduled, the same label (case-insensitive).

@@ -42,7 +42,11 @@ the wrong side of my own 5% rule, so I followed the rule and used 12. Nobody cha
 pass; the tests were updated to match. That is also a lesson: 300 tries could not tell 4.7% from 5.3%.
 
 **Limit.** This 12 only fits about 88 logged days. With more history, chance gets more opportunities and the
-biggest chance cluster grows. Re-run `tools/derive-min-dates.py` on a fresh export every few months.
+biggest chance cluster grows. **And it grows fast: in weeks, not months.** I measured it (2026-10-23): with the
+fixed 12, chance alone makes a cluster that big in 1% of scrambled logs at 88 days, 8% at 110 days, 75% at 150 days
+and always at 250 days. The 5% line is crossed at about 105 logged days. So a fixed number is wrong; the threshold
+has to be worked out from the length (and shape) of your own log. (An earlier version of this note said "every few
+months", which was wrong.)
 
 ## Step 3: ranking, "weekday concentration"
 
