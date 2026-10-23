@@ -327,6 +327,8 @@ The OLD stage 3 detector (`detectPatterns`, the cards, fixed minimum 12) is stil
 - **Noise side observed (RAN, R3-17):** logs with any suggestion out of 200 pure-noise logs: 2 at 60 days, 5 at 88, 6 at 150 (limit 10 = 5%); smallest noise log had 1,080 entries (60 d), 1,569 (88 d), 2,742 (150 d); both planted habits found in 60 of 60 seeds at each size.
 - **Gate (RAN):** full `selftest.html`: `PASS - 0 failing / 1289 total` (1206 + 83). `EXPECTED_MIN_ROWS` 1206 -> 1289.
 
+- **Final full run on the final committed tree (RAN, row-count guard at 1289): `PASS - 0 failing / 1289 total`.** Branch head at that run: `2537e59`.
+
 ### STOP POINT - R4 and R5 were NOT started
 Why: (1) the `[OPTIONAL: stop after the R3 gate and wait for me.]` line was left as unfilled template text and the safe reading is to stop; (2) the three new candidate labels are still unlabelled, and R4's real-data re-run and the suggestions UI should show labelled results.
 - **What the app does right now:** the new functions (`noiseThresholds`, `clusterQualifies`, `foldMidnightHalves`, `detectPackages`, `recentRate`) are pure and NOT wired into the screen. **The Sessions sheet still shows the OLD stage 3 suggestions (single blocks, fixed minimum of 12 dates, weekday-concentration ranking).** Anyone trying the branch on a phone sees the old behaviour until R4.
