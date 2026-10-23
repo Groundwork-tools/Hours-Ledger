@@ -1181,6 +1181,214 @@ function foldMidnightHalves(entriesByDate){
   return {days:days,stats:stats};
 }
 
+/* ---------------- packages (stage 3 redesign, R3) ----------------
+   detectPackages() finds habits as PACKAGES - a sequence of blocks such as get ready > bike > Muay Thai - ranks them by
+   the effort they would save, and proposes creating a session from one. PURE: it reads what it is handed and returns a
+   list; it never logs an entry, writes state, snapshots or touches storage.
+   1. Below NOISE_MIN_LOGGED_DAYS (35) logged days it returns nothing.
+   2. Midnight halves are folded (foldMidnightHalves); an open last night is left out.
+   3. Per category the densest 15-minute windows of start times are cut out one by one (one occurrence per date, its
+      earliest start); a window is a candidate first block only if its dates clear the noise filter (clusterQualifies).
+   4. A candidate grows into a package. A first pass takes the majority next category while it follows at least
+      PKG_RETENTION of the first block's days (adjacent entries, gap at most 30 minutes; a folded night is always the
+      last entry of its date, so a chain ends there by itself);
+      a second pass matches each later block by CATEGORY and an OFFSET WINDOW (+/- 15 minutes from the first block's
+      start) so a short interposed entry does not break a day, and a day is "full" only if every block matched. A block
+      is kept while the days matching up to it are at least PKG_RETENTION of the first block's days.
+      PKG_RETENTION = 0.5 is LABEL-CALIBRATED, not derived from the noise null: the lowest retention of any package
+      labelled "yes" was 57-62%.
+   5. Qualified packages with the same category sequence whose first blocks are within PKG_MERGE_MINUTES (30 = two
+      adjacent windows) merge into one suggestion with the median offsets and durations of the union. Eligibility is
+      judged per window BEFORE merging: the noise null is calibrated for a 16-minute window, so a merged 31-minute window
+      must not be tested with it.
+   6. Ranked by entries saved per week = recentRate x blocks. recentRate counts full days in the last
+      PKG_RATE_WINDOW_DAYS (56) days divided by the shorter of that window and the time since the package first
+      appeared (at least one week). 56 is a DESIGN CONSTANT, not derived (the top of the real ranking was stable across
+      84-, 56- and 28-day windows; 28 was noisy). A habit that stops falls; one that resumes rises again. Nothing is
+      hidden by the rate: eligibility is the noise filter's job alone (decision D1: a habit dormant for months fades as
+      the log grows - a chance filter, not a hide rule).
+   7. A package whose FIRST block has the same category within PKG_ABSORB_MINUTES (30) of a block of a higher-ranked
+      package is absorbed into it. A package that merely PREPENDS a block to a higher-ranked one is not absorbed
+      (that is why "Fix hair > Journal", labelled no, is still suggested: nothing separates it from "Girlfriend >
+      Prep for bed > Sleep"; the owner dismisses it with Not now).
+   8. What an existing live session already covers is dropped last (so it still absorbs what it contains). */
+var PKG_RETENTION=0.5, PKG_RATE_WINDOW_DAYS=56, PKG_GAP_MINUTES=30, PKG_MAX_BLOCKS=6;
+var PKG_MERGE_MINUTES=2*DETECT_TOLERANCE_MIN, PKG_ABSORB_MINUTES=2*DETECT_TOLERANCE_MIN;
+function pkgMedian(a){ var t=a.slice().sort(function(x,y){ return x-y; }); return t[(t.length-1)>>1]; }
+function isoDaysBetween(a,b){
+  var p=a.split("-"),q=b.split("-");
+  return Math.round((new Date(+q[0],+q[1]-1,+q[2])-new Date(+p[0],+p[1]-1,+p[2]))/86400000);
+}
+function recentRate(dates,asOf){
+  var seen={},first=null,inWin=0;
+  (dates||[]).forEach(function(d){
+    if(seen[d]) return; seen[d]=1;
+    if(first===null||d<first) first=d;
+    var ago=isoDaysBetween(d,asOf);
+    if(ago>=0&&ago<PKG_RATE_WINDOW_DAYS) inWin++;
+  });
+  if(first===null) return 0;
+  var since=Math.max(1,isoDaysBetween(first,asOf)+1);
+  return inWin/Math.max(1,Math.min(PKG_RATE_WINDOW_DAYS,since)/7);
+}
+function pkgSortEntries(a,b){
+  return a.start-b.start||a.end-b.end||(a.label<b.label?-1:a.label>b.label?1:0)||(a.id<b.id?-1:a.id>b.id?1:0);
+}
+/* densest 15-minute windows of one category's occurrences: [{occ:[...all in the window], first:[one per date]}] */
+function pkgClusters(occ,minDates){
+  var out=[];
+  occ=occ.slice().sort(function(a,b){ return a.start-b.start||(a.date<b.date?-1:a.date>b.date?1:0)||a.idx-b.idx; });
+  while(occ.length>=minDates){
+    var cnt={},dist=0,j=0,bestD=0,bestI=-1,bestJ=-1,i;
+    for(i=0;i<occ.length;i++){
+      while(j<occ.length&&occ[j].start-occ[i].start<=DETECT_TOLERANCE_MIN){
+        if(!cnt[occ[j].date]){ cnt[occ[j].date]=0; dist++; }
+        cnt[occ[j].date]++; j++;
+      }
+      if(dist>bestD){ bestD=dist; bestI=i; bestJ=j; }
+      cnt[occ[i].date]--; if(!cnt[occ[i].date]) dist--;
+    }
+    if(bestD<minDates) break;
+    var cl=occ.splice(bestI,bestJ-bestI),seen={},first=[];
+    cl.forEach(function(o){ if(!seen[o.date]){ seen[o.date]=1; first.push(o); } });
+    out.push({occ:cl,first:first});
+  }
+  return out;
+}
+function pkgSummarise(cats,occ,catName,via,anchorCount,mergedFrom){
+  var dates=Object.keys(occ).sort(),k=cats.length,blocks=[],wdc=[0,0,0,0,0,0,0];
+  dates.forEach(function(d){ wdc[weekdayOfIso(d)]++; });
+  var anchor=pkgMedian(dates.map(function(d){ return occ[d][0].start; }));
+  for(var b=0;b<k;b++){
+    var tally={},rep={},first=true;
+    dates.forEach(function(d){ var l=normLabel(occ[d][b].label); tally[l]=(tally[l]||0)+1; if(!(l in rep)) rep[l]=occ[d][b].label; });
+    var best=Object.keys(tally).sort(function(x,y){ return tally[y]-tally[x]||(x<y?-1:x>y?1:0); })[0];
+    blocks.push({cat:cats[b],catName:catName[cats[b]],
+      offset:pkgMedian(dates.map(function(d){ return occ[d][b].start-occ[d][0].start; })),
+      duration:pkgMedian(dates.map(function(d){ return occ[d][b].end-occ[d][b].start; })),
+      label:rep[best]});
+  }
+  return {cats:cats.slice(),blocks:blocks,anchor:anchor,count:dates.length,anchorCount:anchorCount,dates:dates,weekdayCounts:wdc,via:via,occ:occ,mergedFrom:mergedFrom||1};
+}
+function pkgCoveredBy(sessions,pkg){
+  return Object.keys(sessions||{}).some(function(id){
+    var sx=sessions[id];
+    if(!sx||!Array.isArray(sx.blocks)) return false;
+    return sx.blocks.some(function(b){
+      if(b.cat!==pkg.blocks[0].cat) return false;
+      if(sx.schedule&&Number.isInteger(sx.schedule.start)) return Math.abs(sx.schedule.start+b.offset-pkg.anchor)<=PKG_ABSORB_MINUTES;
+      return normLabel(b.label)===normLabel(pkg.blocks[0].label);
+    });
+  });
+}
+function detectPackages(entriesByDate,categories,sessions,asOf){
+  var th=noiseThresholds(entriesByDate,categories),out={n:th.n,thresholds:th,packages:[]};
+  if(!th.eligible) return out;
+  var known={},catName={},days={},folded=foldMidnightHalves(entriesByDate).days;
+  (categories||[]).forEach(function(c){ known[c.id]=true; catName[c.id]=c.name; });
+  var dateList=Object.keys(folded).sort();
+  dateList.forEach(function(d){ days[d]=folded[d].filter(function(e){ return !e.open; }).sort(pkgSortEntries); });
+  asOf=asOf||dateList[dateList.length-1];
+  var byCat={};
+  dateList.forEach(function(d){
+    days[d].forEach(function(e,i){
+      if(typeof e.cat==="string"&&known[e.cat]&&e.start>0&&e.end>e.start) (byCat[e.cat]=byCat[e.cat]||[]).push({date:d,idx:i,start:e.start});
+    });
+  });
+  var minExtract=Math.min(th.kAll,th.kWd),pkgs=[];
+  Object.keys(byCat).sort().forEach(function(cat){
+    pkgClusters(byCat[cat],minExtract).forEach(function(cl){
+      var dates=cl.first.map(function(o){ return o.date; }).sort(),q=clusterQualifies(dates,th);
+      if(!q.ok) return;
+      /* first pass: the majority next category while it follows >= PKG_RETENTION of the first block's days */
+      var n0=cl.first.length,cur={},ents={},cats=[cat];
+      cl.first.forEach(function(o){ cur[o.date]=o.idx; ents[o.date]=[o.idx]; });
+      while(cats.length<PKG_MAX_BLOCKS){
+        var grp={};
+        Object.keys(cur).forEach(function(d){
+          var es=days[d],i=cur[d],nx=es[i+1];
+          if(nx&&known[nx.cat]&&nx.start-es[i].end<=PKG_GAP_MINUTES) (grp[nx.cat]=grp[nx.cat]||{})[d]=i+1;
+        });
+        var bestCat=null,bestN=0;
+        Object.keys(grp).sort().forEach(function(c){ var m=Object.keys(grp[c]).length; if(m>bestN){ bestN=m; bestCat=c; } });
+        if(bestCat===null||bestN/n0<PKG_RETENTION) break;
+        cats.push(bestCat); cur=grp[bestCat];
+        Object.keys(cur).forEach(function(d){ ents[d].push(cur[d]); });
+      }
+      /* the usual gap between the end of one block and the start of the next, from the days the first pass followed */
+      var gaps=[0];
+      for(var k=1;k<cats.length;k++){
+        gaps.push(pkgMedian(Object.keys(cur).map(function(d){ return days[d][ents[d][k]].start-days[d][ents[d][k-1]].end; })));
+      }
+      /* second pass: each later block is matched by CATEGORY and a window of +/-15 minutes around (end of the previous
+         matched block + the usual gap). Matching against the previous block's END, not the first block's start, lets a
+         block whose length varies (School ends when the Walk starts) keep the chain; and an interposed entry shorter than
+         the window does not break it. Found by running the first version (offset from the first block) on the real log:
+         School > Walk and Girlfriend > Prep for bed > Sleep did not form. */
+      var reach={};
+      cl.first.forEach(function(o){
+        var es=days[o.date],prev=o.idx,ent=[o.idx];
+        for(var k2=1;k2<cats.length;k2++){
+          var hit=-1,want=es[prev].end+gaps[k2];
+          for(var j=prev+1;j<es.length;j++){
+            if(es[j].cat===cats[k2]&&Math.abs(es[j].start-want)<=DETECT_TOLERANCE_MIN){ hit=j; break; }
+          }
+          if(hit<0) break;
+          ent.push(hit); prev=hit;
+        }
+        reach[o.date]=ent;
+      });
+      var L=1;
+      for(var l=cats.length;l>=2;l--){
+        var m=0; Object.keys(reach).forEach(function(d){ if(reach[d].length>=l) m++; });
+        if(m/n0>=PKG_RETENTION){ L=l; break; }
+      }
+      var occ={};
+      Object.keys(reach).forEach(function(d){
+        if(reach[d].length>=L) occ[d]=reach[d].slice(0,L).map(function(ix){ return days[d][ix]; });
+      });
+      pkgs.push(pkgSummarise(cats.slice(0,L),occ,catName,q.via,n0,1));
+    });
+  });
+  /* merge qualified packages with the same category sequence whose first blocks are within 30 minutes (chained) */
+  var groups={},merged=[];
+  pkgs.forEach(function(p){ (groups[p.cats.join(",")]=groups[p.cats.join(",")]||[]).push(p); });
+  Object.keys(groups).sort().forEach(function(key){
+    var lst=groups[key].sort(function(a,b){ return a.anchor-b.anchor; }),grp=[lst[0]];
+    function flush(){
+      var occ={},n0=0,vias={};
+      grp.forEach(function(p){ Object.keys(p.occ).forEach(function(d){ if(!(d in occ)) occ[d]=p.occ[d]; }); n0+=p.anchorCount; vias[p.via]=1; });
+      merged.push(pkgSummarise(grp[0].cats,occ,catName,Object.keys(vias).length>1?"both":grp[0].via,n0,grp.length));
+    }
+    for(var i=1;i<lst.length;i++){
+      if(lst[i].anchor-grp[grp.length-1].anchor<=PKG_MERGE_MINUTES) grp.push(lst[i]);
+      else{ flush(); grp=[lst[i]]; }
+    }
+    flush();
+  });
+  merged.forEach(function(p){
+    p.rate=recentRate(p.dates,asOf);
+    p.effort=p.rate*p.blocks.length;
+    p.firstDate=p.dates[0]; p.lastDate=p.dates[p.dates.length-1];
+    p.id=p.cats.join(">")+"@"+p.anchor;
+  });
+  merged.sort(function(a,b){
+    return b.effort-a.effort||b.count-a.count||a.anchor-b.anchor||(a.id<b.id?-1:a.id>b.id?1:0);
+  });
+  var kept=[];
+  merged.forEach(function(p){
+    var absorbed=kept.some(function(q){
+      return q.blocks.some(function(b){ return b.cat===p.blocks[0].cat&&Math.abs(q.anchor+b.offset-p.anchor)<=PKG_ABSORB_MINUTES; });
+    });
+    if(!absorbed) kept.push(p);
+  });
+  out.packages=kept.filter(function(p){ return !pkgCoveredBy(sessions,p); }).map(function(p){
+    return {id:p.id,cats:p.cats,blocks:p.blocks,anchor:p.anchor,count:p.count,anchorCount:p.anchorCount,dates:p.dates,
+      weekdayCounts:p.weekdayCounts,via:p.via,firstDate:p.firstDate,lastDate:p.lastDate,rate:p.rate,effort:p.effort,mergedFrom:p.mergedFrom};
+  });
+  return out;
+}
+
 /* ---- save as session / apply ---- */
 function isIsoDate(s){
   if(typeof s!=="string"||!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
@@ -5078,6 +5286,9 @@ if(TEST_MODE){
     detectPatterns:detectPatterns,
     noiseThresholds:noiseThresholds,
     foldMidnightHalves:foldMidnightHalves,
+    detectPackages:detectPackages,
+    recentRate:recentRate,
+    getPackageConstants:function(){ return {retention:PKG_RETENTION,rateWindowDays:PKG_RATE_WINDOW_DAYS,mergeMinutes:PKG_MERGE_MINUTES,absorbMinutes:PKG_ABSORB_MINUTES,tolerance:DETECT_TOLERANCE_MIN,gapMinutes:PKG_GAP_MINUTES,maxBlocks:PKG_MAX_BLOCKS}; },
     clusterQualifies:clusterQualifies,
     getNoiseConstants:function(){ return {alpha:NOISE_ALPHA,c0All:NOISE_C0_ALL,c0Wd:NOISE_C0_WD,minLoggedDays:NOISE_MIN_LOGGED_DAYS,wdSafetyAbove:NOISE_WD_SAFETY_ABOVE,windowMinutes:NOISE_WINDOW_MINUTES}; },
     suggestSessions:suggestSessions,

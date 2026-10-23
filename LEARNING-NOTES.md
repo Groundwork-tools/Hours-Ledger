@@ -1,3 +1,5 @@
+> **SUPERSEDED (2026-10-24).** This note explains the earlier detector (fixed minimum of 12 dates, ranking by weekday concentration). The detector is being replaced by packages ranked by entries saved per week with a noise threshold that adapts to the length of the log; see CLAUDE.md, 'Stage 3 REDESIGN', and OVERNIGHT-STATUS.md. This file is rewritten in stage R5.
+
 # Learning notes: how the pattern detector works, and why
 
 Written for you, Sebastian, after building stage 3 of sessions. Plain language, no code. The code is

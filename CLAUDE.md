@@ -3158,7 +3158,7 @@ before the build and is recorded with its reason so it is not reopened by accide
   session (grouping is cut); a stopped habit is still proposed while it holds 12+ dates; nothing crossing midnight is found. `LEARNING-NOTES.md`
   explains the method in plain language.
 
-**Stage 3 REDESIGN (decided 2026-10-23/24, replaces the stage 3 design above; being built in stages R1-R5, status in OVERNIGHT-STATUS.md)**
+**Stage 3 REDESIGN (decided 2026-10-23/24, replaces the stage 3 design above; R1-R3 BUILT and gated 2026-10-24 - pure functions, not yet wired into the UI - R4/R5 not started; status in OVERNIGHT-STATUS.md)**
 - **Goal.** Detection exists to make logging as effortless as possible. Frequent habits are the best suggestions, daily ones included. Suggestions are
   PACKAGES (a sequence of blocks, e.g. get ready > bike > Muay Thai); accepting one creates a multi-block session (no schedule). Detection still only
   proposes creating a session and never logs entries. Weekly habits are found as well as daily ones. This replaces "rank by weekday concentration"
@@ -3193,6 +3193,13 @@ before the build and is recorded with its reason so it is not reopened by accide
   30 minutes of a block of a higher-ranked package is absorbed (this removes B14 and B15). A package that merely PREPENDS a block to a higher-ranked one is
   not absorbed (B6 over B2), which is why B11 ("Fix hair > Journal", labelled "no") is still suggested: no rule separates it from B6/B9 (the share of the base's days
   carrying the extra leading block was 18% for B11, 25% for B1, 40% for B6+B9, a three-point fit), so it stays showing with "Not now" and is pinned by a named test.
+- **As built (R1-R3), including three things that differ from the plan and why.** (1) The weekday constant: the closed form that the app uses keeps the log's REAL weekday mix, and with the first constant (4.0) it gave k_wd = 7 at the real 88-day log
+  where the simulation says 6 (zero margin for Muay Thai); refitted to **c0_wd = 3.25** (any value 3.0-3.5 matches the simulation at every size), c0_all stays 4.0; the combined false-positive rate at the shipped thresholds measured 0.7%-2.8% from 35 to 250 logged days.
+  The +1 above 150 days is kept as approved but the refit means it is probably no longer needed (open question). (2) Later blocks are matched by category and a +/-15-minute window around the END of the previous matched block plus the usual gap,
+  not an offset from the first block's start: the first version failed to form School > Walk and Girlfriend > Prep for bed > Sleep on the real log because an earlier block's length varies; a generated test with exact durations had missed it.
+  (3) Eligibility is tested per first-block window BEFORE merging variants (the noise null is calibrated for a 16-minute window), so a habit split into two time variants that are each too thin to clear the filter alone is not found.
+  On the real export (88 days) the detector lists 14 suggestions: all 12 "yes" habits, B11 (pinned), the three unlabelled candidates; B14 and B15 are absent.
+- **Labels (2026-10-24).**
 - **Labels (2026-10-24).** Yes: B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B12, B13. No: B11, B14, B15. Not yet labelled: Breakfast ~08:10, Girlfriend ~19:00 (118 min),
   School 08:25 (30 min).
 - **Rubber-stamp mitigations (decided):** exact times on the one-tap button and in the toast, and a sentence in Export week's `definitions.logged`; the device-local

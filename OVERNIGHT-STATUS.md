@@ -12,6 +12,8 @@ No stop condition was hit. `selftest.html` CAN be run here. Nothing is pushed, m
 or against real Drive: scroll to "MORNING CHECKLIST" at the bottom.
 One number changed after I had used it: `DETECT_MIN_DATES` 11 -> 12 (stage 3 log explains why; Questions item 6).
 
+**UPDATE 2026-10-24 - the stage 3 REDESIGN (R1-R3) is built; R4/R5 are not. Jump to the section 'STAGE 3 REDESIGN' and to 'MORNING CHECKLIST - STAGE 3 REDESIGN'. The summary above describes the earlier pre-redesign build.**
+
 ## Top of file: can selftest.html be run?
 
 YES. RAN: headless Chrome (`/Applications/Google Chrome.app`, outside the repo) + `python3 -m http.server`,
@@ -298,6 +300,54 @@ The OLD stage 3 detector (`detectPatterns`, the cards, fixed minimum 12) is stil
   (the month/year/leap-day rows), a morning half usable twice, largest end wins, last-day open flag missing, every unmatched half open, folds not counted, input aliased, morning half not removed, array order instead of start order, labels
   compared exactly, 23:59 counts as an evening half.
 - **Gate (RAN):** full `selftest.html`: `PASS - 0 failing / 1206 total` (1173 + 33). `EXPECTED_MIN_ROWS` 1173 -> 1206.
+
+### R3 - packages: found, merged, de-duplicated, ranked (DONE, gate passed). THE RUN STOPS HERE.
+- **Fail-first (RAN):** `runPackageTests` against the app without `detectPackages`: `FAIL - 18 failing / 289 total` (all 18 scenarios: `R3-00 ... f.H.getPackageConstants is not a function`, `R3-01 ... h.detectPackages is not a function`, `R3-10 ... r is not a function`).
+- **First run with the code (RAN):** `FAIL - 2 failing / 347`. Both were my fixture, not the detector: (1) B6+B9 - my second time variant had only 8 first-block days, below the noise line on its own (the real log's variants have 17 and 13), so
+  it was correctly not merged in; (2) B14 - a lone School block outranked the package that contains the same block. Fixture reshaped to the real log's shape (school-term days in the last 58 days; variant sizes 17/13).
+  After: `PASS - 0 failing / 347`.
+- **THE REAL-DATA RUN FOUND A REAL WEAKNESS my generated tests could not see (RAN, the actual JS `detectPackages` on the real export, scratchpad only, nothing committed).** My first version matched a later block by its offset from the
+  FIRST block's start (+/-15 min). On the real log **B4 (School > Walk) and B6+B9 (Girlfriend > Prep for bed > Sleep) did not form packages**, because an earlier block's length varies (School ends when the Walk starts; Girlfriend lasts
+  80-100 min), so the offset drifts past 15 minutes. My fixtures used exact durations and never exposed it. **Deviation from what was approved ("category plus offset window"):** each later block is now matched by CATEGORY and a window of
+  +/-15 minutes around (END of the previous matched block + the usual gap). It still tolerates an interposed entry shorter than the window (the Journal on Oct 2/16/19) and the different-activity middle block still fails by category.
+  Test written first (`R3-02b`, a middle block that varies 10-55 minutes): failed against the first version (`FAIL - 1 failing / 349`), passed after (`PASS - 0 failing / 349`). Please confirm this refinement.
+- **Real export through the actual JS detector after the fix (RAN), as of 2026-10-23, 88 logged days, thresholds kAll 12 / kWd 6, 14 suggestions in this order:**
+  1 Prep for bed 21:15 > Sleep 22:05 (495 min, whole night; B2+B5 merged, 42 days) | 2 Girlfriend 20:00 > Prep for bed 21:30 > Sleep 22:20 (B6+B9 merged, 22 of 30 days) | 3 Errands > Walk > School 09:00 (B1, 12 of 18) |
+  4 Get ready 05:50 > Bike 06:05 > Muay Thai 06:15 (B3, **11 of 14 first-block days**) | 5 School 13:00 > Walk (B4, 16 of 24) | 6 Dinner 17:30 (B8) | 7 Journal 06:55 (B7) | 8 Breakfast 08:10 (UNLABELLED) |
+  9 Breakfast 07:15 (B10) | 10 Lunch 12:20 (B12) | 11 Shower 08:05 (B13) | 12 Fix hair > Journal (B11, labelled NO - present, pinned) | 13 Girlfriend 19:00 118 min (UNLABELLED) | 14 School 08:25 30 min (UNLABELLED).
+  **All 12 "yes" habits present; B14 and B15 absent; B11 present as pinned.** The three unlabelled candidates appear and await your labels.
+- **Mutation checks (RAN, 40 mutants, ALL killed on the first pass; unmutated `PASS - 0 failing / 354`):** no 35-day gate; open nights counted; no fold; extraction needs kAll (weekday habits missed); noise filter not applied; retention 0.6 / 0.4 / strict `>` /
+  strict `<=`; category not checked when matching a block; strict adjacency; matching window 0; block matched against the previous block's START; no 30-minute gap limit; 12 blocks instead of 6; merge window 15 / 60; no merge; merge chained from
+  the first instead of the neighbour; absorb window 15 / 60; absorb on ANY coinciding block; absorbed by lower-ranked packages; sessions never cover; scheduled coverage window 15; coverage labels compared exactly; ranked by days; effort ignoring blocks;
+  rate window 84; denominator always the full window; no one-week floor; future dates counted; window edge off by one; same-date duplicates counted; the old fixed 12/6; nothing extracted; block length / offset / anchor / label taken from the first day instead of the median / most frequent.
+- **Two-sided noise (R3-17, RAN):** over 200 seeded pure-noise realistic logs at each of 60, 88 and 150 logged days, at most 5% (10) may produce ANY suggestion; precondition: every noise log has at least 900 entries and a planted daily-ish two-block habit AND a planted once-a-week habit
+  are both found in all 60 seeds at each size. (The exact observed counts are in the row names of the run.)
+- **Not covered / limits (said plainly):** the generated ground-truth log is built from the labels and the real log's counts; the real-export run above is the evidence on real data. "Sleep" is only ever the evening-start block folded with the morning half. A habit that is
+  only ever seen in two thin time-variants (each below the noise line alone) is not found. B11 is suggested (no rule separates it from B6/B9). The three unlabelled candidates have NO test.
+- **Noise side observed (RAN, R3-17):** logs with any suggestion out of 200 pure-noise logs: 2 at 60 days, 5 at 88, 6 at 150 (limit 10 = 5%); smallest noise log had 1,080 entries (60 d), 1,569 (88 d), 2,742 (150 d); both planted habits found in 60 of 60 seeds at each size.
+- **Gate (RAN):** full `selftest.html`: `PASS - 0 failing / 1289 total` (1206 + 83). `EXPECTED_MIN_ROWS` 1206 -> 1289.
+
+### STOP POINT - R4 and R5 were NOT started
+Why: (1) the `[OPTIONAL: stop after the R3 gate and wait for me.]` line was left as unfilled template text and the safe reading is to stop; (2) the three new candidate labels are still unlabelled, and R4's real-data re-run and the suggestions UI should show labelled results.
+- **What the app does right now:** the new functions (`noiseThresholds`, `clusterQualifies`, `foldMidnightHalves`, `detectPackages`, `recentRate`) are pure and NOT wired into the screen. **The Sessions sheet still shows the OLD stage 3 suggestions (single blocks, fixed minimum of 12 dates, weekday-concentration ranking).** Anyone trying the branch on a phone sees the old behaviour until R4.
+- **Old pieces still in the repo until R4/R5:** `detectPatterns`, `suggestSessions`, `createSessionFromSuggestion` (one block only), the `D00-D15` tests (they test the OLD design and still pass), `tools/derive-min-dates.py` (it derives the OLD fixed number and is superseded), LEARNING-NOTES.md (describes the old design; a banner says so).
+- **Questions for you (nothing below was guessed):**
+  11. **The matching refinement.** Later blocks are matched against the END of the block before (+/-15 min) instead of the first block's start; needed for B4 and B6+B9 on the real log (see R3). Confirm or reject.
+  12. **The +1 weekday patch** (question 9 above): keep or drop.
+  13. **The three unlabelled candidates:** Breakfast ~08:10 (30 days), Girlfriend ~19:00 118 min (14 days), School 08:25 30 min (12 days).
+  14. **Did you want the run to stop after R3?** I assumed yes (the line was unfilled). If not, R4 and R5 can run next.
+  15. **B11 stays suggested** (pinned). If you would rather add the 18%-versus-25% rule I described, that is a 3-point fit and needs your say-so.
+- **NOT verified on any real device or real Drive, and not claimed:** anything on a phone; the staging two-device Drive check; a second real person's log (the thresholds are fitted to this one log plus synthetic ones); real days beyond 88.
+
+## MORNING CHECKLIST - STAGE 3 REDESIGN (R1-R3 built; R4/R5 not started)
+1. [ ] Read the R3 section above, especially the deviation (blocks matched against the previous block's END) and the real-data list. Reply: confirm or reject the refinement (question 11).
+2. [ ] Label the three unlabelled candidates and answer questions 12-15.
+3. [ ] If you want R4/R5: say so, and they run as approved (accept to a multi-block session with no schedule, exact times on the button and toast, the Export week sentence; then the docs rewrite and the final mutation table).
+4. [ ] **Human gates before ANYTHING on `feature/sessions` merges (all three still open):**
+   - [ ] **A second real log.** Get an "Export a copy" from someone who logs differently; run the validation script (R5 replaces `tools/derive-min-dates.py` with one that prints closed-form versus simulated thresholds and the combined rate at any log length); pass: combined rate at most 5% at every size, thresholds within 1; and they label the detector's output.
+   - [ ] **The staging two-device Drive check** (second Google account, a second https origin added to the existing OAuth client, backup of the real Drive file first) - connect two real devices, apply a future session, delete and undo, confirm a banner, confirm a suggestion.
+   - [ ] **A real phone** (Sessions sheet layout, date/time pickers, tap targets, toast, banner).
+5. [ ] Remember: **nothing here has been pushed, merged or deployed.** The earlier (stage 1-3, pre-redesign) checklist further down this file still applies to the parts of the feature that are unchanged.
 
 ## Open issues (decided NOT to fix, listed only)
 
