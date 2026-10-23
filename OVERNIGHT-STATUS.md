@@ -253,6 +253,40 @@ schedule suggestion on accept (accepting never sets one).
 (only use shows that; the test suite cannot).
 
 
+## STAGE 3 REDESIGN (R1-R5) - run of 2026-10-24, unattended, branch feature/sessions. Never pushed, never merged.
+
+**Scope of this run, and why it stops after R3.** Approved: R1-R5, D1 (a), the 56-day recent-rate window, the +1 weekday patch. Two things were left as
+unfilled template text and are NOT guessed: (1) the three new candidate labels (Breakfast ~08:10, Girlfriend ~19:00 118 min, School 08:25 30 min) came back
+as the literal `[yes/no]`; (2) the line `[OPTIONAL: stop after the R3 gate and wait for me.]`. The safe reading of (2) is to stop after R3, which also leaves the UI,
+accept and Export-week changes (R4/R5) for review. So: R1-R3 only; the three unlabelled candidates get NO ground-truth test (they are listed as pending).
+The OLD stage 3 detector (`detectPatterns`, the cards, fixed minimum 12) is still what the UI uses until R4 replaces it; the new functions are pure and not wired in yet.
+
+### R1 - the noise filter, the 35-day gate, the named Muay Thai case (DONE, gate passed; commit c3b887d)
+- **Fail-first (RAN):** `runNoiseFilterTests` against the unchanged app: `FAIL - 10 failing / 281 total` - all 10 scenarios
+  (`R1-00 ... f.H.getNoiseConstants is not a function`, `R1-01 ... h.noiseThresholds is not a function`, `R1-05 ... h.clusterQualifies is not a function`).
+- **First run with the code (RAN):** `PASS - 0 failing / 310`. A first-run pass is not trusted by itself, so the observations were read (RAN): worst simulated combined
+  rate 3.0% over 12 generated logs; kAll 8,10,12,16,22 at 35,60,88,150,250 days; the +1 boundary exact at 150/151.
+- **A DESIGN DEFECT FOUND BEFORE ANY CODE (RAN, scratchpad):** the closed form I had validated used an even 1/7 split of days over weekdays. The form the app needs uses the
+  log's REAL weekday mix (a Mon-Fri-only log is not spread over seven days). With the old constant c0=4.0 that per-weekday form gave k_wd = 7 at the real 88-day log (the simulation,
+  which keeps real weekday labels, says 6), which would have given Muay Thai's 7 Fridays ZERO margin. The weekday constant was refitted against the simulation: any c0_wd in 3.0-3.5 matches
+  the simulated thresholds at every size (35...250); the middle, **c0_wd = 3.25**, is used; c0_all stays 4.0.
+- **End-to-end combined false-positive rate at the shipped thresholds (RAN, 1000 scrambles per size, each scrambled log's thresholds computed from its OWN category counts, no +1):**
+  35 d 0.7%, 60 d 1.6%, 88 d 1.7%, 100 d 1.0%, 120 d 2.1%, 150 d 1.1%, 200 d 1.8%, 250 d 2.8%. (Sizes above 88 days resample the real 88 days; below 88 are random subsets.)
+- **Cross-implementation check (RAN):** the app's JavaScript on the real export (scratchpad only, nothing committed) against the Python reference, first N logged days for N = 35, 50, 60, 75, 88:
+  identical at all five. **On the real 88-day log the thresholds are kAll 12, kWd 6** -> the first block's 7 Fridays clear the weekday test with margin +1, and its 14 dates clear the any-weekday test with margin +2.
+- **Named test case, Muay Thai (R1-07/08/09), on a generated log whose thresholds at 88 days equal the real log's (12, 6):** the first block as it is today (14 dates) clears; 7 Fridays + 4 other days
+  (11 dates) clear through the WEEKDAY test with margin 1; exactly 6 Fridays clear; 5 do not; if the habit continues weekly (one more Friday per week, 88 -> 228 logged days) it clears at every step (smallest margin 2);
+  if it STOPS (same 14 dates) it clears at 88 and 150 days and has faded by 200 (decision D1, pinned).
+- **Correction to my own earlier D1 number (RAN):** I recorded that the Muay Thai first block would fade after ~39 days of no repeats. That counted the any-weekday test alone. The habit also has 7 Fridays, so it
+  survives on the weekday test until about 150-200 logged days (60-100 days). CLAUDE.md is corrected.
+- **Mutation checks (RAN, 18 mutants, all killed on the first pass; unmutated `PASS - 0 failing / 312`):** gate 34 / gate 36 (R1-00, R1-02), an empty date counted as a logged day (R1-02), +1 starts at 150 / no +1 (R1-01, R1-04),
+  c0_all 1.0 (R1-00, R1-01, R1-06, R1-07), c0_wd 1.0 (R1-00, R1-01 only), window 15 instead of 16 (R1-00, R1-01, R1-06), Poisson tail off by one (R1-01, R1-06, R1-07), the old fixed 12/6 (R1-01, R1-04, R1-06, R1-09),
+  repeated entries counted repeatedly (R1-01), weekdays pooled (R1-01, R1-06, R1-07), unknown categories counted (R1-01), 00:00 entries counted (R1-01), either-test-is-enough turned into both (R1-05, R1-07),
+  weekday test only looks at Monday (R1-05, R1-07), duplicate dates counted (R1-05), weekday threshold taken from the any-weekday one (R1-01, R1-06, R1-07).
+  **Honest limit:** the weaker-weekday-constant mutant (c0_wd 1.0) is caught by the exact-value pins, NOT by the simulation safety row - 300 scrambles cannot resolve a one-step shift in k_wd. The pins guard that constant.
+- **Gate (RAN):** full `selftest.html`: `PASS - 0 failing / 1173 total` (1132 + 41). `EXPECTED_MIN_ROWS` 1132 -> 1173.
+- **Not claimed:** any other real person's log; real days beyond 88; logs under 35 days (nothing shown there). A second real log is a human gate before any merge.
+
 ## Open issues (decided NOT to fix, listed only)
 
 - **Future entries count as logged.** Applying a session to a future date creates ordinary entries, so the
@@ -276,6 +310,10 @@ schedule suggestion on accept (accepting never sets one).
 8. **tools/derive-min-dates.py is new in the repo** (a dev tool, loaded by nothing, no data in it). Delete it if you would rather keep the repo to the three app files.
 5. **Entries created by the banner's Yes use the scheduled start.** The toast tells the person to adjust; the typical
    duration is logged as if it were exact until they do. (Same "log reality" tension as the open issue above.)
+9. **The +1 weekday patch is kept as approved, but it may no longer be needed (RAN).** With the per-weekday closed form and its refitted constant the weekday family is NOT short at 200/250 days
+   (raw k_wd 9 and 10, matching the simulation), so +1 now makes the threshold one stricter than the simulation says (10 and 11). It is conservative and costs weekly habits one extra occurrence above 150 logged days.
+   Removing it is one line; your call.
+10. **Unfilled template lines** (three candidate labels, the OPTIONAL stop line) - not guessed; see the top of the redesign section.
 
 ## Final state and what is NOT proven
 

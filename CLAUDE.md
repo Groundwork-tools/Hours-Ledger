@@ -3179,7 +3179,7 @@ before the build and is recorded with its reason so it is not reopened by accide
 - **Decision D1 (2026-10-24): the filter stays as designed, so a habit dormant for months fades as the log grows. It is a chance filter, not a hide rule.**
   The threshold rises with the log, so a habit that stops keeps its old count and is eventually overtaken. Measured (closed form, 2.5% per test): the school
   package B1 (18 dates) fades at about 198 logged days (~16 weeks of no repeats, so a 7-week school break is safe); School 13:00 B4 (24 dates) at ~316
-  (~33 weeks); the Muay Thai first block (14 dates) at ~127 (~39 days of no repeats); a weekly habit with 7 Fridays at ~150 (~62 days). If it resumes it
+  (~33 weeks); the Muay Thai first block (14 dates, 7 of them Fridays) at roughly 150-200 logged days (60-100 days of no repeats; CORRECTED 2026-10-24 - the first figure, ~127 logged days / ~39 days, counted the any-weekday test alone, but the habit also survives on the weekday-specific test until its 7 Fridays fall below k_wd); a weekly habit with 7 Fridays at ~150 (~62 days). If it resumes it
   reappears as soon as its cumulative count clears the threshold again, and ranks high by recent rate. **Option (b), "never hide anything that ever passed", was rejected:**
   repeated chances to pass inflate the false-positive rate with log length (measured 16.7% at 150 days at 2.5% per test; ~0.5% per test is needed to hold 5%), and
   at 0.5% per test the Muay Thai weekday threshold at 88 days is 7 against 7 Fridays: zero margin.
