@@ -3171,8 +3171,7 @@ before the build and is recorded with its reason so it is not reopened by accide
   test) OR its dates on one weekday reach k_wd (weekday-specific test); each test is held to 2.5% so the union is at most 5%. The closed form
   (per-category expected distinct dates in a 16-minute window, Poisson tail, one fitted constant c0 = 4.0) matched the time-scramble simulation within
   one on the real log and on synthetic logs of four densities. Measured combined false-positive rate at the thresholds: 1.6% (60 days), 1.9% (88), 0.9% (150),
-  and at 200/250 days the closed form's weekday threshold is one too low (combined 5.7% / 5.5%), so **k_wd gets +1 above 150 logged days: a conservative safety
-  patch, to be replaced once a REAL log of 150+ days exists** (sizes above 88 days in the simulation resample the real 88 days). Thresholds: 60 days 10/6, 88 days
+  and, after the weekday constant was refitted (see "As built"), 0.7%-2.8% from 35 to 250 logged days. **There is NO bump above 150 logged days** (an earlier +1 patch was dropped 2026-10-24). **Thresholds above 150 logged days rest on resampled days (the simulation resamples the real 88 days) and are unvalidated until a real log of 150+ days exists.** Thresholds: 60 days 10/6, 88 days
   12/6, 150 days 16/8, 250 days 21/10. **Gate: no suggestions below 35 logged days**, the smallest log at which a once-a-week habit logged every single week
   can clear the weekday test. Claims are limited to this one real log (subsets from 14 days, bootstrap above 88) plus synthetic logs; a second real log is a
   human gate before any merge.
@@ -3195,11 +3194,10 @@ before the build and is recorded with its reason so it is not reopened by accide
   carrying the extra leading block was 18% for B11, 25% for B1, 40% for B6+B9, a three-point fit), so it stays showing with "Not now" and is pinned by a named test.
 - **As built (R1-R3), including three things that differ from the plan and why.** (1) The weekday constant: the closed form that the app uses keeps the log's REAL weekday mix, and with the first constant (4.0) it gave k_wd = 7 at the real 88-day log
   where the simulation says 6 (zero margin for Muay Thai); refitted to **c0_wd = 3.25** (any value 3.0-3.5 matches the simulation at every size), c0_all stays 4.0; the combined false-positive rate at the shipped thresholds measured 0.7%-2.8% from 35 to 250 logged days.
-  The +1 above 150 days is kept as approved but the refit means it is probably no longer needed (open question). (2) Later blocks are matched by category and a +/-15-minute window around the END of the previous matched block plus the usual gap,
+  The +1 above 150 days was dropped (decision 2026-10-24). **Hold-out for the refit (RAN 2026-10-24; there was NO hold-out when the constant was first chosen):** constants fitted on sizes up to 150 only, then predicting 200 and 250: combined false-positive rate 4.0% at 200 and 4.5% at 250 (margin to 5% is thin); on 36 independent synthetic logs of different densities the worst was 3.0%. Caveats: sizes above 88 resample the real 88 days, and the independent logs use uniform times. (2) Later blocks are matched by category and a +/-15-minute window (`PKG_MATCH_WINDOW_MINUTES`, a DESIGN CONSTANT, not derived from the null) around the END of the previous matched block plus the usual gap,
   not an offset from the first block's start: the first version failed to form School > Walk and Girlfriend > Prep for bed > Sleep on the real log because an earlier block's length varies; a generated test with exact durations had missed it.
   (3) Eligibility is tested per first-block window BEFORE merging variants (the noise null is calibrated for a 16-minute window), so a habit split into two time variants that are each too thin to clear the filter alone is not found.
   On the real export (88 days) the detector lists 14 suggestions: all 12 "yes" habits, B11 (pinned), the three unlabelled candidates; B14 and B15 are absent.
-- **Labels (2026-10-24).**
 - **Labels (2026-10-24).** Yes: B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B12, B13. No: B11, B14, B15. Not yet labelled: Breakfast ~08:10, Girlfriend ~19:00 (118 min),
   School 08:25 (30 min).
 - **Rubber-stamp mitigations (decided):** exact times on the one-tap button and in the toast, and a sentence in Export week's `definitions.logged`; the device-local

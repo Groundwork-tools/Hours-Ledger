@@ -422,3 +422,12 @@ either `localhost` in a fresh incognito window against a throwaway Google accoun
 9. [ ] **Old tab.** With a pre-branch build still open in another tab, confirm you understand the known gap: that tab's next save drops
    `sessions` from the local ledger (connected devices recover them from Drive).
 10. [ ] **Decide the open questions** above (esp. 1, 5, 6) and the open issue about future entries counting as logged.
+
+## Amendments after R3 (2026-10-24)
+
+- **RAN:** full `selftest.html` on the amended tree: `PASS - 0 failing / 1292 total`; `EXPECTED_MIN_ROWS` raised to 1292.
+- **Dropped the +1 above 150 logged days** (your decision). CLAUDE.md now says thresholds above 150 days rest on resampled days and are unvalidated until a real 150+ day log exists.
+- **Matching window:** the +/-15 minute window around the end of the previous matched block is named `PKG_MATCH_WINDOW_MINUTES`, a design constant, not derived. Added R3-03b, R3-03c, R3-02g.
+- **Hold-out for the 4.0 -> 3.25 refit:** there was NO hold-out when the constant was chosen. RAN one afterwards (fit on sizes up to 150, predict 200 and 250): combined false-positive rate 4.0% at 200, 4.5% at 250; 36 independent synthetic logs worst 3.0%. Holds out, so no stop. Caveats: sizes above 88 resample the real 88 days; the independent logs use uniform times; the margin at 250 is thin.
+- **Mutations:** 17 R1 and 8 R3 mutants, all killed, no survivors.
+- **Still unlabelled (asked again, not guessed):** Breakfast ~08:10, Girlfriend ~19:00 (118 min), School 08:25 (30 min). R3 ground-truth specs for them are NOT added.

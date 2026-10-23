@@ -1081,10 +1081,14 @@ function createSessionFromSuggestion(sug,name){
    NOT claimed: any other real person's log (a second one is a human gate before merging); real days beyond 88;
    logs under 35 days (nothing is shown there at all - the smallest log in which a once-a-week habit logged every
    single week could even clear the weekday test).
-   NOISE_WD_SAFETY: kWd gets +1 above 150 logged days. A conservative safety patch (approved 2026-10-24) from when
-   the weekday family looked one short at 200/250 days; the per-weekday form measured fine without it. Replace or
-   drop it once a REAL log of 150+ days exists. */
-var NOISE_ALPHA=0.025, NOISE_C0_ALL=4.0, NOISE_C0_WD=3.25, NOISE_MIN_LOGGED_DAYS=35, NOISE_WD_SAFETY_ABOVE=150;
+   NO BUMP ABOVE 150 LOGGED DAYS (decision 2026-10-24). An earlier version added 1 to kWd above 150 days as a conservative
+   patch, from a time when the weekday family looked one short at 200/250 days; the per-weekday form with its own constant
+   measured fine without it (combined rate 1.9% at 200 days, 2.4% at 250), so it was dropped. **THRESHOLDS ABOVE 150 LOGGED
+   DAYS REST ON RESAMPLED DAYS (the simulation can only resample the 88 real days) AND ARE UNVALIDATED until a real log of
+   150+ days exists.** Hold-out evidence (2026-10-24): constants fitted on sizes up to 150 only still gave a combined rate of
+   4.0% at 200 and 4.5% at 250 days; the shipped constants on 36 independently generated logs of six densities (35-250 days)
+   gave at most 3.0%. The fitting itself used ALL sizes, so those two hold-outs are the evidence, not the fit. */
+var NOISE_ALPHA=0.025, NOISE_C0_ALL=4.0, NOISE_C0_WD=3.25, NOISE_MIN_LOGGED_DAYS=35;
 var NOISE_WINDOW_MINUTES=DETECT_TOLERANCE_MIN+1;
 function poissonTailAtLeast(lambda,k){
   if(!(lambda>0)) return 0;
@@ -1120,8 +1124,8 @@ function noiseThresholds(entriesByDate,categories){
     });
   });
   var kAll=noiseSmallestK(Object.keys(lamAll).map(function(k){ return lamAll[k]; }),NOISE_C0_ALL);
-  var kWdClosed=noiseSmallestK(Object.keys(lamWd).map(function(k){ return lamWd[k]; }),NOISE_C0_WD);
-  return {n:n,kAll:kAll,kWdClosed:kWdClosed,kWd:kWdClosed+(n>NOISE_WD_SAFETY_ABOVE?1:0),eligible:n>=NOISE_MIN_LOGGED_DAYS};
+  var kWd=noiseSmallestK(Object.keys(lamWd).map(function(k){ return lamWd[k]; }),NOISE_C0_WD);
+  return {n:n,kAll:kAll,kWd:kWd,eligible:n>=NOISE_MIN_LOGGED_DAYS};
 }
 /* does a cluster of dates clear the filter? either test is enough; they are separate tests, their counts are
    never added together */
@@ -1213,6 +1217,12 @@ function foldMidnightHalves(entriesByDate){
       Prep for bed > Sleep"; the owner dismisses it with Not now).
    8. What an existing live session already covers is dropped last (so it still absorbs what it contains). */
 var PKG_RETENTION=0.5, PKG_RATE_WINDOW_DAYS=56, PKG_GAP_MINUTES=30, PKG_MAX_BLOCKS=6;
+/* PKG_MATCH_WINDOW_MINUTES: how far from where it is expected (the end of the previous matched block plus the usual gap) a
+   later block may start and still count. 15 is a DESIGN CONSTANT, NOT DERIVED from any null or measurement: it was chosen to
+   tolerate a short interposed entry (the 5-minute Journal on three Muay Thai days) and ordinary day-to-day wobble, and it is
+   kept equal to the cluster tolerance only for simplicity (that one was read off a single habit's 10-minute spread). Tests pin
+   it from both sides: a block 40 minutes late does not count (R3-03c), a 5-minute interposed entry does (R3-02). */
+var PKG_MATCH_WINDOW_MINUTES=15;
 var PKG_MERGE_MINUTES=2*DETECT_TOLERANCE_MIN, PKG_ABSORB_MINUTES=2*DETECT_TOLERANCE_MIN;
 function pkgMedian(a){ var t=a.slice().sort(function(x,y){ return x-y; }); return t[(t.length-1)>>1]; }
 function isoDaysBetween(a,b){
@@ -1331,7 +1341,7 @@ function detectPackages(entriesByDate,categories,sessions,asOf){
         for(var k2=1;k2<cats.length;k2++){
           var hit=-1,want=es[prev].end+gaps[k2];
           for(var j=prev+1;j<es.length;j++){
-            if(es[j].cat===cats[k2]&&Math.abs(es[j].start-want)<=DETECT_TOLERANCE_MIN){ hit=j; break; }
+            if(es[j].cat===cats[k2]&&Math.abs(es[j].start-want)<=PKG_MATCH_WINDOW_MINUTES){ hit=j; break; }
           }
           if(hit<0) break;
           ent.push(hit); prev=hit;
@@ -5288,9 +5298,9 @@ if(TEST_MODE){
     foldMidnightHalves:foldMidnightHalves,
     detectPackages:detectPackages,
     recentRate:recentRate,
-    getPackageConstants:function(){ return {retention:PKG_RETENTION,rateWindowDays:PKG_RATE_WINDOW_DAYS,mergeMinutes:PKG_MERGE_MINUTES,absorbMinutes:PKG_ABSORB_MINUTES,tolerance:DETECT_TOLERANCE_MIN,gapMinutes:PKG_GAP_MINUTES,maxBlocks:PKG_MAX_BLOCKS}; },
+    getPackageConstants:function(){ return {retention:PKG_RETENTION,rateWindowDays:PKG_RATE_WINDOW_DAYS,mergeMinutes:PKG_MERGE_MINUTES,absorbMinutes:PKG_ABSORB_MINUTES,tolerance:DETECT_TOLERANCE_MIN,gapMinutes:PKG_GAP_MINUTES,maxBlocks:PKG_MAX_BLOCKS,matchWindow:PKG_MATCH_WINDOW_MINUTES}; },
     clusterQualifies:clusterQualifies,
-    getNoiseConstants:function(){ return {alpha:NOISE_ALPHA,c0All:NOISE_C0_ALL,c0Wd:NOISE_C0_WD,minLoggedDays:NOISE_MIN_LOGGED_DAYS,wdSafetyAbove:NOISE_WD_SAFETY_ABOVE,windowMinutes:NOISE_WINDOW_MINUTES}; },
+    getNoiseConstants:function(){ return {alpha:NOISE_ALPHA,c0All:NOISE_C0_ALL,c0Wd:NOISE_C0_WD,minLoggedDays:NOISE_MIN_LOGGED_DAYS,windowMinutes:NOISE_WINDOW_MINUTES}; },
     suggestSessions:suggestSessions,
     dismissSuggestion:dismissSuggestion,
     getDismissedSuggestions:dismissedSuggestions,

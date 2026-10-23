@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1289;
+var EXPECTED_MIN_ROWS=1292;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -5090,13 +5090,15 @@ function runDetectionTests(){
 /* ---------------------------------------------------------------------
    Stage 3 REDESIGN, R1 - the noise filter (pure) and the 35-day gate. Written BEFORE the code.
 
-   noiseThresholds(entriesByDate, categories) -> {n, kAll, kWdClosed, kWd, eligible}:
+   noiseThresholds(entriesByDate, categories) -> {n, kAll, kWd, eligible}:
    a first-block cluster of a habit is real (not chance) when its distinct dates reach kAll (the any-weekday test)
    OR its dates on ONE weekday reach kWd (the weekday-specific test). Each test is held to 2.5%, so the union is at
    most 5%. Computed from the user's OWN log by a closed form: per category, the expected number of distinct dates
    that an entry lands in a fixed 16-minute window if each day's times were scrambled (a Poisson tail), times a
-   fitted constant (c0_all = 4.0, c0_wd = 3.25) for the extra freedom of a sliding window. kWd gets +1 above 150
-   logged days (a conservative safety patch, approved 2026-10-24). No suggestions below 35 logged days.
+   fitted constant (c0_all = 4.0, c0_wd = 3.25) for the extra freedom of a sliding window. There is NO bump above 150
+   logged days: the +1 patch was dropped on 2026-10-24 (its reason, a weekday family one short at 200/250 days, went away with the
+   per-weekday refit; thresholds above 150 days rest on RESAMPLED days and stay unvalidated until a real log of 150+ days exists).
+   No suggestions below 35 logged days.
    The simulation in THIS file is written independently of the app (it never calls app code for the null), so the
    closed form is checked against something that cannot be wrong in the same way. All logs are generated here
    (seeded PRNG); none comes from a real export. Rows are tagged R1-xx. */
@@ -5177,8 +5179,8 @@ function runNoiseFilterTests(){
     .then(scenario("R1-00",function(){
       return freshSandbox(true).then(function(f){
         var c=f.H.getNoiseConstants();
-        check("R1-00 PIN: alpha 2.5% per test, c0_all 4.0, c0_wd 3.25, gate 35 logged days, weekday +1 above 150, window 16 minutes",
-          c&&c.alpha===0.025&&c.c0All===4&&c.c0Wd===3.25&&c.minLoggedDays===35&&c.wdSafetyAbove===150&&c.windowMinutes===16,J(c));
+        check("R1-00 PIN: alpha 2.5% per test, c0_all 4.0, c0_wd 3.25, gate 35 logged days, window 16 minutes, and NO weekday bump constant any more",
+          c&&c.alpha===0.025&&c.c0All===4&&c.c0Wd===3.25&&c.minLoggedDays===35&&c.windowMinutes===16&&c.wdSafetyAbove===undefined,J(c));
       });
     }))
 
@@ -5192,15 +5194,17 @@ function runNoiseFilterTests(){
         var t2=T(uniformDays(60,[[A,100],[A,300],[A,500],[B,200]]),[A,B]);
         check("R1-01 60 days, A three times a day + B once: kAll 10, kWd 5 (several entries of one category in a day count as one date)",t2.kAll===10&&t2.kWd===5,J(t2));
         var t3a=T(uniformDays(150,[[A,100],[B,200],[C,300]]),[A,B,C]), t3b=T(uniformDays(151,[[A,100],[B,200],[C,300]]),[A,B,C]);
-        check("R1-01 150 days: kAll 10, kWd 6 (no +1)",t3a.kAll===10&&t3a.kWd===6&&t3a.kWdClosed===6,J(t3a));
-        check("R1-01 151 days: kAll 10, kWdClosed 6 but kWd 7 (+1 above 150 logged days)",t3b.kAll===10&&t3b.kWdClosed===6&&t3b.kWd===7,J(t3b));
+        check("R1-01 150 days: kAll 10, kWd 6",t3a.kAll===10&&t3a.kWd===6,J(t3a));
+        check("R1-01 151 days: kAll 10, kWd 6 - the same: no bump above 150 logged days",t3b.kAll===10&&t3b.kWd===6,J(t3b));
+        var t3c=T(uniformDays(250,[[A,100],[B,200],[C,300]]),[A,B,C]);
+        check("R1-01 250 days of the same content: kAll 13, kWd 6 (still no bump)",t3c.kAll===13&&t3c.kWd===6,J(t3c));
         var cs=[];for(var i=0;i<10;i++) cs.push(String.fromCharCode(65+i));
         var t4=T(uniformDays(88,cs.map(function(c,i){ return [c,100+30*i]; })),cs);
         check("R1-01 88 days, ten categories once a day: kAll 9, kWd 5",t4.kAll===9&&t4.kWd===5,J(t4));
         var wk=[];for(var w=0;w<12;w++) for(var d=0;d<5;d++) wk.push({i:7*w+d,es:[[A,100],[B,200]]});
         var t6=T(wk,[A,B]);
         var u=T(uniformDays(60,[["zz",100],["A",0]]),[A]);
-        check("R1-01 entries of an unknown category, and entries that start at 00:00, add nothing to the density (thresholds equal those of a log with no density: 2 and 2)",u.kAll===2&&u.kWdClosed===2&&u.n===60,J(u));
+        check("R1-01 entries of an unknown category, and entries that start at 00:00, add nothing to the density (thresholds equal those of a log with no density: 2 and 2)",u.kAll===2&&u.kWd===2&&u.n===60,J(u));
         check("R1-01 60 days that are ALL Monday-Friday: kAll 7, kWd 5 - one more than an even split over seven weekdays would give (the per-weekday form uses the real weekday mix)",t6.kAll===7&&t6.kWd===5&&t6.n===60,J(t6));
       });
     }))
@@ -5243,8 +5247,7 @@ function runNoiseFilterTests(){
         check("R1-04 the fixed 12 of the old design is wrong at both ends: 150 and 250 days need more, 35 days needs less",ks[3].kAll>12&&ks[4].kAll>12&&ks[0].kAll<12,J(ks.map(function(t){ return t.kAll; })));
         var g150=genLog(5,150,19,18,0.6),g151=genLog(5,151,19,18,0.6);
         var t150=h.noiseThresholds(g150.map,g150.cats),t151=h.noiseThresholds(g151.map,g151.cats);
-        check("R1-04 +1 boundary: 150 logged days -> kWd equals the closed form",t150.n===150&&t150.kWd===t150.kWdClosed,J(t150));
-        check("R1-04 ...151 logged days -> kWd is the closed form +1",t151.n===151&&t151.kWd===t151.kWdClosed+1,J(t151));
+        check("R1-04 kWd keeps following the closed form across 150 -> 151 logged days (no step of +1 appears at the old boundary)",t150.n===150&&t151.n===151&&t151.kWd-t150.kWd<=1&&t151.kWd>=t150.kWd,J(t150)+" "+J(t151));
       });
     }))
 
@@ -5282,7 +5285,7 @@ function runNoiseFilterTests(){
             var ev=0; for(var i=0;i<sim.maxAll.length;i++) if(sim.maxAll[i]>=th.kAll||sim.maxWd[i]>=th.kWd) ev++;
             var rate=ev/sim.maxAll.length; worst=Math.max(worst,rate);
             var sa=simK(sim.maxAll,0.025),sw=simK(sim.maxWd,0.025);
-            if(th.kAll>sa+2||th.kWdClosed>sw+2) tooStrict.push(c[0]+"@"+N+" k "+th.kAll+"/"+th.kWdClosed+" vs sim "+sa+"/"+sw);
+            if(th.kAll>sa+2||th.kWd>sw+2) tooStrict.push(c[0]+"@"+N+" k "+th.kAll+"/"+th.kWd+" vs sim "+sa+"/"+sw);
             if(rate>0.05) tooLoose.push(c[0]+"@"+N+" "+(100*rate).toFixed(1)+"%");
             if(!(th.n===N&&sim.maxAll.length===300&&th.kAll>=3)) nonEmpty=false;
             rows.push(c[0].slice(0,4)+N+":"+(100*rate).toFixed(1)+"%");
@@ -5585,8 +5588,8 @@ function runPackageTests(){
     .then(scenario("R3-00",function(){
       return freshSandbox(true).then(function(f){
         var c=f.H.getPackageConstants();
-        check("R3-00 PIN: retention 0.5 (label-calibrated), rate window 56 days (design constant), merge 30, absorb 30, tolerance 15, gap 30, at most 6 blocks",
-          c&&c.retention===0.5&&c.rateWindowDays===56&&c.mergeMinutes===30&&c.absorbMinutes===30&&c.tolerance===15&&c.gapMinutes===30&&c.maxBlocks===6,J(c));
+        check("R3-00 PIN: retention 0.5 (label-calibrated), rate window 56 days (design constant), block-matching window 15 minutes (design constant), merge 30, absorb 30, cluster tolerance 15, gap 30, at most 6 blocks",
+          c&&c.retention===0.5&&c.rateWindowDays===56&&c.mergeMinutes===30&&c.absorbMinutes===30&&c.tolerance===15&&c.gapMinutes===30&&c.maxBlocks===6&&c.matchWindow===15,J(c));
       });
     }))
 
@@ -5670,6 +5673,20 @@ function runPackageTests(){
       });
     }))
 
+    /* ---- R3-02g: drift on a FOUR-block chain (condition 1b, 2026-10-24) */
+    .then(scenario("R3-02g",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,N=60,map=sparse(N,24),dB=[10,25,40],dC=[10,25,40];
+        for(var i=0,k=0;i<N;i+=3,k++){
+          var b=dB[k%3],c=dC[Math.floor(k/3)%3];     /* all nine combinations: the fourth block starts 30 to 90 minutes after the first */
+          add(map,i,"A",540,550); add(map,i,"B",550,550+b); add(map,i,"C",550+b,550+b+c); add(map,i,"D",550+b+c,550+b+c+60);
+        }
+        var res=h.detectPackages(map,allCats(["A","B","C","D"]),{},lastDate(N)),p=find(res,["A","B","C","D"],540);
+        check("R3-02g a four-block chain where two middle blocks vary in length (the fourth block starts 30 to 90 minutes after the first, a spread of 60 - far outside +/-15): all 20 days still count, because each block is matched against the END of the one before it",
+          p&&p.blocks.length===4&&p.count===20&&p.anchorCount===20,J(p&&{count:p.count,blocks:p.blocks.length,anchorCount:p.anchorCount})+" "+J(res.packages.map(function(x){ return x.blocks.length+"@"+x.anchor+":"+x.count; })));
+      });
+    }))
+
     /* ---- R3-05b: merging chains through neighbours */
     .then(scenario("R3-05b",function(){
       return freshSandbox(true).then(function(f){
@@ -5694,6 +5711,33 @@ function runPackageTests(){
         check("R3-03 6 days with a DIFFERENT category at the middle block's time (the last block is right) do NOT count as full days: 14 full of 20 first-block days",
           p&&p.count===14&&p.anchorCount===20,J(p&&{count:p.count,anchorCount:p.anchorCount}));
         check("R3-03 ...and the package still keeps all three blocks (14 of 20 is 70%, above the 50% line)",p&&p.blocks.length===3);
+      });
+    }))
+
+    /* ---- R3-03b/c: the Sep 8 / Sep 22 shape under the END-OF-PREVIOUS-BLOCK rule (condition 1a, 2026-10-24) */
+    .then(scenario("R3-03b",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,N=60,map=sparse(N,22),k=0;
+        for(var i=0;i<N;i+=3){
+          if(k<14) plant(map,i,540,[["E",0,10,"Get ready"],["T",10,10,"Bike"],["T",20,100,"Muay Thai"]]);
+          else{ add(map,i,"E",540,550,"Laundry"); add(map,i,"T",550,625,"Running club"); add(map,i,"X",625,655,"Breakfast"); }   /* the Sep 8 shape: a lookalike Training block, then a different activity */
+          k++;
+        }
+        var res=h.detectPackages(map,allCats(["E","T","X"]),{},lastDate(N)),p=find(res,["E","T","T"],540);
+        check("R3-03b a Sep 8 / Sep 22 style day (get ready, then a DIFFERENT activity - a lookalike Training block, then Breakfast where the Muay Thai block should be) does NOT count as a full Muay Thai day under the new rule: 14 full of 20 first-block days",
+          p&&p.count===14&&p.anchorCount===20&&p.blocks.length===3,J(p&&{count:p.count,anchorCount:p.anchorCount,blocks:p.blocks.length}));
+      });
+    }))
+    .then(scenario("R3-03c",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,N=60,map=sparse(N,23),k=0;
+        for(var i=0;i<N;i+=3){
+          if(k<14) plant(map,i,540,[["E",0,10],["T",10,10],["T",20,100]]);
+          else{ add(map,i,"E",540,550); add(map,i,"T",550,560); add(map,i,"Q",560,600); add(map,i,"T",600,700); }   /* the right category, but 40 minutes after where it should be */
+          k++;
+        }
+        var res=h.detectPackages(map,allCats(["E","T","Q"]),{},lastDate(N)),p=find(res,["E","T","T"],540);
+        check("R3-03c a block of the right category 40 minutes after where it should start (outside the 15-minute window) does NOT count: 14 full of 20",p&&p.count===14&&p.anchorCount===20,J(p&&{count:p.count,anchorCount:p.anchorCount}));
       });
     }))
 
