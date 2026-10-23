@@ -3158,4 +3158,44 @@ before the build and is recorded with its reason so it is not reopened by accide
   session (grouping is cut); a stopped habit is still proposed while it holds 12+ dates; nothing crossing midnight is found. `LEARNING-NOTES.md`
   explains the method in plain language.
 
+**Stage 3 REDESIGN (decided 2026-10-23/24, replaces the stage 3 design above; being built in stages R1-R5, status in OVERNIGHT-STATUS.md)**
+- **Goal.** Detection exists to make logging as effortless as possible. Frequent habits are the best suggestions, daily ones included. Suggestions are
+  PACKAGES (a sequence of blocks, e.g. get ready > bike > Muay Thai); accepting one creates a multi-block session (no schedule). Detection still only
+  proposes creating a session and never logs entries. Weekly habits are found as well as daily ones. This replaces "rank by weekday concentration"
+  and the fixed 12-date minimum.
+- **Ranking: entries saved per week = recent weekly rate x number of blocks.** The rate counts full-package days in the last 56 days; the denominator is
+  the shorter of 56 days and the time since the package first appeared (floored at one week). **The 56-day window is a DESIGN CONSTANT, not derived**
+  (on the real export the top group of the ranking was stable across 84-, 56- and 28-day windows; 28 days was noisy). A habit that stops falls in rank as
+  its rate falls and rises back to the top if it resumes. No minutes figure in the UI (the seconds-per-entry cost is unknown).
+- **Noise filter, computed in the app from a closed form on each user's own log.** A first block qualifies if its distinct dates reach k_all (any-weekday
+  test) OR its dates on one weekday reach k_wd (weekday-specific test); each test is held to 2.5% so the union is at most 5%. The closed form
+  (per-category expected distinct dates in a 16-minute window, Poisson tail, one fitted constant c0 = 4.0) matched the time-scramble simulation within
+  one on the real log and on synthetic logs of four densities. Measured combined false-positive rate at the thresholds: 1.6% (60 days), 1.9% (88), 0.9% (150),
+  and at 200/250 days the closed form's weekday threshold is one too low (combined 5.7% / 5.5%), so **k_wd gets +1 above 150 logged days: a conservative safety
+  patch, to be replaced once a REAL log of 150+ days exists** (sizes above 88 days in the simulation resample the real 88 days). Thresholds: 60 days 10/6, 88 days
+  12/6, 150 days 16/8, 250 days 21/10. **Gate: no suggestions below 35 logged days**, the smallest log at which a once-a-week habit logged every single week
+  can clear the weekday test. Claims are limited to this one real log (subsets from 14 days, bootstrap above 88) plus synthetic logs; a second real log is a
+  human gate before any merge.
+- **Decision D1 (2026-10-24): the filter stays as designed, so a habit dormant for months fades as the log grows. It is a chance filter, not a hide rule.**
+  The threshold rises with the log, so a habit that stops keeps its old count and is eventually overtaken. Measured (closed form, 2.5% per test): the school
+  package B1 (18 dates) fades at about 198 logged days (~16 weeks of no repeats, so a 7-week school break is safe); School 13:00 B4 (24 dates) at ~316
+  (~33 weeks); the Muay Thai first block (14 dates) at ~127 (~39 days of no repeats); a weekly habit with 7 Fridays at ~150 (~62 days). If it resumes it
+  reappears as soon as its cumulative count clears the threshold again, and ranks high by recent rate. **Option (b), "never hide anything that ever passed", was rejected:**
+  repeated chances to pass inflate the false-positive rate with log length (measured 16.7% at 150 days at 2.5% per test; ~0.5% per test is needed to hold 5%), and
+  at 0.5% per test the Muay Thai weekday threshold at 88 days is 7 against 7 Fridays: zero margin.
+- **Packages.** Midnight halves of one entry (same category AND same normalized label, next calendar day, total under 1,440 minutes) are folded into one block,
+  so "Sleep" is the whole night; the evening date owns the occurrence; an unmatched evening half stays an ordinary block, and one on the log's last day is left out
+  until the next day exists. A package starts at a qualified first block (densest 15-minute window per category, one occurrence per date) and extends while
+  a later block, matched by category AND offset window (+/-15 min) so a short interposed entry does not break it, is present on at least 50% of the first
+  block's days (**the 50% retention is label-calibrated, not derived from the null**: the lowest labelled-"yes" retention was 57-62%). Eligibility is tested per
+  first-block cluster at the 16-minute-window threshold; qualified clusters with the same category sequence and first-block medians within 30 minutes (two
+  adjacent windows) merge into one suggestion with median offsets and durations (B2+B5, B6+B9); a lower-ranked package whose first block has the same category within
+  30 minutes of a block of a higher-ranked package is absorbed (this removes B14 and B15). A package that merely PREPENDS a block to a higher-ranked one is
+  not absorbed (B6 over B2), which is why B11 ("Fix hair > Journal", labelled "no") is still suggested: no rule separates it from B6/B9 (the share of the base's days
+  carrying the extra leading block was 18% for B11, 25% for B1, 40% for B6+B9, a three-point fit), so it stays showing with "Not now" and is pinned by a named test.
+- **Labels (2026-10-24).** Yes: B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B12, B13. No: B11, B14, B15. Not yet labelled: Breakfast ~08:10, Girlfriend ~19:00 (118 min),
+  School 08:25 (30 min).
+- **Rubber-stamp mitigations (decided):** exact times on the one-tap button and in the toast, and a sentence in Export week's `definitions.logged`; the device-local
+  unedited-entries list is deferred.
+
 Feature creep is the known failure mode of this project.
