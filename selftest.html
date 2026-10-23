@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1132;
+var EXPECTED_MIN_ROWS=1173;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -3010,7 +3010,8 @@ function runAsyncTests(H,d){
     .then(function(r){ return runDayCloseoutUITests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runSessionTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runSessionScheduleTests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runDetectionTests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runDetectionTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runNoiseFilterTests().then(function(more){ return r.concat(more); }); });
 }
 
 /* ---------------------------------------------------------------------
@@ -5081,6 +5082,263 @@ function runDetectionTests(){
         check("D15 privacy.html says that spotting patterns happens in the browser and only ever proposes a session",/patterns/i.test(t)&&/proposes/i.test(t));
       });
     })
+    .then(function(){ return results; });
+}
+
+/* ---------------------------------------------------------------------
+   Stage 3 REDESIGN, R1 - the noise filter (pure) and the 35-day gate. Written BEFORE the code.
+
+   noiseThresholds(entriesByDate, categories) -> {n, kAll, kWdClosed, kWd, eligible}:
+   a first-block cluster of a habit is real (not chance) when its distinct dates reach kAll (the any-weekday test)
+   OR its dates on ONE weekday reach kWd (the weekday-specific test). Each test is held to 2.5%, so the union is at
+   most 5%. Computed from the user's OWN log by a closed form: per category, the expected number of distinct dates
+   that an entry lands in a fixed 16-minute window if each day's times were scrambled (a Poisson tail), times a
+   fitted constant (c0_all = 4.0, c0_wd = 3.25) for the extra freedom of a sliding window. kWd gets +1 above 150
+   logged days (a conservative safety patch, approved 2026-10-24). No suggestions below 35 logged days.
+   The simulation in THIS file is written independently of the app (it never calls app code for the null), so the
+   closed form is checked against something that cannot be wrong in the same way. All logs are generated here
+   (seeded PRNG); none comes from a real export. Rows are tagged R1-xx. */
+function runNoiseFilterTests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  function J(x){ return JSON.stringify(x); }
+  function scenario(tag,fn){
+    return function(){
+      return Promise.resolve().then(fn).catch(function(e){
+        check(tag+": scenario threw before finishing",false,String(e&&e.message||e));
+      });
+    };
+  }
+  function rng(seed){ /* mulberry32 */
+    var a=seed>>>0;
+    return function(){ a=(a+0x6D2B79F5)>>>0; var t=a; t=Math.imul(t^(t>>>15),t|1); t^=t+Math.imul(t^(t>>>7),t|61); return ((t^(t>>>14))>>>0)/4294967296; };
+  }
+  var DAY0=new Date(2026,6,27); /* a Monday */
+  function isoOf(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+  function dayDate(i){ var d=new Date(DAY0); d.setDate(d.getDate()+i); return isoOf(d); }
+  function wdOf(date){ var p=date.split("-"); return (new Date(+p[0],+p[1]-1,+p[2]).getDay()+6)%7; }
+  var uidN=0;
+  function ent(cat,start,dur){ return {id:"e"+(uidN++),label:"x",cat:cat,start:start,end:Math.min(1440,start+(dur||30))}; }
+  function catList(ids){ return ids.map(function(id){ return {id:id,name:"Cat "+id,color:"#123456"}; }); }
+  /* days: [{i:dayIndexFromMonday, es:[[cat,start],...]}] */
+  function logFrom(days){ var m={}; days.forEach(function(d){ m[dayDate(d.i)]=d.es.map(function(e){ return ent(e[0],e[1]); }); }); return m; }
+  function uniformDays(N,es){ var out=[]; for(var i=0;i<N;i++) out.push({i:i,es:es}); return out; }
+  function genLog(seed,N,ncat,perDay,skew){
+    var r=rng(seed),w=[],tot=0,ids=[],m={};
+    for(var c=0;c<ncat;c++){ w.push(1/Math.pow(c+1,skew)); tot+=w[c]; ids.push("c"+c); }
+    function pick(){ var x=r()*tot,acc=0; for(var c=0;c<ncat;c++){ acc+=w[c]; if(x<acc) return ids[c]; } return ids[ncat-1]; }
+    for(var i=0;i<N;i++){ var es=[]; for(var k=0;k<perDay;k++) es.push(ent(pick(),1+Math.floor(r()*1438),10+Math.floor(r()*90))); m[dayDate(i)]=es; }
+    return {map:m,cats:catList(ids)};
+  }
+  /* independent null simulation: scramble each day's times by its own random offset (weekday labels kept),
+     then the biggest same-category 15-minute cluster of distinct dates, over all dates and within one weekday */
+  function sweepMax(occ){
+    occ.sort(function(a,b){ return a[0]-b[0]; });
+    var cnt={},dist=0,j=0,best=0;
+    for(var i=0;i<occ.length;i++){
+      while(j<occ.length&&occ[j][0]-occ[i][0]<=15){ if(!cnt[occ[j][1]]){ dist++; cnt[occ[j][1]]=0; } cnt[occ[j][1]]++; j++; }
+      if(dist>best) best=dist;
+      cnt[occ[i][1]]--; if(!cnt[occ[i][1]]) dist--;
+    }
+    return best;
+  }
+  function simulate(map,cats,scrambles,seed){
+    var known={}; cats.forEach(function(c){ known[c.id]=1; });
+    var days=Object.keys(map).sort().map(function(date){
+      return {wd:wdOf(date),es:map[date].filter(function(e){ return e.start>0&&known[e.cat]; }).map(function(e){ return [e.cat,e.start]; })};
+    });
+    var r=rng(seed),maxAll=[],maxWd=[];
+    for(var s=0;s<scrambles;s++){
+      var allP={},wdP={};
+      days.forEach(function(d,k){
+        var off=Math.floor(r()*1440);
+        d.es.forEach(function(e){
+          var s2=(e[1]+off)%1440;
+          (allP[e[0]]=allP[e[0]]||[]).push([s2,k]);
+          var key=d.wd+"|"+e[0]; (wdP[key]=wdP[key]||[]).push([s2,k]);
+        });
+      });
+      var ma=0,mw=0;
+      Object.keys(allP).forEach(function(c){ ma=Math.max(ma,sweepMax(allP[c])); });
+      Object.keys(wdP).forEach(function(c){ mw=Math.max(mw,sweepMax(wdP[c])); });
+      maxAll.push(ma); maxWd.push(mw);
+    }
+    return {maxAll:maxAll,maxWd:maxWd};
+  }
+  function simK(arr,alpha){ for(var k=2;k<400;k++){ var n=0; arr.forEach(function(x){ if(x>=k) n++; }); if(n/arr.length<=alpha) return k; } return 400; }
+
+  return Promise.resolve()
+
+    /* ---- R1-00: the constants the derivation produced, pinned so changing one without redoing it fails loudly */
+    .then(scenario("R1-00",function(){
+      return freshSandbox(true).then(function(f){
+        var c=f.H.getNoiseConstants();
+        check("R1-00 PIN: alpha 2.5% per test, c0_all 4.0, c0_wd 3.25, gate 35 logged days, weekday +1 above 150, window 16 minutes",
+          c&&c.alpha===0.025&&c.c0All===4&&c.c0Wd===3.25&&c.minLoggedDays===35&&c.wdSafetyAbove===150&&c.windowMinutes===16,J(c));
+      });
+    }))
+
+    /* ---- R1-01: exact thresholds on tiny hand-built logs (values from the Python reference, computed independently) */
+    .then(scenario("R1-01",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,A="A",B="B",C="C";
+        function T(days,ids){ return h.noiseThresholds(logFrom(days),catList(ids)); }
+        var t1=T(uniformDays(35,[[A,100],[B,200]]),[A,B]);
+        check("R1-01 35 days, two categories once a day: kAll 6, kWd 4",t1.kAll===6&&t1.kWd===4&&t1.n===35,J(t1));
+        var t2=T(uniformDays(60,[[A,100],[A,300],[A,500],[B,200]]),[A,B]);
+        check("R1-01 60 days, A three times a day + B once: kAll 10, kWd 5 (several entries of one category in a day count as one date)",t2.kAll===10&&t2.kWd===5,J(t2));
+        var t3a=T(uniformDays(150,[[A,100],[B,200],[C,300]]),[A,B,C]), t3b=T(uniformDays(151,[[A,100],[B,200],[C,300]]),[A,B,C]);
+        check("R1-01 150 days: kAll 10, kWd 6 (no +1)",t3a.kAll===10&&t3a.kWd===6&&t3a.kWdClosed===6,J(t3a));
+        check("R1-01 151 days: kAll 10, kWdClosed 6 but kWd 7 (+1 above 150 logged days)",t3b.kAll===10&&t3b.kWdClosed===6&&t3b.kWd===7,J(t3b));
+        var cs=[];for(var i=0;i<10;i++) cs.push(String.fromCharCode(65+i));
+        var t4=T(uniformDays(88,cs.map(function(c,i){ return [c,100+30*i]; })),cs);
+        check("R1-01 88 days, ten categories once a day: kAll 9, kWd 5",t4.kAll===9&&t4.kWd===5,J(t4));
+        var wk=[];for(var w=0;w<12;w++) for(var d=0;d<5;d++) wk.push({i:7*w+d,es:[[A,100],[B,200]]});
+        var t6=T(wk,[A,B]);
+        var u=T(uniformDays(60,[["zz",100],["A",0]]),[A]);
+        check("R1-01 entries of an unknown category, and entries that start at 00:00, add nothing to the density (thresholds equal those of a log with no density: 2 and 2)",u.kAll===2&&u.kWdClosed===2&&u.n===60,J(u));
+        check("R1-01 60 days that are ALL Monday-Friday: kAll 7, kWd 5 - one more than an even split over seven weekdays would give (the per-weekday form uses the real weekday mix)",t6.kAll===7&&t6.kWd===5&&t6.n===60,J(t6));
+      });
+    }))
+
+    /* ---- R1-02: the gate counts LOGGED days (days with an entry), not calendar days */
+    .then(scenario("R1-02",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,A="A";
+        function logSpread(k,stride){ var d=[]; for(var i=0;i<k;i++) d.push({i:i*stride,es:[[A,100]]}); return logFrom(d); }
+        check("R1-02 34 logged days: not eligible",h.noiseThresholds(logSpread(34,1),catList([A])).eligible===false);
+        check("R1-02 35 logged days: eligible",h.noiseThresholds(logSpread(35,1),catList([A])).eligible===true);
+        check("R1-02 34 logged days spread over 136 calendar days is still NOT eligible (calendar span does not count)",h.noiseThresholds(logSpread(34,4),catList([A])).eligible===false);
+        check("R1-02 35 logged days spread over 140 calendar days IS eligible",h.noiseThresholds(logSpread(35,4),catList([A])).eligible===true);
+        var m=logSpread(34,1); m[dayDate(900)]=[];
+        check("R1-02 a date with an empty entry list is not a logged day",h.noiseThresholds(m,catList([A])).n===34&&h.noiseThresholds(m,catList([A])).eligible===false);
+        check("R1-02 an empty log: zero days, not eligible, and thresholds are still numbers",(function(){ var t=h.noiseThresholds({},[]); return t.n===0&&t.eligible===false&&isFinite(t.kAll)&&isFinite(t.kWd); })());
+      });
+    }))
+
+    /* ---- R1-03: pure, deterministic, order independent */
+    .then(scenario("R1-03",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,g=genLog(7,60,12,15,0.6),before=J(g.map),catsBefore=J(g.cats);
+        var a=J(h.noiseThresholds(g.map,g.cats)),b=J(h.noiseThresholds(g.map,g.cats));
+        check("R1-03 PRECONDITION: the fixture is a real log (60 logged days, thresholds computed)",JSON.parse(a).n===60&&JSON.parse(a).kAll>=5,a);
+        check("R1-03 deterministic: same input, same thresholds",a===b);
+        check("R1-03 pure: the entries and categories are byte-for-byte unchanged",J(g.map)===before&&J(g.cats)===catsBefore);
+        var rev={}; Object.keys(g.map).reverse().forEach(function(k){ rev[k]=g.map[k].slice().reverse(); });
+        check("R1-03 independent of key order and entry order",J(h.noiseThresholds(rev,g.cats.slice().reverse()))===a);
+      });
+    }))
+
+    /* ---- R1-04: it ADAPTS to the length of the log, and the +1 rule has an exact boundary */
+    .then(scenario("R1-04",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,ks=[];
+        [35,60,88,150,250].forEach(function(N){ var g=genLog(11,N,19,18,0.6); ks.push(h.noiseThresholds(g.map,g.cats)); });
+        check("R1-04 kAll grows with the length of the log (35<60<88<150<250 days)",ks[0].kAll<ks[1].kAll&&ks[1].kAll<ks[2].kAll&&ks[2].kAll<ks[3].kAll&&ks[3].kAll<ks[4].kAll,J(ks.map(function(t){ return t.kAll; })));
+        check("R1-04 kWd never falls as the log grows",ks[0].kWd<=ks[1].kWd&&ks[1].kWd<=ks[2].kWd&&ks[2].kWd<=ks[3].kWd&&ks[3].kWd<=ks[4].kWd,J(ks.map(function(t){ return t.kWd; })));
+        check("R1-04 the fixed 12 of the old design is wrong at both ends: 150 and 250 days need more, 35 days needs less",ks[3].kAll>12&&ks[4].kAll>12&&ks[0].kAll<12,J(ks.map(function(t){ return t.kAll; })));
+        var g150=genLog(5,150,19,18,0.6),g151=genLog(5,151,19,18,0.6);
+        var t150=h.noiseThresholds(g150.map,g150.cats),t151=h.noiseThresholds(g151.map,g151.cats);
+        check("R1-04 +1 boundary: 150 logged days -> kWd equals the closed form",t150.n===150&&t150.kWd===t150.kWdClosed,J(t150));
+        check("R1-04 ...151 logged days -> kWd is the closed form +1",t151.n===151&&t151.kWd===t151.kWdClosed+1,J(t151));
+      });
+    }))
+
+    /* ---- R1-05: the qualifying rule for a cluster of dates */
+    .then(scenario("R1-05",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,th={kAll:12,kWd:6};
+        function dates(idx){ return idx.map(dayDate); }
+        function fri(n){ var o=[]; for(var m=0;m<n;m++) o.push(4+7*m); return o; }
+        function spread(n){ var o=[]; for(var i=0;i<n;i++) o.push(i); return o; } /* consecutive days: every weekday */
+        var q12=h.clusterQualifies(dates(spread(12)),th), q11=h.clusterQualifies(dates(spread(11)),th);
+        check("R1-05 12 dates spread over every weekday qualify through the any-weekday test",q12.ok&&q12.via==="all",J(q12));
+        check("R1-05 11 dates spread over every weekday do not (no weekday has 6)",!q11.ok,J(q11));
+        var q6=h.clusterQualifies(dates(fri(6)),th), q5=h.clusterQualifies(dates(fri(5)),th);
+        check("R1-05 6 Fridays qualify through the weekday-specific test (6 total is below 12)",q6.ok&&q6.via==="weekday"&&q6.maxWd===6,J(q6));
+        check("R1-05 5 Fridays do not",!q5.ok&&q5.maxWd===5,J(q5));
+        var both=h.clusterQualifies(dates(fri(12)),th);
+        check("R1-05 12 Fridays qualify both ways",both.ok&&both.via==="both",J(both));
+        var mixed=h.clusterQualifies(dates(fri(5).concat([0,1,2,3,5,6])),th);
+        check("R1-05 5 Fridays plus 6 other days (11 total, no weekday has 6) do not qualify - the tests are separate, their counts are not added",!mixed.ok,J(mixed));
+        check("R1-05 an empty cluster does not qualify",!h.clusterQualifies([],th).ok);
+        var dup=h.clusterQualifies(dates([4,4,4,4,4,4,4]),th);
+        check("R1-05 the same date seven times is ONE date",!dup.ok&&dup.n===1&&dup.maxWd===1,J(dup));
+      });
+    }))
+
+    /* ---- R1-06: closed form vs an INDEPENDENT simulation, on logs of different density - the safety row */
+    .then(scenario("R1-06",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,cfgs=[["real-like",19,18,0.6],["few big categories",6,10,0.5],["sparse",8,5,1.0]],Ns=[60,88,150,250];
+        var worst=0,rows=[],tooLoose=[],tooStrict=[],nonEmpty=true;
+        cfgs.forEach(function(c){
+          Ns.forEach(function(N){
+            var g=genLog(100+N+c[1],N,c[1],c[2],c[3]),th=h.noiseThresholds(g.map,g.cats),sim=simulate(g.map,g.cats,300,N*31+c[1]);
+            var ev=0; for(var i=0;i<sim.maxAll.length;i++) if(sim.maxAll[i]>=th.kAll||sim.maxWd[i]>=th.kWd) ev++;
+            var rate=ev/sim.maxAll.length; worst=Math.max(worst,rate);
+            var sa=simK(sim.maxAll,0.025),sw=simK(sim.maxWd,0.025);
+            if(th.kAll>sa+2||th.kWdClosed>sw+2) tooStrict.push(c[0]+"@"+N+" k "+th.kAll+"/"+th.kWdClosed+" vs sim "+sa+"/"+sw);
+            if(rate>0.05) tooLoose.push(c[0]+"@"+N+" "+(100*rate).toFixed(1)+"%");
+            if(!(th.n===N&&sim.maxAll.length===300&&th.kAll>=3)) nonEmpty=false;
+            rows.push(c[0].slice(0,4)+N+":"+(100*rate).toFixed(1)+"%");
+          });
+        });
+        check("R1-06 PRECONDITION: 12 generated logs (3 densities x 60/88/150/250 days), 300 scrambles each, thresholds computed",nonEmpty);
+        check("R1-06 SAFETY: at the app's thresholds the combined false-positive rate (either test fires on a scrambled log) is at most 5% on every log; worst "+(100*worst).toFixed(1)+"%",tooLoose.length===0,J(tooLoose)+" | "+rows.join(" "));
+        check("R1-06 POWER: the thresholds are not more than 2 above what the simulation says is needed (a filter that hides everything is also wrong)",tooStrict.length===0,J(tooStrict));
+      });
+    }))
+
+    /* ---- R1-07/08/09: the habit this feature was built for. NAMED TEST CASE: Muay Thai. */
+    .then(scenario("R1-07",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        function fixture(N){ var g=genLog(11,N,19,18,0.6); return {g:g,th:h.noiseThresholds(g.map,g.cats)}; }
+        var fx=fixture(88),th=fx.th;
+        check("R1-07 MUAY THAI PRECONDITION: the generated log reproduces the REAL log's measured thresholds at 88 logged days (kAll 12, kWd 6)",th.n===88&&th.kAll===12&&th.kWd===6,J(th));
+        function dates(idx){ return idx.map(dayDate); }
+        var FRI=[39,46,53,60,67,74,81],MON=[70,77],TUE=[71,78],WED=[65,72,79];
+        var real14=FRI.concat(MON,TUE,WED);
+        var q=h.clusterQualifies(dates(real14),th);
+        check("R1-07 MUAY THAI: the first block as it is today (7 Fridays + 2 Mon + 2 Tue + 3 Wed = 14 dates) clears the filter",q.ok,J(q));
+        var weekdayOnly=h.clusterQualifies(dates(FRI.concat(MON,WED.slice(0,2))),th);
+        check("R1-07 MUAY THAI: 7 Fridays + 4 other days (11 dates, below the 12 of the any-weekday test) clear through the WEEKDAY test, with margin 1 (kWd 6)",weekdayOnly.ok&&weekdayOnly.via==="weekday"&&weekdayOnly.maxWd-th.kWd===1,J(weekdayOnly));
+        var six=h.clusterQualifies(dates(FRI.slice(1).concat(MON,WED.slice(0,2))),th), five=h.clusterQualifies(dates(FRI.slice(2).concat(MON,WED.slice(0,2))),th);
+        check("R1-07 MUAY THAI: exactly 6 Fridays still clear (the line) ...",six.ok&&six.maxWd===6,J(six));
+        check("R1-07 MUAY THAI: ... and 5 Fridays do not",!five.ok&&five.maxWd===5,J(five));
+      });
+    }))
+    .then(scenario("R1-08",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,minMargin=1e9,failed=[],last=0;
+        for(var j=0;j<=20;j++){
+          var N=88+7*j,g=genLog(11,N,19,18,0.6),th=h.noiseThresholds(g.map,g.cats);
+          var lastFri=4+7*Math.floor((N-1-4)/7),fri=[];
+          for(var m=0;m<7+j;m++) fri.push(lastFri-7*m);
+          var others=[lastFri-11,lastFri-4,lastFri-10,lastFri-3,lastFri-9,lastFri-2,lastFri-16]; /* Mon, Tue, Wed days of the recent weeks, as in the real shape */
+          var q=h.clusterQualifies(fri.concat(others).map(dayDate),th);
+          if(!q.ok) failed.push(N+"d: "+J(q)+" th "+th.kAll+"/"+th.kWd);
+          minMargin=Math.min(minMargin,Math.max(q.maxWd-th.kWd,q.n-th.kAll)); last=N;
+        }
+        check("R1-08 MUAY THAI KEEPS CLEARING: if the habit continues every week (one more Friday per week as the log grows from 88 to 228 logged days) it clears at EVERY step; smallest margin "+minMargin,failed.length===0&&last===228,J(failed));
+      });
+    }))
+    .then(scenario("R1-09",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,res=[];
+        [88,100,120,150,200,250].forEach(function(N){
+          var g=genLog(11,N,19,18,0.6),th=h.noiseThresholds(g.map,g.cats);
+          var q=h.clusterQualifies([39,46,53,60,67,74,81,70,77,71,78,65,72,79].map(dayDate),th);
+          res.push({N:N,ok:q.ok,k:th.kAll+"/"+th.kWd});
+        });
+        var firstOut=res.filter(function(r){ return !r.ok; })[0];
+        var stays=true; for(var i=0;i<res.length;i++) if(firstOut&&res[i].N>=firstOut.N&&res[i].ok) stays=false;
+        check("R1-09 DECISION D1 (pinned): if the habit STOPS (the same 14 dates) it clears at 88 days and has faded by 250 logged days - a chance filter, not a hide rule",res[0].ok&&!!firstOut&&firstOut.N<=250&&firstOut.N>=100&&stays,J(res));
+      });
+    }))
     .then(function(){ return results; });
 }
 

@@ -1061,6 +1061,77 @@ function createSessionFromSuggestion(sug,name){
   return id;
 }
 
+/* ---------------- noise filter (stage 3 redesign, R1) ----------------
+   Is a cluster of dates a real habit, or the kind of coincidence a log of this size throws up by chance?
+   Two tests, each held to NOISE_ALPHA = 2.5% so that the chance that EITHER fires on pure noise is at most 5%
+   (measured 0.7% - 2.8% from 35 to 250 logged days, OVERNIGHT-STATUS.md): the any-weekday test (a first-block
+   cluster reaches kAll distinct dates) and the weekday-specific test (it reaches kWd dates on ONE weekday - this
+   is what finds a once-a-week habit after about 6 weeks instead of 12).
+   How the thresholds are worked out, from the user's OWN log (so they adapt to its length and its shape):
+   for a category, an entry lands in a fixed 16-minute window (NOISE_WINDOW_MINUTES = the 15-minute tolerance,
+   inclusive) with probability 1-(1-16/1440)^m on a day with m entries of it, if the day's times were scrambled.
+   Summed over days that is the expected number of distinct dates a window collects (lambda); the chance that some
+   category/window collects k or more is about  1 - exp(-c0 * (1440/16) * sum of Poisson tails)  - the 90 windows
+   of a day, times a fitted constant c0 for the freedom of a sliding window. kAll / kWd is the smallest k that
+   brings it to 2.5%. For the weekday test lambda is kept per (weekday, category) from the real weekday mix of the
+   log, so a log that only has Monday-Friday entries is not treated as if it were spread over seven days.
+   c0 is FITTED: NOISE_C0_ALL = 4.0 and NOISE_C0_WD = 3.25 were fitted to an independent time-scramble simulation
+   of the one real log this was built on (subsets from 14 days, a bootstrap above 88 days) and checked on
+   synthetic logs of four densities; the weekday constant's viable range was 3.0 - 3.5, this is its middle.
+   NOT claimed: any other real person's log (a second one is a human gate before merging); real days beyond 88;
+   logs under 35 days (nothing is shown there at all - the smallest log in which a once-a-week habit logged every
+   single week could even clear the weekday test).
+   NOISE_WD_SAFETY: kWd gets +1 above 150 logged days. A conservative safety patch (approved 2026-10-24) from when
+   the weekday family looked one short at 200/250 days; the per-weekday form measured fine without it. Replace or
+   drop it once a REAL log of 150+ days exists. */
+var NOISE_ALPHA=0.025, NOISE_C0_ALL=4.0, NOISE_C0_WD=3.25, NOISE_MIN_LOGGED_DAYS=35, NOISE_WD_SAFETY_ABOVE=150;
+var NOISE_WINDOW_MINUTES=DETECT_TOLERANCE_MIN+1;
+function poissonTailAtLeast(lambda,k){
+  if(!(lambda>0)) return 0;
+  var t=0,term=Math.exp(-lambda);
+  for(var i=0;i<k;i++){ t+=term; term*=lambda/(i+1); }
+  return Math.max(0,1-t);
+}
+function noiseSmallestK(lams,c0){
+  var perWindow=1440/NOISE_WINDOW_MINUTES;
+  for(var k=2;k<400;k++){
+    var s=0;
+    for(var i=0;i<lams.length;i++) s+=poissonTailAtLeast(lams[i],k);
+    if(1-Math.exp(-c0*perWindow*s)<=NOISE_ALPHA) return k;
+  }
+  return 400;
+}
+function noiseThresholds(entriesByDate,categories){
+  var known={},lamAll={},lamWd={},n=0;
+  (categories||[]).forEach(function(c){ known[c.id]=true; });
+  var chance=NOISE_WINDOW_MINUTES/1440;
+  Object.keys(entriesByDate||{}).forEach(function(date){
+    var es=entriesByDate[date]||[];
+    if(!es.length) return;
+    n++;
+    var w=weekdayOfIso(date),cnt={};
+    es.forEach(function(e){
+      if(e&&typeof e.cat==="string"&&known[e.cat]&&e.start>0) cnt[e.cat]=(cnt[e.cat]||0)+1;
+    });
+    Object.keys(cnt).forEach(function(c){
+      var p=1-Math.pow(1-chance,cnt[c]);
+      lamAll[c]=(lamAll[c]||0)+p;
+      lamWd[w+"|"+c]=(lamWd[w+"|"+c]||0)+p;
+    });
+  });
+  var kAll=noiseSmallestK(Object.keys(lamAll).map(function(k){ return lamAll[k]; }),NOISE_C0_ALL);
+  var kWdClosed=noiseSmallestK(Object.keys(lamWd).map(function(k){ return lamWd[k]; }),NOISE_C0_WD);
+  return {n:n,kAll:kAll,kWdClosed:kWdClosed,kWd:kWdClosed+(n>NOISE_WD_SAFETY_ABOVE?1:0),eligible:n>=NOISE_MIN_LOGGED_DAYS};
+}
+/* does a cluster of dates clear the filter? either test is enough; they are separate tests, their counts are
+   never added together */
+function clusterQualifies(dates,th){
+  var byWd=[0,0,0,0,0,0,0],seen={},n=0;
+  (dates||[]).forEach(function(d){ if(!seen[d]){ seen[d]=1; n++; byWd[weekdayOfIso(d)]++; } });
+  var maxWd=Math.max.apply(null,byWd),viaAll=n>=th.kAll,viaWd=maxWd>=th.kWd;
+  return {ok:viaAll||viaWd,via:(viaAll&&viaWd)?"both":viaAll?"all":viaWd?"weekday":null,n:n,maxWd:maxWd};
+}
+
 /* ---- save as session / apply ---- */
 function isIsoDate(s){
   if(typeof s!=="string"||!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
@@ -4956,6 +5027,9 @@ if(TEST_MODE){
     getDayHighlightMax:function(){ return DAY_HIGHLIGHT_MAX; },
     migrateSessions:migrateSessions,
     detectPatterns:detectPatterns,
+    noiseThresholds:noiseThresholds,
+    clusterQualifies:clusterQualifies,
+    getNoiseConstants:function(){ return {alpha:NOISE_ALPHA,c0All:NOISE_C0_ALL,c0Wd:NOISE_C0_WD,minLoggedDays:NOISE_MIN_LOGGED_DAYS,wdSafetyAbove:NOISE_WD_SAFETY_ABOVE,windowMinutes:NOISE_WINDOW_MINUTES}; },
     suggestSessions:suggestSessions,
     dismissSuggestion:dismissSuggestion,
     getDismissedSuggestions:dismissedSuggestions,
