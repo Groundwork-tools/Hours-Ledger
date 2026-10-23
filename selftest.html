@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1173;
+var EXPECTED_MIN_ROWS=1206;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -3011,7 +3011,8 @@ function runAsyncTests(H,d){
     .then(function(r){ return runSessionTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runSessionScheduleTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runDetectionTests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runNoiseFilterTests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runNoiseFilterTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runMidnightFoldTests().then(function(more){ return r.concat(more); }); });
 }
 
 /* ---------------------------------------------------------------------
@@ -5337,6 +5338,150 @@ function runNoiseFilterTests(){
         var firstOut=res.filter(function(r){ return !r.ok; })[0];
         var stays=true; for(var i=0;i<res.length;i++) if(firstOut&&res[i].N>=firstOut.N&&res[i].ok) stays=false;
         check("R1-09 DECISION D1 (pinned): if the habit STOPS (the same 14 dates) it clears at 88 days and has faded by 250 logged days - a chance filter, not a hide rule",res[0].ok&&!!firstOut&&firstOut.N<=250&&firstOut.N>=100&&stays,J(res));
+      });
+    }))
+    .then(function(){ return results; });
+}
+
+/* ---------------------------------------------------------------------
+   Stage 3 REDESIGN, R2 - folding the two halves of an entry that crosses midnight into one block. Written BEFORE the code.
+
+   putEntry splits an entry that crosses midnight into two entries on two dates (one ends at 24:00, the other
+   starts at 00:00, same label and category). For detection "Sleep" has to mean the whole night, so
+   foldMidnightHalves(entriesByDate) -> {days, stats} puts the pair back together as one logical entry on the
+   EVENING date (start = the evening start, end = 1440 + the morning end), and drops the morning half from the
+   next date. Pure: the input is never changed.
+   Rules: same category (a real one, not null) AND same normalized label (trimmed, lower-case, runs of
+   whitespace collapsed); next CALENDAR day (real date arithmetic); total length at most 1439 minutes; each morning
+   half is used at most once (the one with the smallest end wins among several); a half with no partner stays an
+   ordinary entry - except an evening half on the log's LAST day, which is flagged open (the night is not over yet).
+   Measured on the one real log: all 61 evening halves had a same-category same-label partner.
+   Rows are tagged R2-xx; all logs are generated here. */
+function runMidnightFoldTests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  function J(x){ return JSON.stringify(x); }
+  function scenario(tag,fn){
+    return function(){
+      return Promise.resolve().then(fn).catch(function(e){
+        check(tag+": scenario threw before finishing",false,String(e&&e.message||e));
+      });
+    };
+  }
+  var uidN=0;
+  function E(cat,start,end,label){ return {id:"f"+(uidN++),label:label===undefined?"Sleep":label,cat:cat,start:start,end:end}; }
+  function ids(list){ return list.map(function(e){ return e.id; }).join(","); }
+  function pick(res,date){ return (res.days[date]||[]).slice().sort(function(a,b){ return a.start-b.start||a.end-b.end; }); }
+
+  return Promise.resolve()
+
+    .then(scenario("R2-01",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,eve=E("S",1320,1440),mor=E("S",0,405),other=E("W",405,480,"Breakfast");
+        var m={"2026-03-02":[E("W",600,660,"Work"),eve],"2026-03-03":[mor,other]};
+        var res=h.foldMidnightHalves(m);
+        var d1=pick(res,"2026-03-02"),d2=pick(res,"2026-03-03");
+        check("R2-01 the two halves become ONE logical entry on the EVENING date: 22:00 to 24:00 + 00:00-06:45 = start 1320, end 1845, marked folded",
+          d1.length===2&&d1[1].start===1320&&d1[1].end===1845&&d1[1].folded===true&&d1[1].cat==="S"&&d1[1].label==="Sleep",J(d1));
+        check("R2-01 it keeps the evening half's id",d1[1].id===eve.id);
+        check("R2-01 the morning half is gone from the next date; the next date's other entries stay",d2.length===1&&d2[0].id===other.id,J(d2));
+        check("R2-01 stats count one fold, none unmatched, none open",res.stats.folded===1&&res.stats.unmatched===0&&res.stats.open===0,J(res.stats));
+        check("R2-01 an entry that does not touch midnight is returned unchanged (no folded flag)",d1[0].id!==eve.id&&!d1[0].folded&&d1[0].start===600&&d1[0].end===660,J(d1[0]));
+      });
+    }))
+
+    .then(scenario("R2-02",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        function fold(a,b){ var m={"2026-03-02":[a],"2026-03-03":[b]}; return h.foldMidnightHalves(m); }
+        var r1=fold(E("S",1320,1440,"Sleep"),E("S",0,405,"  sleep "));
+        check("R2-02 labels are compared trimmed and case-insensitive: 'Sleep' and '  sleep ' fold",pick(r1,"2026-03-02")[0].folded===true);
+        var r1b=fold(E("S",1320,1440,"Sleep  in"),E("S",0,405,"sleep in"));
+        check("R2-02 ...and runs of whitespace collapse ('Sleep  in' = 'sleep in')",pick(r1b,"2026-03-02")[0].folded===true);
+        var r2=fold(E("S",1320,1440,"Sleep"),E("S",0,405,"Nap"));
+        check("R2-02 a different label does NOT fold (conservative: a night whose label was edited drops out)",!pick(r2,"2026-03-02")[0].folded&&pick(r2,"2026-03-03").length===1&&r2.stats.unmatched===1,J(r2.stats));
+        var r3=fold(E("S",1320,1440),E("D",0,405));
+        check("R2-02 a different CATEGORY does not fold",!pick(r3,"2026-03-02")[0].folded&&pick(r3,"2026-03-03").length===1);
+        var r4=fold(E(null,1320,1440,"Break"),E(null,0,30,"Break"));
+        check("R2-02 uncategorised halves (cat null) are never folded",!pick(r4,"2026-03-02")[0].folded&&pick(r4,"2026-03-03").length===1);
+        var r5=fold(E("S",100,1440),E("S",0,200));
+        check("R2-02 a fold that would be longer than 1439 minutes (1340 + 200) is refused",!pick(r5,"2026-03-02")[0].folded&&pick(r5,"2026-03-03").length===1);
+        var r6=fold(E("S",1320,1440),E("S",0,119));
+        check("R2-02 a fold of exactly 1439-minute-or-less still folds (120 + 119 = 239)",pick(r6,"2026-03-02")[0].folded===true);
+        var r7=fold(E("S",1320,1439),E("S",0,405));
+        check("R2-02 an evening entry that ends at 23:59 is NOT a half of a split entry",!pick(r7,"2026-03-02")[0].folded&&pick(r7,"2026-03-03").length===1);
+      });
+    }))
+
+    .then(scenario("R2-03",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        var noPartner=h.foldMidnightHalves({"2026-03-02":[E("S",1320,1440)],"2026-03-03":[E("W",60,120,"Work")]});
+        var a=pick(noPartner,"2026-03-02")[0];
+        check("R2-03 NEXT DAY HAS NO 00:00 ENTRY: the evening half stays an ordinary entry, not folded and not open",!a.folded&&!a.open&&noPartner.stats.unmatched===1&&noPartner.stats.open===0,J(a));
+        var last=h.foldMidnightHalves({"2026-03-02":[E("W",60,120,"Work")],"2026-03-03":[E("S",1320,1440)]});
+        var l=pick(last,"2026-03-03")[0];
+        check("R2-03 ON THE LAST LOGGED DAY the unmatched evening half is flagged open (the night is not over); it is still returned",l.open===true&&!l.folded&&last.stats.open===1,J(l));
+        var gap=h.foldMidnightHalves({"2026-03-02":[E("S",1320,1440)],"2026-03-09":[E("W",60,120,"Work")]});
+        var g=pick(gap,"2026-03-02")[0];
+        check("R2-03 a day with no next logged day that is NOT the last day (a gap in the log) is an ordinary unmatched half, not open",!g.open&&!g.folded&&gap.stats.unmatched===1,J(g));
+        var notMidnight=h.foldMidnightHalves({"2026-03-02":[E("S",1320,1440)],"2026-03-03":[E("S",300,405)]});
+        check("R2-03 a same-category same-label entry on the next day that does NOT start at 00:00 is not a partner (it is a separate sleep, not the other half)",!pick(notMidnight,"2026-03-02")[0].folded&&pick(notMidnight,"2026-03-03").length===1&&notMidnight.stats.unmatched===1,J(notMidnight.stats));
+        var orphan=h.foldMidnightHalves({"2026-03-03":[E("S",0,405)]});
+        check("R2-03 a 00:00 entry with no evening half before it is left exactly as it is",pick(orphan,"2026-03-03").length===1&&!pick(orphan,"2026-03-03")[0].folded);
+      });
+    }))
+
+    .then(scenario("R2-04",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        [["2026-01-31","2026-02-01","month end"],["2026-12-31","2027-01-01","year end"],["2026-02-28","2026-03-01","end of a non-leap February"],["2028-02-28","2028-02-29","a leap day"]].forEach(function(p){
+          var m={}; m[p[0]]=[E("S",1320,1440)]; m[p[1]]=[E("S",0,405)];
+          var r=h.foldMidnightHalves(m);
+          check("R2-04 folds across a "+p[2]+" ("+p[0]+" -> "+p[1]+")",pick(r,p[0])[0].folded===true&&pick(r,p[1]).length===0,J(r.stats));
+        });
+        var wrong={"2026-01-31":[E("S",1320,1440)],"2026-01-32":[E("S",0,405)],"2026-02-01":[E("W",0,60,"Work")]};
+        var r2=h.foldMidnightHalves(wrong);
+        check("R2-04 only the real next calendar day pairs (2026-01-31 does not pair with a made-up key)",!pick(r2,"2026-01-31")[0].folded,J(r2.stats));
+      });
+    }))
+
+    .then(scenario("R2-05",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        var e1=E("S",1320,1440),m1=E("S",0,300),m2=E("S",0,405);
+        var r=h.foldMidnightHalves({"2026-03-02":[e1],"2026-03-03":[m2,m1]});
+        var d1=pick(r,"2026-03-02")[0],d2=pick(r,"2026-03-03");
+        check("R2-05 two 00:00 candidates: the one with the SMALLEST end is used (300 -> end 1740) ...",d1.folded&&d1.end===1740,J(d1));
+        check("R2-05 ... and the other stays where it was",d2.length===1&&d2[0].id===m2.id,J(d2));
+        var eA=E("S",1200,1440),eB=E("S",1320,1440),mA=E("S",0,300),mB=E("S",0,400);
+        var r2=h.foldMidnightHalves({"2026-03-02":[eA,eB],"2026-03-03":[mA,mB]});
+        var folded=pick(r2,"2026-03-02").filter(function(e){ return e.folded; });
+        check("R2-05 two evening halves and two morning halves: each morning half is used ONCE (two folds, nothing left over)",folded.length===2&&pick(r2,"2026-03-03").length===0&&r2.stats.folded===2,J(r2.stats));
+        var eA2=E("S",1200,1440),eB2=E("S",1320,1440),mA2=E("S",0,300),mB2=E("S",0,400);
+        var fwd=h.foldMidnightHalves({"2026-03-02":[eA2,eB2],"2026-03-03":[mA2,mB2]}), rev=h.foldMidnightHalves({"2026-03-02":[eB2,eA2],"2026-03-03":[mB2,mA2]});
+        function ends(r){ return pick(r,"2026-03-02").map(function(e){ return e.start+">"+e.end; }).join(" "); }
+        check("R2-05 evening halves are taken in START order, so reversing the order of the entries changes nothing: the earlier evening half gets the shorter morning (1200>1740 1320>1840)",ends(fwd)==="1200>1740 1320>1840"&&ends(rev)===ends(fwd),ends(fwd)+" | "+ends(rev));
+        var r3=h.foldMidnightHalves({"2026-03-02":[E("S",1320,1440)],"2026-03-03":[E("S",0,300),E("S",300,405)]});
+        check("R2-05 a night logged as three pieces: only the piece that touches midnight folds; the third piece stays on its own date",pick(r3,"2026-03-02")[0].end===1740&&pick(r3,"2026-03-03").length===1&&pick(r3,"2026-03-03")[0].start===300,J(pick(r3,"2026-03-03")));
+      });
+    }))
+
+    .then(scenario("R2-06",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        var m={"2026-03-02":[E("S",1320,1440),E("W",600,660,"Work")],"2026-03-03":[E("S",0,405),E("P",480,540,"x")],"2026-03-04":[E("S",1300,1440)]};
+        var before=J(m),a=J(h.foldMidnightHalves(m)),b=J(h.foldMidnightHalves(m));
+        check("R2-06 PRECONDITION: the fixture folds one night and flags one open",JSON.parse(a).stats.folded===1&&JSON.parse(a).stats.open===1,J(JSON.parse(a).stats));
+        check("R2-06 pure: the input is byte-for-byte unchanged",J(m)===before);
+        check("R2-06 deterministic",a===b);
+        var rev={}; Object.keys(m).reverse().forEach(function(k){ rev[k]=m[k].slice().reverse(); });
+        check("R2-06 independent of key order and entry order (compared as sorted days)",J(pick(h.foldMidnightHalves(rev),"2026-03-02"))===J(pick(JSON.parse(a),"2026-03-02"))&&JSON.parse(J(h.foldMidnightHalves(rev).stats)).folded===1);
+        var res=h.foldMidnightHalves(m);
+        Object.keys(res.days).forEach(function(k){ res.days[k].forEach(function(e){ e.start=7; e.label="changed"; }); });
+        check("R2-06 the result does not alias the input: changing every returned entry leaves the input byte-for-byte as it was",J(m)===before);
       });
     }))
     .then(function(){ return results; });

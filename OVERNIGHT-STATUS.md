@@ -287,6 +287,18 @@ The OLD stage 3 detector (`detectPatterns`, the cards, fixed minimum 12) is stil
 - **Gate (RAN):** full `selftest.html`: `PASS - 0 failing / 1173 total` (1132 + 41). `EXPECTED_MIN_ROWS` 1132 -> 1173.
 - **Not claimed:** any other real person's log; real days beyond 88; logs under 35 days (nothing shown there). A second real log is a human gate before any merge.
 
+### R2 - folding the two halves of a midnight-crossing entry (DONE, gate passed)
+- **Fail-first (RAN):** `runMidnightFoldTests` against the app without the function: `FAIL - 6 failing / 277 total` (all 6 scenarios: `R2-01 ... h.foldMidnightHalves is not a function`).
+- **First run with the code (RAN):** `PASS - 0 failing / 302`. Before mutating I added two assertions for branches no row could tell apart (a same-category same-label entry on the next day that does NOT start at
+  00:00; evening halves taken in start order) -> 304 rows.
+- **Rules as built (REASONED ONLY except where measured):** same real category AND same normalized label (trim, lower-case, collapse whitespace), next CALENDAR day by real date arithmetic, total at most 1439 minutes, each morning half used
+  once (smallest end wins), evening halves processed in start order; an unmatched half stays an ordinary entry, except on the log's last day where it is flagged `open`. Measured on the real log (RAN): all 61 evening halves had a partner;
+  26 of 87 entries starting at 00:00 have no evening half before them (nights that began after midnight), so those are never folded.
+- **Mutation checks (RAN, 17 mutants, all killed, unmutated `PASS - 0 failing / 304`):** never folds (17 rows), category ignored, label ignored, null-category halves fold, any next-day entry is a partner, no 1439 guard, naive string day arithmetic
+  (the month/year/leap-day rows), a morning half usable twice, largest end wins, last-day open flag missing, every unmatched half open, folds not counted, input aliased, morning half not removed, array order instead of start order, labels
+  compared exactly, 23:59 counts as an evening half.
+- **Gate (RAN):** full `selftest.html`: `PASS - 0 failing / 1206 total` (1173 + 33). `EXPECTED_MIN_ROWS` 1173 -> 1206.
+
 ## Open issues (decided NOT to fix, listed only)
 
 - **Future entries count as logged.** Applying a session to a future date creates ordinary entries, so the

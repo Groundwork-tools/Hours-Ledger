@@ -1132,6 +1132,55 @@ function clusterQualifies(dates,th){
   return {ok:viaAll||viaWd,via:(viaAll&&viaWd)?"both":viaAll?"all":viaWd?"weekday":null,n:n,maxWd:maxWd};
 }
 
+/* ---------------- midnight fold (stage 3 redesign, R2) ----------------
+   putEntry splits an entry that crosses midnight into two entries on two dates (one ends at 24:00, the other starts
+   at 00:00, same label and category). For detection "Sleep" has to mean the whole night, so the pair is put back
+   together as ONE logical entry on the EVENING date: start = the evening start, end = 1440 + the morning end.
+   Rules (R2 tests): same category (a real one - uncategorised halves are never folded) AND same normalized label
+   (trimmed, lower-case, whitespace collapsed); the next CALENDAR day (real date arithmetic, so month, year and leap-day
+   ends work); the total at most 1439 minutes; each morning half is used at most once, the one with the smallest end
+   winning among several; evening halves are taken in start order so the result does not depend on entry order.
+   A half with no partner stays an ordinary entry, except an evening half on the log's LAST day, which is flagged
+   `open` (the night is not over yet; detection leaves it out). A night whose label or category was edited on one half
+   therefore does not fold - conservative on purpose: two different activities are never merged.
+   Pure: the input is never changed; the returned entries are copies. Measured on the one real log: all 61 evening
+   halves had a same-category same-label partner. */
+function foldMidnightHalves(entriesByDate){
+  var dates=Object.keys(entriesByDate||{}).filter(function(d){ return (entriesByDate[d]||[]).length; }).sort();
+  var copy={},consumed={},stats={folded:0,unmatched:0,open:0},maxDate=dates[dates.length-1];
+  dates.forEach(function(d){ copy[d]=entriesByDate[d].map(function(e){ return Object.assign({},e); }); });
+  dates.forEach(function(d){
+    var order=copy[d].map(function(e,i){ return i; }).sort(function(x,y){
+      var a=copy[d][x],b=copy[d][y];
+      return a.start-b.start||a.end-b.end||(a.label<b.label?-1:a.label>b.label?1:0)||x-y;
+    });
+    order.forEach(function(ai){
+      var a=copy[d][ai];
+      if(consumed[d]&&consumed[d][ai]) return;
+      if(!(a.end===1440&&typeof a.cat==="string"&&a.cat)) return;
+      var nd=iso(addDays(parseIso(d),1)),cand=copy[nd],best=-1;
+      if(cand){
+        for(var bi=0;bi<cand.length;bi++){
+          var b=cand[bi];
+          if(consumed[nd]&&consumed[nd][bi]) continue;
+          if(b.start!==0||b.cat!==a.cat||normLabel(b.label)!==normLabel(a.label)) continue;
+          if(1440+b.end-a.start>1439) continue;
+          if(best<0||b.end<cand[best].end) best=bi;
+        }
+      }
+      if(best>=0){
+        a.end=1440+cand[best].end; a.folded=true;
+        (consumed[nd]=consumed[nd]||{})[best]=true;
+        stats.folded++;
+      }else if(d===maxDate&&!cand){ a.open=true; stats.open++; }
+      else stats.unmatched++;
+    });
+  });
+  var days={};
+  dates.forEach(function(d){ days[d]=copy[d].filter(function(e,i){ return !(consumed[d]&&consumed[d][i]); }); });
+  return {days:days,stats:stats};
+}
+
 /* ---- save as session / apply ---- */
 function isIsoDate(s){
   if(typeof s!=="string"||!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
@@ -5028,6 +5077,7 @@ if(TEST_MODE){
     migrateSessions:migrateSessions,
     detectPatterns:detectPatterns,
     noiseThresholds:noiseThresholds,
+    foldMidnightHalves:foldMidnightHalves,
     clusterQualifies:clusterQualifies,
     getNoiseConstants:function(){ return {alpha:NOISE_ALPHA,c0All:NOISE_C0_ALL,c0Wd:NOISE_C0_WD,minLoggedDays:NOISE_MIN_LOGGED_DAYS,wdSafetyAbove:NOISE_WD_SAFETY_ABOVE,windowMinutes:NOISE_WINDOW_MINUTES}; },
     suggestSessions:suggestSessions,
