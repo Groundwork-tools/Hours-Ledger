@@ -431,3 +431,47 @@ either `localhost` in a fresh incognito window against a throwaway Google accoun
 - **Hold-out for the 4.0 -> 3.25 refit:** there was NO hold-out when the constant was chosen. RAN one afterwards (fit on sizes up to 150, predict 200 and 250): combined false-positive rate 4.0% at 200, 4.5% at 250; 36 independent synthetic logs worst 3.0%. Holds out, so no stop. Caveats: sizes above 88 resample the real 88 days; the independent logs use uniform times; the margin at 250 is thin.
 - **Mutations:** 17 R1 and 8 R3 mutants, all killed, no survivors.
 - **Still unlabelled (asked again, not guessed):** Breakfast ~08:10, Girlfriend ~19:00 (118 min), School 08:25 (30 min). R3 ground-truth specs for them are NOT added.
+
+## R4 and R5 (2026-10-24) - the Sessions sheet on packages; tools and notes rewritten
+
+**R4 is NOT closed in two respects: two unexplained, not-reproduced items (below) and an open render() decision.**
+
+### What was built (RAN = executed here; REASONED = from reading the code)
+- RAN: old one-block detector removed from `app.js` (`detectPatterns`, `suggestSessions`, `createSessionFromSuggestion`, `DETECT_MIN_DATES`, `DETECT_TOP`, `sessionsCoverPattern`, `binomTailAtLeast`, `lowMedian`); a source-grep row (RS11) fails if any returns.
+- RAN: `suggestPackages`, `packageSteps`, `createSessionFromPackage`, `dismissSuggestion` (package key `cat>cat@anchor`, 30-minute tolerance, old `cat@start` keys still honoured), cards with exact step times, 35-day hint, create form listing every step.
+- RAN: mitigation 1 (banner button "Yes, log 06:00-07:40"; toast repeats the times), mitigation 2 (sentence appended to `definitions.logged`; key set unchanged, RS08).
+- RAN: old D00-D15 rows replaced by `runSuggestionTests` (RS00-RS14). What D01-D09 pinned (clusters, ranking, thresholds) no longer exists; R1-R3 pin the new equivalents. D10-D15 (cap, coverage, dismissal, accept, UI, network, privacy) have RS03-RS11 equivalents.
+- RAN: `tools/derive-min-dates.py` removed; `tools/validate-noise-filter.py` added (on the real export: 88 days closed form 12/6, simulation 12/6, 1.0% combined; 60 days closed form 10/6, simulation 10/5 (within 1), 1.5%; 200 scrambles).
+- RAN: `LEARNING-NOTES.md` rewritten (plain language); CLAUDE.md Stage 3 section rewritten.
+
+### Tests
+- RAN: fail-first: the new block against the pre-R4 `app.js`: 18 failing / 296.
+- RAN: full `selftest.html` on the working tree: `PASS - 0 failing / 1309 total` (`EXPECTED_MIN_ROWS` 1309).
+- RAN: timing guard RS14 (see CLAUDE.md for budgets and the frozen-clock finding). Slow mutant (clustering repeated 25 times) turns 5 headless rows red; in the headless run only a gross slowdown is caught.
+
+### Mutation table (R4 code; tests as committed except where noted). 28 mutants, 26 killed, 1 equivalent-by-reasoning, 0 unexplained survivors
+Killed (failing rows): m01 top-3 cap +1 (2); m02 dismissals ignored (3); m03 tolerance 18 (1); m04 tolerance 35 (1); m05 sequence not compared (1); m06 asOf = last logged day (5); m07 malformed-block check removed (1); m08 no snapshot (10); m09 no 1439 clamp (1, RS05 clamp row, 4 of 4 runs; the first version of this mutant was syntactically broken and showed "NO SUMMARY", my error, redone); m10 empty name allowed (2); m11 only the first block kept (2); m12 gate flag always true (2); m13 name from category (1); m14 step time ignores anchor (4); m15 24:00 flagged next-day (1); m16 button text reverted (1); m17 toast without times (1); m18 toast without "stored times" (1); m19 export sentence removed (1); m20 dismissals not capped (2); m22 35-day hint removed (1); m23 form name empty (1); m24 "entries a week" removed (1); m25 "(next day)" removed (killed only after row RS06b was added: first run of the table had it surviving); m26 dismissal validation removed (1); m27 suggest writes a dismissal (1); m30 slow (5 timing rows).
+Survivor, reasoned equivalent: **m21** (remove `suggestPending=null` before create): `closeSessSuggest()` clears it synchronously right after, so the double-click guard still holds; it differs only if `createSessionFromPackage` throws (then the form would stay open). REASONED ONLY. A stale `mut4/m99.js` from an earlier phase is not part of this table.
+
+### Your four questions
+- Which loops grow with log length (REASONED; growth RAN): see CLAUDE.md "Complexity". Fastest: cluster extraction, O(n^2/minDates) per category (n = that category's entries). Measured 365 to 1,000 days: 3.8x to 5.2x for 2.7x the days.
+- When suggestPackages runs (RAN for the cost, READ for the call sites): on opening the sheet, after each action in it, and on every `render()` while the sheet is open; not with the sheet closed; no cache. On the real export `render()` costs 3 ms closed and 10.7 ms median open. **DECISION BEFORE MERGE, not made:** memo or leave.
+- Real export, read-only, real clock (RAN, in-app browser pane): 88 days, 1,892 entries: `detectPackages` 31 ms first / 19 ms median / 56 ms max over 20 calls; `suggestPackages` 41 ms first / 13 ms median / 41 ms max. 14 packages found, 3 shown.
+- Generated logs, real clock (RAN): realistic 88 d 16 ms, 365 d 36 ms, 1,000 d 188 ms; dense 365 d 194 ms, 1,000 d 742 ms; tight 365 d 80 ms, 1,000 d 318 ms (detectPackages).
+
+### UNEXPLAINED, NOT REPRODUCED - NOT RESOLVED
+1. The first full run of the new block produced nothing for 13+ minutes. Bisecting RS01-RS10 found no hanging scenario; the same code then completed. No input that loops `app.js` was found. A loop that never returns cannot be caught from inside the page.
+2. RS01 ("package shown first") failed in 2 of 4 runs of one mutant (shown list empty although 60 days were eligible) and in 0 of about 15 later runs of the unmutated code and of that mutant. Not reproduced; a diagnostic row now records found / shown / dismissals / thresholds if it recurs.
+Also seen once: the coarse fallback clock read 2000 ms for a 16 ms call under load (slack widened to 2 s).
+
+### Still NOT verified on a real screen
+Everything in the Sessions sheet: card layout and wrapping below 820 px, tap targets, the form on a phone, the banner, the toast text on a small screen, the square-only look. The suite reads the DOM in a hidden iframe. No real Drive, no second device, no second person's log, no real log over 88 days. The three candidate labels are PENDING (see R3): Breakfast ~08:10, Girlfriend ~19:00, School 08:25 - they must be filled before any merge, and their ground-truth specs added to R3.
+
+### Laptop check (click by click)
+1. In the repo folder: `python3 -m http.server 8765`, then open `http://localhost:8765/index.html?hltest=1` in a PRIVATE window (test storage, no Drive, no network).
+2. Under "Your data" press **Open a copy** and choose a COPY of your export. Confirm the grid shows your weeks.
+3. Press **Sessions**. Look for "Patterns in your log": at most three cards. Each card should show the steps with clock times, "N full days", weekdays, and "about N entries a week". The Muay Thai package should be near the top.
+4. Press **Create session from this** on one card. The form should list every step and say "logs nothing". Press **Save session** once: the card disappears and a session appears in the list; the toast says nothing was logged. Press **Ctrl/Cmd+Z**: the session goes and the card returns.
+5. Press **Not now** on a card: it hides. Close and reopen Sessions: it stays hidden.
+6. Build Muay Thai by hand: pick a day where you logged it, in "Save logged time as a session" set that day and From/To, name it "Muay Thai morning", save. It should appear in the list. Press **Schedule...**, pick the weekdays and the start time, save; later the "Did this happen?" banner should show "Yes, log HH:MM-HH:MM".
+Look at: wrapping of the step lines, buttons that fit, no horizontal scroll at phone width (resize the window below 820 px), and whether any suggestion is one you do NOT recognise as a habit.

@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1292;
+var EXPECTED_MIN_ROWS=1309;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -3010,7 +3010,7 @@ function runAsyncTests(H,d){
     .then(function(r){ return runDayCloseoutUITests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runSessionTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runSessionScheduleTests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runDetectionTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runSuggestionTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runNoiseFilterTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runMidnightFoldTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runPackageTests().then(function(more){ return r.concat(more); }); });
@@ -4710,20 +4710,18 @@ function runSessionScheduleTests(){
 }
 
 /* ---------------------------------------------------------------------
-   Sessions - stage 3: pattern detection. Written BEFORE the code and watched to fail.
+   Stage 3 REDESIGN, R4 - the Sessions sheet offers PACKAGES. Written BEFORE the code and watched to fail.
 
-   detectPatterns(entriesByDate, categories, sessions) is PURE: it returns the full ranked list of
-   candidate patterns and nothing else - it never logs entries, never writes state, never touches storage.
-   A candidate = a category + a start-time cluster (15 min, inclusive, anchored at the cluster's first
-   start) with at least DETECT_MIN_DATES distinct dates (one occurrence per date), ranked by WEEKDAY
-   CONCENTRATION: p = min(1, 7 * P(Binomial(n, 1/7) >= busiest weekday's count)). There is no p cutoff
-   (the shuffle null in OVERNIGHT-STATUS.md shows none separates a real pattern from noise at this data
-   size): suggestSessions() just takes the top 3 that this device has not dismissed.
-
-   All fixtures are GENERATED here from a seeded PRNG (mulberry32): nothing in this file comes from a real
-   export. Every "finds nothing" assertion first proves the detector can see something in the same kind
-   of fixture (a non-empty precondition), otherwise it would pass on an empty input. Rows are tagged D01... */
-function runDetectionTests(){
+   R4 removes the old one-block detector (fixed 12-date minimum, ranked by weekday concentration) and wires the sheet to
+   detectPackages(): suggestPackages(state) = the detector as of today, minus this device's dismissals, top 3. Accepting
+   (createSessionFromPackage) makes ONE session with every block of the package, no schedule, one undo step, and logs
+   nothing. Mitigation 1: the "Did this happen?" banner's Yes button and its toast show the exact times that will be
+   logged. Mitigation 2: Export week's definitions.logged says session-created entries are not marked (appended to the
+   string, so the pinned key set is unchanged). The old D00-D15 rows are replaced by this block: what they pinned for
+   the old detector no longer exists (the cluster / ranking / threshold behaviour is pinned by R1-R3 instead); what still
+   applies (cap of 3, dismissal, accept, UI, no network, privacy line) is re-written here for packages as RS03-RS11.
+   All fixtures are GENERATED here (seeded PRNG); nothing comes from a real export. Rows are tagged RS00... */
+function runSuggestionTests(){
   var results=[];
   function check(name,cond,observed){
     results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
@@ -4736,352 +4734,383 @@ function runDetectionTests(){
       });
     };
   }
-  function rng(seed){ /* mulberry32 */
-    var a=seed>>>0;
-    return function(){ a=(a+0x6D2B79F5)>>>0; var t=a; t=Math.imul(t^(t>>>15),t|1); t^=t+Math.imul(t^(t>>>7),t|61); return ((t^(t>>>14))>>>0)/4294967296; };
-  }
-  var CATS=[]; for(var ci=1;ci<=19;ci++) CATS.push("c"+ci); /* 19 categories: the real ledger's scale (about 21 entries a day over 19 categories) */
-  var CATOBJ=CATS.map(function(id){ return {id:id,name:"Cat "+id,color:"#123456"}; });
-  var DAY0=new Date(2026,6,27); /* a Monday; 88 consecutive days like the real ledger's scale */
+  function rng(seed){ var a=seed>>>0; return function(){ a=(a+0x6D2B79F5)>>>0; var t=a; t=Math.imul(t^(t>>>15),t|1); t^=t+Math.imul(t^(t>>>7),t|61); return ((t^(t>>>14))>>>0)/4294967296; }; }
+  var IDS=["seed-studies","seed-work","seed-side-projects","seed-training","seed-people","seed-admin","seed-sleep","seed-drift"];
+  var DAY0=new Date(2026,6,27); /* a Monday */
   function isoOf(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
-  function dayList(n){ var out=[]; for(var i=0;i<n;i++){ var d=new Date(DAY0); d.setDate(d.getDate()+i); out.push({date:isoOf(d),wd:(d.getDay()+6)%7}); } return out; }
+  function dayList(n){ var out=[]; for(var i=0;i<n;i++){ var d=new Date(DAY0); d.setDate(d.getDate()+i); out.push({date:isoOf(d),wd:(d.getDay()+6)%7,dt:d}); } return out; }
   var uidN=0;
-  function E(cat,start,dur,label){ return {id:"e"+(uidN++),label:label||"x",cat:cat,start:start,end:Math.min(1440,start+dur)}; }
-  /* uniform noise: 21 entries a day, random category, random start, random length - no time or weekday structure */
-  function noiseFixture(seed,days){
-    var r=rng(seed),entries={};
-    dayList(days).forEach(function(dd){
-      var list=[];
-      for(var i=0;i<21;i++) list.push(E(CATS[Math.floor(r()*CATS.length)],1+Math.floor(r()*1379),10+Math.floor(r()*110),"n"+Math.floor(r()*40)));
-      entries[dd.date]=list;
+  function E(cat,start,end,label){ return {id:"s"+(uidN++),label:label,cat:cat,start:start,end:end}; }
+  /* light noise: 5 random entries a day */
+  function noise(seed,n){
+    var r=rng(seed),en={};
+    dayList(n).forEach(function(dd){
+      var l=[]; for(var i=0;i<5;i++){ var s=1+Math.floor(r()*1300); l.push(E(IDS[Math.floor(r()*IDS.length)],s,s+20+Math.floor(r()*60),"n"+Math.floor(r()*30))); }
+      en[dd.date]=l;
     });
-    return entries;
+    return en;
   }
-  /* daily routines: same category, roughly the same time EVERY day (no weekday structure) */
-  function addRoutines(entries,seed,routines){
-    var r=rng(seed*7919+13);
-    Object.keys(entries).forEach(function(date){
-      routines.forEach(function(ro){ entries[date].push(E(ro.cat,ro.start+Math.floor((r()*2-1)*ro.jitter),ro.dur,ro.label)); });
-    });
-    return entries;
-  }
-  /* a weekly pattern: given weekdays, with a start jitter */
-  function plant(entries,seed,spec){
-    var r=rng(seed*104729+7),n=0;
-    dayList(Object.keys(entries).length).forEach(function(dd){
-      if(spec.weekdays.indexOf(dd.wd)<0) return;
-      entries[dd.date].push(E(spec.cat,spec.start+Math.floor((r()*2-1)*spec.jitter),spec.dur+Math.floor((r()*2-1)*8),spec.label)); n++;
+  /* plant a package (list of {cat,label,len}, back to back from `start`) on the given weekdays; start jitters +-3 minutes as a whole */
+  function plant(en,seed,start,blocks,weekdays){
+    var r=rng(seed*7919+11),n=0;
+    Object.keys(en).sort().forEach(function(date){
+      var q=date.split("-"),wd=(new Date(+q[0],+q[1]-1,+q[2]).getDay()+6)%7;
+      if(weekdays.indexOf(wd)<0) return;
+      var t=start+Math.floor((r()*2-1)*3);
+      blocks.forEach(function(b){ en[date].push(E(b.cat,t,t+b.len,b.label)); t+=b.len; });
+      n++;
     });
     return n;
   }
-  function copy(x){ return JSON.parse(J(x)); }
-  var ROUTINES=[{cat:"c1",start:1380,dur:30,jitter:8,label:"wind down"},{cat:"c2",start:480,dur:30,jitter:8,label:"breakfast"},{cat:"c3",start:1050,dur:45,jitter:8,label:"dinner"}];
-  var PLANT={cat:"c4",start:380,dur:100,jitter:5,label:"Gym",weekdays:[4]};
+  var ALLDAYS=[0,1,2,3,4,5,6], WEEKDAYS=[0,1,2,3,4];
+  var MT=[{cat:"seed-admin",label:"Get ready",len:20},{cat:"seed-training",label:"Bike",len:40},{cat:"seed-people",label:"Muay Thai",len:90}];
+  function build(n,seed){ var en=noise(seed||5,n); plant(en,seed||5,360,MT,WEEKDAYS); return en; }
+  function nowAfter(n){ var d=new Date(DAY0); d.setDate(d.getDate()+n); return new Date(d.getFullYear(),d.getMonth(),d.getDate(),12,0,0,0); }
+  function setup(f,n,seed,en){
+    var h=f.H,st=h.getState();
+    st.entries=en||build(n,seed); h.persist(); h.setTestNow(nowAfter(n));
+    return h;
+  }
+  function steps(h,p){ return h.packageSteps(p).map(function(t){ return String(Math.floor(t.start/60)).padStart(2,"0")+":"+String(t.start%60).padStart(2,"0")+"-"+String(Math.floor(t.end/60)).padStart(2,"0")+":"+String(t.end%60).padStart(2,"0")+" "+t.label; }); }
+  function openSheet(f){ f.d.getElementById("sessionsBtn").click(); }
+  function cards(f){ return f.d.querySelectorAll(".sugg"); }
 
   return Promise.resolve()
 
-    .then(scenario("D00",function(){
+    .then(scenario("RS00",function(){
       return freshSandbox(true).then(function(f){
-        var h=f.H,k=h.getDetectConstants();
-        /* PIN: these are the numbers the derivation in OVERNIGHT-STATUS.md produced (tolerance from the
-           real pattern's 10-minute spread; min dates = smallest k whose time-shift-null probability is <= 5%: 12, from 1000 scrambles).
-           Changing one without redoing the derivation must fail here, loudly. */
-        check("D00 PIN: tolerance 15 min, minimum 12 dates, top 3",k&&k.tolerance===15&&k.minDates===12&&k.top===3,J(k));
+        var k=f.H.getDetectConstants();
+        check("RS00 PIN: tolerance 15 minutes, top 3, and NO fixed minimum-dates constant any more (the noise filter replaces it)",k&&k.tolerance===15&&k.top===3&&k.minDates===undefined,J(k));
       });
     }))
 
-    /* ---- D01: two-sided, side one - finds a planted pattern, ranked first */
-    .then(scenario("D01",function(){
+    /* ---- RS01: a planted three-block package is found, first, with exact times */
+    .then(scenario("RS01",function(){
       return freshSandbox(true).then(function(f){
-        var h=f.H,found=0,total=30,detail=[];
-        for(var seed=1;seed<=total;seed++){
-          var en=addRoutines(noiseFixture(seed,88),seed,ROUTINES);
-          var planted=plant(en,seed,PLANT);
-          if(planted<12||Object.keys(en).length!==88) { detail.push("bad fixture "+seed); continue; }
-          var out=h.detectPatterns(en,CATOBJ,{});
-          var top=out[0];
-          if(top&&top.cat==="c4"&&Math.abs(top.start-380)<=15&&top.count>=planted&&top.weekdayCounts[4]===planted&&top.p<0.001) found++; else detail.push(seed+":"+(top?top.cat+"@"+top.start+" n="+top.count+" p="+top.p:"none"));
-        }
-        check("D01 PRECONDITION: the fixtures really contain the planted pattern (12+ Fridays) and 88 days of noise",detail.every(function(x){ return x.indexOf("bad fixture")<0; }),J(detail));
-        check("D01 TWO-SIDED (a): a pattern planted on every Friday (88 days, 21 noise entries a day, 3 daily routines) is ranked FIRST with the right category, start, all 12 Fridays counted and a tiny p, in "+total+" of "+total+" seeded fixtures",found===total,found+"/"+total+" "+J(detail.slice(0,3)));
-      });
-    }))
-    .then(scenario("D01b",function(){
-      return freshSandbox(true).then(function(f){
-        var h=f.H,en=addRoutines(noiseFixture(5,88),5,ROUTINES);
-        plant(en,5,{cat:"c4",start:380,dur:100,jitter:5,label:"Gym",weekdays:[2,4]});
-        var out=h.detectPatterns(en,CATOBJ,{}), top=out[0];
-        check("D01b a pattern on Wed+Fri is found and its weekday counts are returned (88 days from a Monday hold 13 Wednesdays and 12 Fridays; every other weekday at most 2 from chance)",
-          top&&top.cat==="c4"&&top.weekdayCounts[2]===13&&top.weekdayCounts[4]===12&&[0,1,3,5,6].every(function(i){ return top.weekdayCounts[i]<=2; }),J(top&&top.weekdayCounts));
-        check("D01b ...with the label it was logged under and a median duration near the planted 100 min",top&&top.label==="Gym"&&Math.abs(top.duration-100)<=8,J(top&&{label:top.label,duration:top.duration}));
-        check("D01b ...and the evidence dates, sorted, one per date",top&&top.dates.length===top.count&&top.dates.every(function(d,i,a){ return i===0||a[i-1]<d; }),J(top&&top.dates.slice(0,3)));
+        var h=setup(f,60,5), r=h.suggestPackages(h.getState());
+        check("RS01 PRECONDITION: eligible at 60 logged days",r.eligible===true&&r.n===60,J({e:r.eligible,n:r.n}));
+        var top=r.shown[0];
+        var raw=h.detectPackages(h.getState().entries,h.getState().categories,h.getState().sessions,"2026-09-25");
+        check("RS01 PRECONDITION (diagnostic for an unexplained intermittent failure): the detector finds the package and nothing is dismissed",raw.packages.length>=1&&h.getDismissedSuggestions().length===0,J({found:r.found,shown:r.shown.length,raw:raw.packages.length,dismissed:h.getDismissedSuggestions(),th:raw.thresholds,days:Object.keys(h.getState().entries).length,entries:Object.keys(h.getState().entries).reduce(function(a,k){return a+h.getState().entries[k].length;},0)}));
+        check("RS01 the planted Get ready > Bike > Muay Thai package is shown first, as ONE three-block package",!!top&&top.blocks.length===3&&J(top.cats)===J(["seed-admin","seed-training","seed-people"]),top&&J(top.cats));
+        var st=top?steps(h,top):[];
+        check("RS01 its exact times: 06:00-06:20 Get ready, 06:20-07:00 Bike, 07:00-08:30 Muay Thai (anchor within the 3-minute jitter)",
+          st.length===3&&/^0(5:5[7-9]|6:0[0-3])-/.test(st[0])&&/Get ready$/.test(st[0])&&/Bike$/.test(st[1])&&/Muay Thai$/.test(st[2]),J(st));
+        check("RS01 it was seen on the planted weekdays only (Mon-Fri), about 43 full days",top&&top.count>=40&&top.count<=44&&top.weekdayCounts[5]===0&&top.weekdayCounts[6]===0,top&&top.count+" "+J(top.weekdayCounts));
+        check("RS01 effort = recent weekly rate x 3 blocks (about 5 full days a week = about 15 entries a week)",top&&top.effort>13&&top.effort<=15.1,top&&String(top.effort));
       });
     }))
 
-    /* ---- D02: two-sided, side two - finds nothing in noise */
-    .then(scenario("D02",function(){
+    /* ---- RS02: the 35-day gate and the empty ledger */
+    .then(scenario("RS02",function(){
       return freshSandbox(true).then(function(f){
-        var h=f.H,withCand=0,total=200,minEntries=1e9,anyCand=0;
-        for(var seed=1;seed<=total;seed++){
-          var en=noiseFixture(1000+seed,88);
-          var n=0; Object.keys(en).forEach(function(k){ n+=en[k].length; }); minEntries=Math.min(minEntries,n);
-          if(h.detectPatterns(en,CATOBJ,{}).length) withCand++;
-        }
-        /* the precondition: the same detector, on the same kind of fixture with ONE planted pattern, does see it */
-        var seen=0;
-        for(var s2=1;s2<=20;s2++){ var en2=noiseFixture(1000+s2,88); plant(en2,s2,PLANT); if(h.detectPatterns(en2,CATOBJ,{}).length) seen++; }
-        check("D02 PRECONDITION: every noise fixture is non-empty (>= 1700 entries), and the same fixtures with one planted pattern DO produce a candidate (20 of 20)",minEntries>=1700&&seen===20,"min entries="+minEntries+" seen="+seen);
-        check("D02 TWO-SIDED (b): over "+total+" seeded pure-noise fixtures (88 days, no time or weekday structure) at most 5% (10) produce ANY candidate - the stated false-positive rate, the same 5% the minimum-dates derivation was built to",withCand<=10,withCand+" of "+total+" fixtures produced a candidate");
-      });
-    }))
-    .then(scenario("D03",function(){
-      return freshSandbox(true).then(function(f){
-        var h=f.H,total=200,sig=0,seeing=0,wd=0;
-        for(var seed=1;seed<=total;seed++){
-          var en=addRoutines(noiseFixture(2000+seed,88),seed,ROUTINES);
-          var out=h.detectPatterns(en,CATOBJ,{});
-          if(out.length>=3) seeing++;
-          if(out.some(function(c){ return c.p<=0.05; })) sig++;
-        }
-        check("D03 PRECONDITION: in every routine fixture the detector SEES the 3 daily routines (>= 3 candidates in "+total+" of "+total+") - so 'nothing weekday-specific' below is not an empty result",seeing===total,seeing+"/"+total);
-        check("D03 TWO-SIDED (b2): daily routines have no weekday structure, so at most 3 x 5% = 15% (30 of 200) of fixtures may rank ANY candidate at p <= 0.05 (the union-bound p is built to hold each at 5%)",sig<=30,sig+" of "+total+" fixtures had a candidate with p <= 0.05");
+        var h=setup(f,20,5), r=h.suggestPackages(h.getState());
+        check("RS02 at 20 logged days: not eligible, nothing shown",r.eligible===false&&r.shown.length===0&&r.minDays===35,J({e:r.eligible,s:r.shown.length,m:r.minDays}));
+        openSheet(f);
+        check("RS02 the sheet shows no card and says suggestions start at 35 logged days (and how many there are)",cards(f).length===0&&/35 logged days/.test(f.d.getElementById("sessSuggest").textContent)&&/20/.test(f.d.getElementById("sessSuggest").textContent),f.d.getElementById("sessSuggest").textContent);
+        f.d.getElementById("sessClose").click();
+        h.getState().entries={}; h.persist();
+        openSheet(f);
+        check("RS02 an empty ledger shows nothing at all in the suggestions area",f.d.getElementById("sessSuggest").textContent.trim()==="");
+        h.setTestNow(null);
       });
     }))
 
-    /* ---- D04..D05: purity, determinism, order independence */
-    .then(scenario("D04",function(){
+    /* ---- RS03: at most three, in the detector's order */
+    .then(scenario("RS03",function(){
       return freshSandbox(true).then(function(f){
-        var h=f.H,en=addRoutines(noiseFixture(9,88),9,ROUTINES); plant(en,9,PLANT);
-        var cats=copy(CATOBJ),sess={s1:{id:"s1",name:"x",blocks:[{offset:0,duration:30,label:"a",cat:"c1"}],schedule:null}};
-        var b1=J(en),b2=J(cats),b3=J(sess),stateBefore=J(h.getState()),storeBefore=J(h.getDismissedSuggestions());
-        var out=h.detectPatterns(en,cats,sess);
-        check("D04 PRECONDITION: the call produced candidates",out.length>=1,String(out.length));
-        check("D04 PURE: the inputs (entries, categories, sessions) are byte-for-byte unchanged",J(en)===b1&&J(cats)===b2&&J(sess)===b3);
-        check("D04 PURE: the app's own state and device-local storage are untouched",J(h.getState())===stateBefore&&J(h.getDismissedSuggestions())===storeBefore);
-        out[0].dates.push("x"); out[0].weekdayCounts[0]=999; out.push({});
-        check("D04 the result does not alias the input (mutating a result changes nothing in the entries)",J(en)===b1);
-      });
-    }))
-    .then(scenario("D05",function(){
-      return freshSandbox(true).then(function(f){
-        var h=f.H,en=addRoutines(noiseFixture(11,88),11,ROUTINES); plant(en,11,PLANT);
-        var a=J(h.detectPatterns(en,CATOBJ,{})), b=J(h.detectPatterns(copy(en),copy(CATOBJ),{}));
-        check("D05 DETERMINISTIC: the same input gives the identical ranked list twice",a===b&&a.length>10,a.length+" chars");
-        var shuffled={},r=rng(77);
-        Object.keys(en).reverse().forEach(function(k){
-          var l=copy(en[k]); for(var i=l.length-1;i>0;i--){ var j=Math.floor(r()*(i+1)); var t=l[i]; l[i]=l[j]; l[j]=t; }
-          shuffled[k]=l;
-        });
-        var c=J(h.detectPatterns(shuffled,copy(CATOBJ).reverse(),{}));
-        check("D05 ORDER-INDEPENDENT: day keys inserted in reverse, entries shuffled within each day and categories reversed -> identical result",c===a);
+        var en={}; dayList(60).forEach(function(dd){ en[dd.date]=[]; });
+        var P=[[360,"seed-admin","seed-training"],[540,"seed-work","seed-studies"],[720,"seed-people","seed-drift"],[900,"seed-side-projects","seed-work"],[1080,"seed-studies","seed-admin"]];
+        P.forEach(function(p,i){ plant(en,40+i,p[0],[{cat:p[1],label:"A"+i,len:30},{cat:p[2],label:"B"+i,len:30}],ALLDAYS); });
+        var h=setup(f,60,0,en), all=h.detectPackages(en,h.getState().categories,{},"2026-09-25").packages, r=h.suggestPackages(h.getState());
+        check("RS03 PRECONDITION: the detector finds five packages",all.length===5,String(all.length));
+        check("RS03 at most 3 are shown",r.shown.length===3&&r.found===5,r.shown.length+" of "+r.found);
+        check("RS03 ...and they are the detector's top three, in its order",J(r.shown.map(function(p){ return p.id; }))===J(all.slice(0,3).map(function(p){ return p.id; })));
+        h.setTestNow(null);
       });
     }))
 
-    /* ---- D06..D08: the exact rules */
-    .then(scenario("D06",function(){
+    /* ---- RS04: dismissal ("Not now") is device-local, tolerant by 30 minutes, capped, persistent */
+    .then(scenario("RS04",function(){
       return freshSandbox(true).then(function(f){
-        var h=f.H;
-        function build(n,starts){ var en={}; dayList(n).forEach(function(dd,i){ en[dd.date]=[E("c1",starts[i%starts.length],60,"x")]; }); return en; }
-        check("D06 12 dates is enough (the minimum)",h.detectPatterns(build(12,[400]),CATOBJ,{}).length===1);
-        check("D06 11 dates is not",h.detectPatterns(build(11,[400]),CATOBJ,{}).length===0);
-        check("D06 TOLERANCE is inclusive: starts 15 minutes apart (400 and 415) are ONE cluster of 12",h.detectPatterns(build(12,[400,415]),CATOBJ,{}).length===1&&h.detectPatterns(build(12,[400,415]),CATOBJ,{})[0].count===12);
-        check("D06 ...and 16 minutes apart (400 and 416) are two clusters of 6, neither enough",h.detectPatterns(build(12,[400,416]),CATOBJ,{}).length===0);
-        check("D06 different categories never share a cluster",(function(){ var en={}; dayList(12).forEach(function(dd,i){ en[dd.date]=[E(i%2?"c1":"c2",400,60,"x")]; }); return h.detectPatterns(en,CATOBJ,{}).length===0; })());
-      });
-    }))
-    .then(scenario("D07",function(){
-      return freshSandbox(true).then(function(f){
-        var h=f.H;
-        function build(make){ var en={}; dayList(14).forEach(function(dd){ en[dd.date]=[make()]; }); return en; }
-        check("D07 PRECONDITION: the same fixture with a real category and a mid-day start IS detected",h.detectPatterns(build(function(){ return E("c1",400,60,"x"); }),CATOBJ,{}).length===1);
-        check("D07 uncategorised entries (cat null) never form a pattern",h.detectPatterns(build(function(){ return E(null,400,60,"x"); }),CATOBJ,{}).length===0);
-        check("D07 an entry whose category no longer exists never forms a pattern",h.detectPatterns(build(function(){ return E("gone",400,60,"x"); }),CATOBJ,{}).length===0);
-        check("D07 entries starting at 00:00 (the morning half of a split-at-midnight entry) are excluded",h.detectPatterns(build(function(){ return E("c1",0,60,"x"); }),CATOBJ,{}).length===0);
-      });
-    }))
-    .then(scenario("D08",function(){
-      return freshSandbox(true).then(function(f){
-        var h=f.H,en={};
-        dayList(6).forEach(function(dd){ en[dd.date]=[E("c1",400,30,"a"),E("c1",405,30,"b")]; });
-        check("D08 ONE occurrence per date: 6 dates with two entries each in the window is 6 dates, not 12 (below the minimum)",h.detectPatterns(en,CATOBJ,{}).length===0);
-        var en2={};
-        dayList(12).forEach(function(dd){ en2[dd.date]=[E("c1",410,30,"later"),E("c1",400,50,"earlier")]; });
-        var out=h.detectPatterns(en2,CATOBJ,{});
-        check("D08 ...and the occurrence counted is the EARLIEST start of that date (start 400, duration 50, label 'earlier')",out.length===1&&out[0].start===400&&out[0].duration===50&&out[0].label==="earlier",J(out[0]&&{s:out[0].start,d:out[0].duration,l:out[0].label}));
-        var en3={};
-        dayList(12).forEach(function(dd,i){ en3[dd.date]=[E("c1",400,30,i%3===0?"Zebra":"alpha")]; });
-        check("D08 the label is the most frequent one (case-insensitive), ties broken alphabetically, and reported as first written",h.detectPatterns(en3,CATOBJ,{})[0].label==="alpha");
-      });
-    }))
-
-    /* ---- D09..D10: ranking and the absence of a gate */
-    .then(scenario("D09",function(){
-      return freshSandbox(true).then(function(f){
-        var h=f.H,en={};
-        dayList(88).forEach(function(dd,i){
-          en[dd.date]=[];
-          if(dd.wd===4) en[dd.date].push(E("c1",400,60,"focused"));
-          if(i%6!==5&&i<84) en[dd.date].push(E("c2",900,60,"spread"));
-        });
-        var out=h.detectPatterns(en,CATOBJ,{});
-        check("D09 PRECONDITION: both a weekday-concentrated and an every-day pattern are detected",out.length===2,String(out.length));
-        check("D09 the weekday-concentrated pattern ranks ABOVE a bigger every-day one (that is the whole point of the score)",out[0].cat==="c1"&&out[1].cat==="c2"&&out[0].p<out[1].p,J(out.map(function(o){ return [o.cat,o.count,o.p]; })));
-        var en2={};
-        dayList(88).forEach(function(dd){ en2[dd.date]=[]; if(dd.wd===4){ en2[dd.date].push(E("c1",400,60,"a")); en2[dd.date].push(E("c2",700,60,"b")); } });
-        var o2=h.detectPatterns(en2,CATOBJ,{});
-        var en3={};
-        dayList(88).forEach(function(dd){ en3[dd.date]=[]; if(dd.wd===4){ en3[dd.date].push(E("c1",700,60,"later but first alphabetically")); en3[dd.date].push(E("c2",400,60,"earlier")); } });
-        var o3=h.detectPatterns(en3,CATOBJ,{});
-        check("D09 equal scores: the EARLIER start ranks first even though the other category id sorts first (c2@400 before c1@700) - insertion order says the opposite, so this fails without a tie-break",
-          o3.length===2&&o3[0].p===o3[1].p&&o3[0].count===o3[1].count&&o3[0].cat==="c2"&&o3[1].cat==="c1",J(o3.map(function(o){ return [o.cat,o.start,o.count,o.p]; })));
-        var en5={};
-        dayList(88).forEach(function(dd,i){ en5[dd.date]=[E("c1",400,60,"fewer")]; if(i%11===0) en5[dd.date]=[]; en5[dd.date].push(E("c2",900,60,"more")); });
-        var o5=h.detectPatterns(en5,CATOBJ,{});
-        check("D09 equal p again, with the category that sorts FIRST having FEWER dates: c2 (88 dates) ranks before c1 (80 dates)",o5.length===2&&o5[0].p===1&&o5[1].p===1&&o5[0].cat==="c2"&&o5[0].count>o5[1].count,J(o5.map(function(o){ return [o.cat,o.count,o.p]; })));
-      });
-    }))
-    .then(scenario("D10",function(){
-      return freshSandbox(true).then(function(f){
-        var h=f.H,st=h.getState();
-        var en={};
-        dayList(88).forEach(function(dd){ en[dd.date]=[]; ["seed-work","seed-training","seed-people","seed-admin","seed-sleep"].forEach(function(c,i){ if(dd.wd<=4||i<1) en[dd.date].push(E(c,300+i*130,40,"routine "+i)); }); });
-        st.entries=en;
-        var all=h.detectPatterns(st.entries,st.categories,st.sessions);
-        var sug=h.suggestSessions(st);
-        check("D10 PRECONDITION: more than 3 candidates exist",all.length>=5,String(all.length));
-        check("D10 at most 3 are suggested",sug.length===3,String(sug.length));
-        var daily={}; dayList(88).forEach(function(dd){ daily[dd.date]=[E("seed-work",400,60,"every day")]; });
-        st.entries=daily;
-        var s2=h.suggestSessions(st);
-        check("D10 there is NO pass/fail gate: a pure every-day routine (p close to 1) is still offered when it is all there is",s2.length===1&&s2[0].p>0.5,J(s2.map(function(o){ return o.p; })));
-      });
-    }))
-
-    /* ---- D11: patterns an existing session covers are not proposed again */
-    .then(scenario("D11",function(){
-      return freshSandbox(true).then(function(f){
-        var h=f.H,st=h.getState();
-        var en=noiseFixture(3,88); plant(en,3,{cat:"seed-training",start:380,dur:100,jitter:5,label:"Gym",weekdays:[4]});
-        st.entries=en;
-        var before=h.suggestSessions(st);
-        check("D11 PRECONDITION: the planted pattern is suggested first",before.length>=1&&before[0].cat==="seed-training"&&before[0].label==="Gym",J(before[0]&&{c:before[0].cat,l:before[0].label}));
-        h.setSession("cov","Gym",[{offset:0,duration:100,label:"Gym",cat:"seed-training"}],{weekdays:[4],start:380,since:"2026-01-01"});
-        var after=h.suggestSessions(st);
-        check("D11 a SCHEDULED session with a block of that category at that time (within 15 min) covers it",after.every(function(s){ return !(s.cat==="seed-training"&&s.label==="Gym"); }),J(after.map(function(s){ return s.cat+"@"+s.start; })));
-        h.setSession("cov","Gym",[{offset:0,duration:100,label:"Gym",cat:"seed-training"}],{weekdays:[4],start:380+16,since:"2026-01-01"});
-        check("D11 ...but one 16+ minutes away does not",h.suggestSessions(st).some(function(s){ return s.cat==="seed-training"&&s.label==="Gym"; }));
-        h.setSession("cov","Gym",[{offset:0,duration:100,label:"gym",cat:"seed-training"}],null);
-        check("D11 an UNSCHEDULED session (no start to compare) covers it when a block has the same category and the same label (case-insensitive)",!h.suggestSessions(st).some(function(s){ return s.cat==="seed-training"&&s.label==="Gym"; }));
-        h.setSession("cov","Gym",[{offset:0,duration:100,label:"Boxing",cat:"seed-training"}],null);
-        check("D11 ...but the same category with a different label does not",h.suggestSessions(st).some(function(s){ return s.cat==="seed-training"&&s.label==="Gym"; }));
-        h.removeSession("cov");
-        check("D11 a deleted session covers nothing",h.suggestSessions(st).some(function(s){ return s.cat==="seed-training"&&s.label==="Gym"; }));
-      });
-    }))
-
-    /* ---- D12: dismissal is device-local, capped, tolerant */
-    .then(scenario("D12",function(){
-      return freshSandbox(true).then(function(f){
-        var h=f.H,st=h.getState();
-        var en=noiseFixture(3,88); plant(en,3,{cat:"seed-training",start:380,dur:100,jitter:5,label:"Gym",weekdays:[4]});
-        st.entries=en;
-        var top=h.suggestSessions(st)[0];
-        check("D12 PRECONDITION: a suggestion exists",!!top&&top.cat==="seed-training");
-        var depth=h.undoDepth(), stateBefore=J(h.getState());
-        var shown0=h.suggestSessions(st).length;
-        var moved=Object.assign({},top,{start:top.start+9});
-        h.dismissSuggestion(moved);
-        check("D12 TOLERANCE: dismissing a suggestion 9 minutes away hides the real one (same category, within 15 min) - and the list is not padded with a further candidate",
-          !h.suggestSessions(st).some(function(s){ return s.cat==="seed-training"&&s.label==="Gym"; })&&h.suggestSessions(st).length===Math.max(0,shown0-1),shown0+" -> "+h.suggestSessions(st).length);
-        var far=Object.assign({},top,{start:top.start+16});
-        check("D12 ...but a dismissal 16 minutes away is a different suggestion (no effect on one that is shown again)",(function(){ h.clearDismissedSuggestionsForTest(); h.dismissSuggestion(far); var shown=h.suggestSessions(st).some(function(s){ return s.cat==="seed-training"&&s.label==="Gym"; }); h.clearDismissedSuggestionsForTest(); return shown; })());
-        check("D12 a dismissal is not an edit: no snapshot, ledger unchanged",h.undoDepth()===depth&&J(h.getState())===stateBefore);
-        h.dismissSuggestion(moved); h.dismissSuggestion(top);
-        check("D12 it is remembered by category and start (two dismissals stored)",h.getDismissedSuggestions().length===2,J(h.getDismissedSuggestions()));
-        for(var i=0;i<h.getDismissedMax()+10;i++) h.dismissSuggestion({cat:"x"+i,start:i%1000});
-        var list=h.getDismissedSuggestions();
-        check("D12 the list is capped at "+h.getDismissedMax()+" (newest kept)",list.length===h.getDismissedMax()&&list.indexOf("seed-training@"+top.start)<0,String(list.length));
-        h.persist();
+        var h=setup(f,60,5), st=h.getState(), top=h.suggestPackages(st).shown[0];
+        check("RS04 PRECONDITION: a package is shown",!!top);
+        var depth=h.undoDepth(), before=J(st);
+        h.dismissSuggestion(Object.assign({},top,{anchor:top.anchor+20}));
+        check("RS04 dismissing a package whose anchor is 20 minutes away hides the real one (same sequence, within 30)",h.suggestPackages(st).shown.every(function(p){ return p.id!==top.id; }));
+        h.clearDismissedSuggestionsForTest();
+        h.dismissSuggestion(Object.assign({},top,{anchor:top.anchor+31}));
+        check("RS04 ...31 minutes away is a different suggestion: the real one is still shown",h.suggestPackages(st).shown.some(function(p){ return p.id===top.id; }));
+        h.clearDismissedSuggestionsForTest();
+        h.dismissSuggestion(Object.assign({},top,{cats:["seed-admin","seed-people","seed-training"]}));
+        check("RS04 ...and a different category SEQUENCE at the same time does not hide it",h.suggestPackages(st).shown.some(function(p){ return p.id===top.id; }));
+        h.clearDismissedSuggestionsForTest();
+        h.dismissSuggestion(top);
+        check("RS04 it is remembered as sequence@anchor, in its own device-local key",J(h.getDismissedSuggestions())===J([top.cats.join(">")+"@"+top.anchor]),J(h.getDismissedSuggestions()));
+        check("RS04 a dismissal is not an edit: no snapshot, the ledger is unchanged",h.undoDepth()===depth&&J(st)===before);
+        h.dismissSuggestion({cats:[],anchor:5}); h.dismissSuggestion({cats:["x"]}); h.dismissSuggestion(null);
+        check("RS04 malformed dismissals store nothing",h.getDismissedSuggestions().length===1);
+        h.clearDismissedSuggestionsForTest();
+        h.getState().sessions={}; /* old one-block key shape "cat@start" still hides a ONE-block package of that category */
+        var oneEn={}; dayList(60).forEach(function(dd){ oneEn[dd.date]=[]; }); plant(oneEn,9,600,[{cat:"seed-work",label:"Deep work",len:60}],ALLDAYS);
+        st.entries=oneEn;
+        var one=h.suggestPackages(st).shown[0];
+        check("RS04 PRECONDITION: a one-block package is shown",!!one&&one.blocks.length===1);
+        localStorage.setItem("hours-ledger-selftest-sessions-dismissed-suggestions-v1",J([ "seed-work@"+(one.anchor+4) ]));
+        check("RS04 an old-format key 'category@start' (written by the removed detector) still hides the one-block package of that category",h.suggestPackages(st).shown.length===0);
+        h.clearDismissedSuggestionsForTest();
+        for(var i=0;i<h.getDismissedMax()+10;i++) h.dismissSuggestion({cats:["x"+i],anchor:i%1000});
         var maxN=h.getDismissedMax();
+        check("RS04 the list is capped at "+maxN+" (newest kept)",h.getDismissedSuggestions().length===maxN&&h.getDismissedSuggestions().indexOf("x0@0")<0,String(h.getDismissedSuggestions().length));
         return killSandboxAndOpenFresh(f.d).then(function(f2){
-          check("D12 the dismissals survive a reload (own device-local key)",f2.H.getDismissedSuggestions().length===maxN);
-          check("D12 ...and are NOT in the ledger state",J(f2.H.getState()).indexOf("seed-training@")<0);
+          check("RS04 the dismissals survive a reload...",f2.H.getDismissedSuggestions().length===maxN);
+          check("RS04 ...and are NOT in the ledger state (nothing synced)",J(f2.H.getState()).indexOf("x1@")<0&&J(f2.H.getState()).indexOf("x5>")<0);
+          f2.H.setTestNow(null);
         });
       });
     }))
 
-    /* ---- D13: accepting creates a session, only a session */
-    .then(scenario("D13",function(){
+    /* ---- RS05: accepting creates one multi-block session, only a session */
+    .then(scenario("RS05",function(){
       return freshSandbox(true).then(function(f){
-        var h=f.H,st=h.getState();
-        var en=noiseFixture(3,88); plant(en,3,{cat:"seed-training",start:380,dur:100,jitter:5,label:"Gym",weekdays:[4]});
-        st.entries=en;
-        var top=h.suggestSessions(st)[0], entriesBefore=J(h.getState().entries), d0=h.undoDepth();
-        var id=h.createSessionFromSuggestion(top,"Gym morning");
-        var s=h.getState().sessions[id];
-        check("D13 accepting creates ONE session with ONE block: offset 0, the median duration, the label and the category",
-          !!s&&s.name==="Gym morning"&&s.blocks.length===1&&s.blocks[0].offset===0&&s.blocks[0].duration===top.duration&&s.blocks[0].label==="Gym"&&s.blocks[0].cat==="seed-training",J(s));
-        check("D13 ...with no schedule (declaring one is a separate, deliberate step)",s&&s.schedule===null);
-        check("D13 ...it NEVER logs entries: the ledger's entries are byte-for-byte unchanged",J(h.getState().entries)===entriesBefore);
-        check("D13 ...as one undo step",h.undoDepth()===d0+1);
+        var h=setup(f,60,5), st=h.getState(), top=h.suggestPackages(st).shown[0];
+        var entriesBefore=J(st.entries), d0=h.undoDepth();
+        var id=h.createSessionFromPackage(top,"Muay Thai morning");
+        var s=st.sessions[id];
+        check("RS05 accepting creates ONE session with ALL THREE blocks, named as given",!!s&&s.name==="Muay Thai morning"&&s.blocks.length===3,J(s));
+        check("RS05 ...each block keeps its offset, duration, label and category from the package",
+          s&&s.blocks.every(function(b,i){ var pb=top.blocks[i]; return b.offset===pb.offset&&b.duration===pb.duration&&b.label===pb.label&&b.cat===pb.cat; })&&s.blocks[0].offset===0,J(s&&s.blocks));
+        check("RS05 ...with no schedule (declaring one is a separate, deliberate step)",s&&s.schedule===null);
+        check("RS05 ...it NEVER logs entries: the ledger's entries are byte-for-byte unchanged",J(st.entries)===entriesBefore);
+        check("RS05 ...as exactly one undo step",h.undoDepth()===d0+1);
         h.undo();
-        check("D13 undo removes it",!h.getState().sessions[id]);
+        st=h.getState(); /* undo swaps in a new state object */
+        check("RS05 undo removes it",!st.sessions[id]);
+        check("RS05 ...and the suggestion is back (nothing covers it any more)",h.suggestPackages(st).shown.some(function(p){ return p.id===top.id; }));
         var d1=h.undoDepth();
-        check("D13 an empty name creates nothing and takes no snapshot",h.createSessionFromSuggestion(top,"  ")===null&&h.undoDepth()===d1);
-        check("D13 a malformed suggestion creates nothing",h.createSessionFromSuggestion({cat:"seed-training"},"x")===null&&h.createSessionFromSuggestion(null,"x")===null&&h.undoDepth()===d1);
+        check("RS05 an empty name creates nothing and takes no snapshot",h.createSessionFromPackage(top,"  ")===null&&h.undoDepth()===d1);
+        check("RS05 a malformed package creates nothing: null, no blocks, a block with a bad duration, a block with no category string",
+          h.createSessionFromPackage(null,"x")===null&&h.createSessionFromPackage({blocks:[]},"x")===null&&
+          h.createSessionFromPackage({blocks:[{offset:0,duration:0,label:"a",cat:"seed-work"}]},"x")===null&&
+          h.createSessionFromPackage({blocks:[{offset:0,duration:10,label:"a",cat:"seed-work"},{offset:10,duration:-3,label:"b",cat:"seed-work"}]},"x")===null&&h.undoDepth()===d1);
+        var big=h.createSessionFromPackage({blocks:[{offset:0,duration:1439,label:"Sleep",cat:"seed-sleep"}]},"Sleep");
+        st=h.getState();
+        check("RS05 a one-block package (a folded night, 1439 minutes) is accepted as it is",!!big&&st.sessions[big].blocks[0].duration===1439);
+        var over=h.createSessionFromPackage({blocks:[{offset:0,duration:2000,label:"Long",cat:"seed-sleep"}]},"Long");
+        check("RS05 a block longer than a day (2000 minutes) is clamped to 1439, not refused",!!over&&h.getState().sessions[over].blocks[0].duration===1439,over&&J(h.getState().sessions[over].blocks));
+        h.setTestNow(null);
       });
     }))
 
-    /* ---- D14: the Suggestions section of the Sessions sheet (UI); no layout claims */
-    .then(scenario("D14",function(){
+    /* ---- RS06: the sheet */
+    .then(scenario("RS06",function(){
       return freshSandbox(true).then(function(f){
-        var h=f.H,d=f.d,st=h.getState();
-        function setV(id,v){ var el=d.getElementById(id); el.value=v; el.dispatchEvent(new f.el.contentWindow.Event("input",{bubbles:true})); }
-        d.getElementById("sessionsBtn").click();
-        check("D14 with no logged history the sheet shows no suggestions",d.querySelectorAll(".sugg").length===0);
-        d.getElementById("sessClose").click();
-        var en=noiseFixture(3,88); plant(en,3,{cat:"seed-training",start:380,dur:100,jitter:5,label:"Gym",weekdays:[4]});
-        st.entries=en; h.persist();
-        d.getElementById("sessionsBtn").click();
-        var cards=d.querySelectorAll(".sugg");
-        check("D14 with the planted history the sheet offers at most 3 suggestions, the first about the planted pattern",cards.length>=1&&cards.length<=3&&/Gym/.test(cards[0].textContent),cards.length+" "+(cards[0]&&cards[0].textContent));
-        check("D14 a card says it is a proposal, shows the weekday counts as evidence, and does not claim anything was logged",/Fri/.test(cards[0].textContent)&&/nothing is logged/i.test(d.getElementById("sessSuggest").textContent),cards[0]&&cards[0].textContent);
-        var entriesBefore=J(h.getState().entries), d0=h.undoDepth();
-        cards[0].querySelector(".sugg-create").click();
-        check("D14 'Create session from this' opens a form pre-filled with the suggestion's label as the name",!d.getElementById("sessSuggestForm").hidden&&d.getElementById("sessSuggestName").value==="Gym",d.getElementById("sessSuggestName").value);
-        check("D14 ...nothing exists yet",Object.keys(h.getState().sessions).length===0&&h.undoDepth()===d0);
+        var h=setup(f,60,5), d=f.d, st=h.getState();
+        openSheet(f);
+        var cs=cards(f);
+        check("RS06 with the planted history the sheet offers at least one and at most 3 cards, the first the three-step package",cs.length>=1&&cs.length<=3&&/Get ready/.test(cs[0].textContent)&&/Bike/.test(cs[0].textContent)&&/Muay Thai/.test(cs[0].textContent),cs.length+" "+(cs[0]&&cs[0].textContent));
+        var tx=cs[0]?cs[0].textContent:"";
+        check("RS06 a card shows the EXACT clock time of every step (06:00 / 06:20 / 07:00 within the 3-minute jitter), the days it was seen, the weekday evidence and the entries a week",
+          /0(5:5\d|6:0\d)/.test(tx)&&/0(6:1\d|6:2\d|6:3\d)/.test(tx)&&/0(6:5\d|7:0\d)/.test(tx)&&/full days/.test(tx)&&/Mon/.test(tx)&&/entries a week/.test(tx),tx);
+        check("RS06 the section says these are proposals and that nothing is logged",/nothing is logged/i.test(d.getElementById("sessSuggest").textContent));
+        var entriesBefore=J(st.entries), d0=h.undoDepth();
+        cs[0].querySelector(".sugg-create").click();
+        check("RS06 'Create session from this' opens a form pre-filled with the FIRST block's label as the name",!d.getElementById("sessSuggestForm").hidden&&d.getElementById("sessSuggestName").value==="Get ready",d.getElementById("sessSuggestName").value);
+        var sum=d.getElementById("sessSuggestSummary").textContent;
+        check("RS06 ...its summary lists every step with its time, says 3 blocks, logs nothing, sets no schedule",/Get ready/.test(sum)&&/Bike/.test(sum)&&/Muay Thai/.test(sum)&&/3 blocks/.test(sum)&&/logs nothing/.test(sum)&&/no schedule/.test(sum),sum);
+        check("RS06 ...nothing exists yet",Object.keys(st.sessions).length===0&&h.undoDepth()===d0);
+        d.getElementById("sessSuggestName").value="Muay Thai morning";
         d.getElementById("sessSuggestGo").click(); d.getElementById("sessSuggestGo").click();
-        check("D14 Save creates exactly one session (two rapid clicks do not make two), one undo step, entries untouched",
-          Object.keys(h.getState().sessions).length===1&&h.undoDepth()===d0+1&&J(h.getState().entries)===entriesBefore,Object.keys(h.getState().sessions).length+" sessions, depth +"+(h.undoDepth()-d0));
-        check("D14 ...and the new session now covers the pattern, so the suggestion is gone",!/Gym/.test(d.getElementById("sessSuggest").textContent)||d.querySelectorAll(".sugg").length===0,d.getElementById("sessSuggest").textContent);
+        check("RS06 DOUBLE-SUBMIT: Save creates exactly one session with three blocks, one undo step, entries untouched",
+          Object.keys(st.sessions).length===1&&st.sessions[Object.keys(st.sessions)[0]].blocks.length===3&&h.undoDepth()===d0+1&&J(st.entries)===entriesBefore,Object.keys(st.sessions).length+" sessions, depth +"+(h.undoDepth()-d0));
+        check("RS06 the toast says it was created and that nothing was logged",/Muay Thai morning/.test(d.getElementById("toastText").textContent)&&/nothing was logged/.test(d.getElementById("toastText").textContent),d.getElementById("toastText").textContent);
+        check("RS06 the new session covers the package, so its card is gone",!Array.prototype.some.call(cards(f),function(c){ return /Get ready/.test(c.textContent)&&/Muay Thai/.test(c.textContent); }));
         h.undo();
-        d.getElementById("sessClose").click(); d.getElementById("sessionsBtn").click();
-        var c2=d.querySelectorAll(".sugg");
-        check("D14 setup: after undo the suggestion is back",c2.length>=1);
+        d.getElementById("sessClose").click(); openSheet(f);
+        var c2=cards(f);
+        check("RS06 after undo the card is back",c2.length>=1&&/Muay Thai/.test(c2[0].textContent));
+        var dn=h.undoDepth();
         c2[0].querySelector(".sugg-no").click();
-        check("D14 'Not now' hides it, takes no snapshot and changes nothing in the ledger",!Array.prototype.some.call(d.querySelectorAll(".sugg"),function(c){ return /Gym/.test(c.textContent); })&&J(h.getState().entries)===entriesBefore);
+        check("RS06 'Not now' hides it, takes no snapshot and changes nothing in the ledger",!Array.prototype.some.call(cards(f),function(c){ return /Muay Thai/.test(c.textContent); })&&h.undoDepth()===dn&&J(st.entries)===entriesBefore);
+        h.setTestNow(null);
       });
     }))
 
-    /* ---- D15: nothing leaves the browser */
-    .then(scenario("D15",function(){
+    /* ---- RS07: mitigation 1 - the one-tap button and toast show the exact times */
+    .then(scenario("RS07",function(){
       return freshSandbox(true).then(function(f){
-        var h=f.H,w=f.el.contentWindow,calls=0,st=h.getState();
+        var h=f.H,d=f.d,FRI="2026-10-16";
+        h.setTestNow(new Date(2026,9,16,12,0,0,0));
+        h.setSession("mt","Muay Thai",[{offset:0,duration:10,label:"Get ready",cat:"seed-admin"},{offset:10,duration:10,label:"Bike",cat:"seed-training"},{offset:20,duration:80,label:"Muay Thai",cat:"seed-people"}],{weekdays:[4],start:360,since:"2026-01-01"});
+        h.renderSessionBanner();
+        var yes=d.querySelector(".sessprompt-yes");
+        check("RS07 the banner's Yes button names the exact times it will log: 'Yes, log 06:00-07:40'",!!yes&&/Yes, log 06:00–07:40/.test(yes.textContent),yes&&yes.textContent);
+        if(yes) yes.click();
+        var t=d.getElementById("toastText").textContent;
+        check("RS07 the toast repeats the times (06:00-07:40), says they are the session's stored times, and tells the person to adjust them",/06:00–07:40/.test(t)&&/stored times/.test(t)&&/adjust/i.test(t)&&!d.getElementById("toastUndo").hidden,t);
+        h.setTestNow(null);
+      });
+    }))
+
+    /* ---- RS08: mitigation 2 - Export week says session-created entries are not marked; key set unchanged */
+    .then(scenario("RS08",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H, x=h.buildWeekExport(h.parseIso("2026-10-12"),"2026-10-19T00:00:00.000Z"), df=x&&x.definitions;
+        check("RS08 definitions.logged keeps its union sentence and now also says entries created from a saved session are ordinary, unmarked, carry stored times, and cannot be told from hand-logged ones",
+          !!df&&/union/.test(df.logged)&&/saved session/.test(df.logged)&&/not marked/.test(df.logged)&&/stored times/.test(df.logged)&&/cannot tell/.test(df.logged),df&&df.logged);
+        check("RS08 the definitions block still has exactly the nine agreed keys (the sentence was appended, no key added)",
+          !!df&&J(Object.keys(df).sort())===J(["categoryTotals","doubleBookedMinutes","dst","logged","time","uncategorised","unlogged","verdict","weekMembership"]),df&&J(Object.keys(df)));
+      });
+    }))
+
+    /* ---- RS09: purity - looking for suggestions changes nothing */
+    .then(scenario("RS09",function(){
+      return freshSandbox(true).then(function(f){
+        var h=setup(f,60,5), st=h.getState();
+        function dump(){ var o={}; for(var i=0;i<localStorage.length;i++){ var k=localStorage.key(i); o[k]=localStorage.getItem(k); } return J(o); }
+        var s0=J(st), u0=h.undoDepth(), l0=dump();
+        h.suggestPackages(st); h.suggestPackages(st);
+        check("RS09 suggestPackages does not touch the ledger, the undo stack or storage, and gives the same answer twice",J(st)===s0&&h.undoDepth()===u0&&dump()===l0&&J(h.suggestPackages(st).shown.map(function(p){ return p.id; }))===J(h.suggestPackages(st).shown.map(function(p){ return p.id; })));
+        h.setTestNow(null);
+      });
+    }))
+
+    /* ---- RS10: nothing leaves the browser */
+    .then(scenario("RS10",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,w=f.el.contentWindow,calls=0;
         w.fetch=function(){ calls++; return Promise.reject(new Error("blocked")); };
         w.XMLHttpRequest=function(){ calls++; throw new Error("blocked"); };
         w.navigator.sendBeacon=function(){ calls++; return false; };
-        var en=noiseFixture(3,88); plant(en,3,{cat:"seed-training",start:380,dur:100,jitter:5,label:"Gym",weekdays:[4]});
-        st.entries=en;
-        var out=h.detectPatterns(st.entries,st.categories,st.sessions), sug=h.suggestSessions(st);
-        h.dismissSuggestion(sug[0]); h.createSessionFromSuggestion(sug[0],"x");
-        f.d.getElementById("sessionsBtn").click();
-        check("D15 PRECONDITION: detection ran and found something",out.length>=1&&sug.length>=1);
-        check("D15 detecting, suggesting, dismissing, accepting and showing the sheet make no network call",calls===0,String(calls));
+        h=setup(f,60,5);
+        var top=h.suggestPackages(h.getState()).shown[0];
+        h.dismissSuggestion(top); h.createSessionFromPackage(top,"x");
+        openSheet(f);
+        check("RS10 PRECONDITION: detection ran and found something",!!top);
+        check("RS10 detecting, suggesting, dismissing, accepting and showing the sheet make no network call",calls===0,String(calls));
+        h.setTestNow(null);
       });
     }))
     .then(function(){
       return fetch("privacy.html?v="+Date.now()).then(function(r){ return r.text(); }).then(function(t){
-        check("D15 privacy.html says that spotting patterns happens in the browser and only ever proposes a session",/patterns/i.test(t)&&/proposes/i.test(t));
+        check("RS10 privacy.html says that spotting patterns happens in the browser and only ever proposes a session",/patterns/i.test(t)&&/proposes/i.test(t));
+      });
+    })
+
+    /* ---- RS12: steps that cross midnight; RS13: a habit that stopped falls in rank (effort uses TODAY, not the last logged day) */
+    .then(scenario("RS12",function(){
+      return freshSandbox(true).then(function(f){
+        var st=f.H.packageSteps({anchor:1380,blocks:[{offset:0,duration:480,label:"Sleep",catName:"Sleep",cat:"seed-sleep"},{offset:480,duration:30,label:"Wake",catName:"Admin",cat:"seed-admin"}]});
+        check("RS12 a step that ends after 24:00 shows the next day's clock and is flagged next-day: 23:00 + 480 min = 07:00 (next day)",st[0].start===1380&&st[0].end===420&&st[0].nextDay===true,J(st[0]));
+        check("RS12 the following step starts at its own offset (07:00-07:30, also on the next day)",st[1].start===420&&st[1].end===450&&st[1].nextDay===true,J(st[1]));
+        check("RS12 a step that ends exactly at 24:00 is not flagged next-day",f.H.packageSteps({anchor:1320,blocks:[{offset:0,duration:120,label:"x",catName:"c",cat:"seed-work"}]})[0].nextDay===false);
+      });
+    }))
+    .then(scenario("RS13",function(){
+      return freshSandbox(true).then(function(f){
+        var h=setup(f,60,5), st=h.getState();
+        var live=h.suggestPackages(st).shown[0];
+        h.setTestNow(nowAfter(60+100));
+        var stale=h.suggestPackages(st).shown[0];
+        check("RS13 PRECONDITION: while it is happening the package has a high weekly rate",live&&live.effort>13,live&&String(live.effort));
+        check("RS13 100 days after the last logged day the same package is still offered but its recent rate is 0 (it falls in rank, it is not hidden)",!!stale&&stale.id===live.id&&stale.effort===0,stale&&String(stale.effort));
+        h.setTestNow(null);
+      });
+    }))
+
+    /* ---- RS06b: a package whose last step runs past midnight says so on the card (found by a mutation that dropped the words) */
+    .then(scenario("RS06b",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,st=h.getState(),en={};
+        dayList(60).forEach(function(dd){
+          var q=dd.date.split("-"),nx=new Date(+q[0],+q[1]-1,+q[2]+1),nd=isoOf(nx);
+          (en[dd.date]=en[dd.date]||[]).push(E("seed-sleep",1380,1440,"Sleep"));
+          (en[nd]=en[nd]||[]).push(E("seed-sleep",0,420,"Sleep"));
+        });
+        st.entries=en; h.persist(); h.setTestNow(nowAfter(62));
+        var r=h.suggestPackages(st), top=r.shown[0];
+        check("RS06b PRECONDITION: the two halves of each night were folded into one 8-hour Sleep package (23:00, 480 minutes)",!!top&&top.blocks.length===1&&top.blocks[0].duration===480&&top.anchor>=1377&&top.anchor<=1383,top&&J({a:top.anchor,b:top.blocks}));
+        openSheet(f);
+        var tx=cards(f)[0]?cards(f)[0].textContent:"";
+        check("RS06b the card shows the step as 23:00 to 07:00 and marks it '(next day)'",/23:0\d.*07:0\d/.test(tx)&&/\(next day\)/.test(tx),tx);
+        h.setTestNow(null);
+      });
+    }))
+
+    /* ---- RS14: TIMING GUARD. A slow or looping input must FAIL a row, not stall the run.
+       Each call is timed with performance.now() (it does advance during synchronous work even in the headless
+       virtual-time run - checked: a 4.4 s busy loop read 4374 ms) and compared with a stated budget. Budgets are
+       about 10x what this laptop measured, so ordinary machine variance does not flake them while an extra nested
+       loop (n times slower) does. Shapes: "real" = 21 entries a day over 19 categories (the real ledger's scale) with
+       a daily routine and a planted weekday package; "dense" = 80 entries a day over 8 categories, short back-to-back
+       entries (many chains); "tight" = 80 entries a day over 3 categories inside a 2-hour band (windows full). */
+    .then(scenario("RS14",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        var CAT19=[]; for(var ci=1;ci<=19;ci++) CAT19.push({id:"c"+ci,name:"Cat "+ci,color:"#123456"});
+        function shapeLog(days,shape,seed){
+          var r=rng(seed),en={},cats,i;
+          if(shape==="real") cats=CAT19; else if(shape==="dense") cats=CAT19.slice(0,8); else cats=CAT19.slice(0,3);
+          dayList(days).forEach(function(dd){
+            var l=[],t;
+            if(shape==="real"){
+              for(i=0;i<21;i++){ t=1+Math.floor(r()*1379); l.push(E(cats[Math.floor(r()*cats.length)].id,t,Math.min(1440,t+10+Math.floor(r()*110)),"n"+Math.floor(r()*40))); }
+              l.push(E("c1",1380+Math.floor((r()*2-1)*6),1410,"wind down"));
+              if(dd.wd<=4){ t=360+Math.floor((r()*2-1)*3); l.push(E("c2",t,t+20,"a")); l.push(E("c3",t+20,t+60,"b")); l.push(E("c4",t+60,t+150,"c")); }
+            }else if(shape==="dense"){
+              t=300; for(i=0;i<80&&t<1400;i++){ var len=5+Math.floor(r()*15); l.push(E(cats[Math.floor(r()*cats.length)].id,t,t+len,"d"+Math.floor(r()*20))); t+=len+Math.floor(r()*3); }
+            }else{
+              for(i=0;i<80;i++){ t=480+Math.floor(r()*120); l.push(E(cats[Math.floor(r()*cats.length)].id,t,t+5+Math.floor(r()*10),"t"+Math.floor(r()*10))); }
+            }
+            en[dd.date]=l;
+          });
+          return {en:en,cats:cats};
+        }
+        /* THE CLOCK. In the headless run (--virtual-time-budget) performance.now()/Date.now() are frozen while a
+           script runs: measured, a 4.4 s busy loop inside a timer read 0 ms. A budget compared with a frozen clock
+           would pass on anything, so the clock is CALIBRATED first: a fixed busy loop that takes tens of ms in real
+           time. If performance.now() sees it, it is used (ms resolution, the budgets below apply as stated). If not,
+           the guard falls back to the Date header of a synchronous request to the server that served this page (real
+           time, 1 s resolution): then a call may read up to 1 s too fast or too slow, so the budget is widened by 2 s (the 1 s resolution
+           plus up to a second of request queueing seen under load: a 16 ms call once read 2000 ms) and only a gross slowdown is caught. If neither clock works the rows FAIL ("no usable clock"); they never pass on
+           a frozen clock. A looping input that never returns cannot be preempted from inside the page by any of this:
+           the headless runner's own cap (NO SUMMARY after ~22 min) is what stops a stall. */
+        function spin(){ var x=0; for(var i=0;i<4e7;i++){ x+=i%7; } return x; }
+        function serverNow(){
+          try{ var x=new XMLHttpRequest(); x.open("HEAD","selftest.html?clock="+Math.random(),false); x.send(); var d=x.getResponseHeader("Date"); var t=d?Date.parse(d):NaN; return isNaN(t)?null:t; }catch(e){ return null; }
+        }
+        var c0=performance.now(); spin(); var perfOk=(performance.now()-c0)>=5;
+        var s0=serverNow(); spin(); spin(); spin(); spin(); spin(); spin(); var s1=serverNow();
+        var serverOk=s0!==null&&s1!==null;
+        var clockName=perfOk?"performance.now":serverOk?"server Date header, 1 s resolution":"NONE";
+        check("RS14 a usable real-time clock exists for the timing rows (otherwise they would pass on a frozen clock)",perfOk||serverOk,"clock: "+clockName);
+        var SLACK=perfOk?0:2000;
+        function ms(fn){
+          if(perfOk){ var t0=performance.now(), v=fn(); return {ms:performance.now()-t0,v:v}; }
+          var a0=serverNow(), v2=fn(), a1=serverNow();
+          return {ms:(a0===null||a1===null)?Infinity:a1-a0,v:v2};
+        }
+        var BUDGET={ "real:88":200,"real:365":500,"real:1000":2000,"dense:365":2000,"dense:1000":7500,"tight:365":1000,"tight:1000":3000 };
+        var worst={};
+        Object.keys(BUDGET).forEach(function(key){
+          var parts=key.split(":"),shape=parts[0],days=+parts[1],g=shapeLog(days,shape,days*7+shape.length);
+          var asOf=nowAfter(days).toISOString().slice(0,10);
+          var a=ms(function(){ return h.detectPackages(g.en,g.cats,{},asOf); });
+          var b=ms(function(){ return h.suggestPackages({entries:g.en,categories:g.cats,sessions:{}},asOf); });
+          var okShape=a.v&&a.v.n===days&&Array.isArray(a.v.packages)&&b.v&&b.v.n===days&&b.v.shown.length<=3;
+          check("RS14 "+key+" (days:"+days+", "+shape+"): detectPackages and suggestPackages return a well-formed result",okShape,J({n:a.v&&a.v.n,found:a.v&&a.v.packages&&a.v.packages.length}));
+          check("RS14 "+key+": detectPackages finishes within its "+BUDGET[key]+" ms budget"+(SLACK?" (+2 s clock slack)":""),a.ms<=BUDGET[key]+SLACK,Math.round(a.ms)+" ms ["+clockName+"]");
+          check("RS14 "+key+": suggestPackages finishes within its "+BUDGET[key]+" ms budget"+(SLACK?" (+2 s clock slack)":""),b.ms<=BUDGET[key]+SLACK,Math.round(b.ms)+" ms ["+clockName+"]");
+        });
+      });
+    }))
+
+    /* ---- RS11: nothing dead is left behind */
+    .then(function(){
+      return fetch("app.js?v="+Date.now()).then(function(r){ return r.text(); }).then(function(src){
+        var gone=["detectPatterns","DETECT_MIN_DATES","DETECT_TOP","createSessionFromSuggestion","suggestSessions","sessionsCoverPattern","binomTailAtLeast"];
+        var left=gone.filter(function(n){ return src.indexOf(n)>=0; });
+        check("RS11 the old one-block detector is gone from app.js: none of its functions or constants remain",left.length===0,J(left));
       });
     })
     .then(function(){ return results; });

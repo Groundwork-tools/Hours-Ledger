@@ -937,129 +937,16 @@ function setSessionSchedule(id,weekdays,start){
   return true;
 }
 
-/* ---------------- pattern detection (stage 3) ----------------
-   Proposes CREATING a session - nothing else. detectPatterns() is PURE: it reads the entries, the
-   categories and the existing sessions it is handed and returns the full ranked list of candidates; it
-   never logs an entry, writes state or touches storage. suggestSessions() then drops what this device has
-   dismissed and keeps the top DETECT_TOP. There is NO pass/fail gate: a ranked list the owner can say "not
-   now" to, not a verdict that something is or is not a habit.
-
-   What a candidate is. Entries are grouped by category (uncategorised entries, entries whose category no
-   longer exists, and entries starting at 00:00 - the morning half of a split-at-midnight entry - are left
-   out). Within a category the start times are searched for the 15-minute window (DETECT_TOLERANCE_MIN,
-   inclusive) that holds the most DISTINCT DATES; that window is a cluster, its occurrences are removed, and
-   the search repeats. A cluster needs DETECT_MIN_DATES distinct dates; each date counts once (its earliest
-   start in the window). Why the densest window and not one anchored at the first start: a stray entry
-   just before a real cluster would otherwise slice the cluster's natural jitter in two.
-
-   How a candidate is ranked: WEEKDAY CONCENTRATION. If a thing happened on n dates, and weekdays were
-   irrelevant, each date would fall on a given weekday with probability 1/7. m is the busiest weekday's
-   count; p = min(1, 7 * P(Binomial(n,1/7) >= m)) is how surprising that is (the 7 is a union bound over
-   "which weekday", so p is conservative). Small p = tied to particular weekdays. A routine done every day
-   gets p near 1 and ranks last, which is why a big every-day cluster does not outrank a smaller weekly one.
-   Ties: more dates, then earlier start, then category id.
-
-   Where the numbers come from (OVERNIGHT-STATUS.md has the run): 15 min = the real Muay Thai block's start
-   spread was 10 min; 12 dates = the smallest k for which a time-shift null on the real export (each day's
-   entries moved by an independent random offset, 1000 seeds, this very clustering) produced ANY cluster of k
-   dates in at most 5% of seeds (k=10: 22.3%, k=11: 5.2%, k=12: 1.1%). The first derivation, with a simpler
-   clustering and 300 seeds, read k=11 at 2.3%; the real clustering finds bigger chance clusters and 1000
-   seeds settled the borderline, so the rule gave 12. That 12 is a property of ~88 logged days: more history makes the
-   null's biggest cluster larger, so re-derive it (tools/derive-min-dates.py) as the ledger grows. There is
-   deliberately no p cutoff: the weekday-shuffle null showed none separates the real pattern from noise
-   at this data size (the real best p, 0.0035, sat between the null's median 0.013 and its 5th percentile 0.0007). */
-var DETECT_TOLERANCE_MIN=15, DETECT_MIN_DATES=12, DETECT_TOP=3;
+/* ---------------- detection constants and small helpers (stage 3 redesign) ----------------
+   Detection PROPOSES creating a session - nothing else. The detector is detectPackages() below (noise filter,
+   midnight fold, packages, ranking); suggestPackages() further down applies this device's dismissals and keeps
+   the top SUGGEST_TOP. The old single-block detector with its fixed 12-date minimum was removed in R4: a fixed
+   minimum is wrong as the log grows (measured: chance alone clears 12 in 75% of scrambled logs at 150 days).
+   DETECT_TOLERANCE_MIN is the width of a start-time cluster (15 min, inclusive): the real Muay Thai block's
+   start spread was 10 minutes, one habit, the weakest number in here. */
+var DETECT_TOLERANCE_MIN=15, SUGGEST_TOP=3;
 function weekdayOfIso(d){ var q=d.split("-"); return (new Date(+q[0],+q[1]-1,+q[2]).getDay()+6)%7; }
-function binomTailAtLeast(n,m,p){
-  var pmf=Math.pow(1-p,n),sum=0;
-  for(var i=0;i<=n;i++){
-    if(i>=m) sum+=pmf;
-    pmf=pmf*(n-i)/(i+1)*(p/(1-p));
-  }
-  return Math.min(1,sum);
-}
-function lowMedian(arr){ var a=arr.slice().sort(function(x,y){ return x-y; }); return a[(a.length-1)>>1]; }
 function normLabel(l){ return String(l==null?"":l).replace(/\s+/g," ").trim().toLowerCase(); }
-function sessionsCoverPattern(sessions,cat,start,label){
-  return Object.keys(sessions||{}).some(function(id){
-    var sx=sessions[id];
-    if(!sx||!Array.isArray(sx.blocks)) return false;
-    return sx.blocks.some(function(b){
-      if(b.cat!==cat) return false;
-      if(sx.schedule&&Number.isInteger(sx.schedule.start)) return Math.abs((sx.schedule.start+b.offset)%1440-start)<=DETECT_TOLERANCE_MIN;
-      return normLabel(b.label)===normLabel(label);
-    });
-  });
-}
-function detectPatterns(entriesByDate,categories,sessions){
-  var known={},byCat={},out=[];
-  (categories||[]).forEach(function(c){ known[c.id]=c.name; });
-  Object.keys(entriesByDate||{}).sort().forEach(function(date){
-    (entriesByDate[date]||[]).forEach(function(e){
-      if(!e||typeof e.cat!=="string"||!Object.prototype.hasOwnProperty.call(known,e.cat)||!(e.start>0)||!(e.end>e.start)) return;
-      (byCat[e.cat]=byCat[e.cat]||[]).push({date:date,start:e.start,end:e.end,label:typeof e.label==="string"?e.label:""});
-    });
-  });
-  Object.keys(byCat).sort().forEach(function(cat){
-    var occ=byCat[cat].sort(function(a,b){
-      return a.start-b.start||(a.date<b.date?-1:a.date>b.date?1:0)||a.end-b.end||(a.label<b.label?-1:a.label>b.label?1:0);
-    });
-    while(occ.length>=DETECT_MIN_DATES){
-      var cnt={},dist=0,j=0,bestD=0,bestI=-1,bestJ=-1,i;
-      for(i=0;i<occ.length;i++){
-        while(j<occ.length&&occ[j].start-occ[i].start<=DETECT_TOLERANCE_MIN){ if(!cnt[occ[j].date]){ cnt[occ[j].date]=0; dist++; } cnt[occ[j].date]++; j++; }
-        if(dist>bestD){ bestD=dist; bestI=i; bestJ=j; }
-        if(!--cnt[occ[i].date]) dist--;
-      }
-      if(bestD<DETECT_MIN_DATES) break;
-      var cluster=occ.splice(bestI,bestJ-bestI),seen={},first=[];
-      cluster.forEach(function(o){ if(!seen[o.date]){ seen[o.date]=1; first.push(o); } });
-      var dates=first.map(function(o){ return o.date; }).sort(),wdc=[0,0,0,0,0,0,0];
-      dates.forEach(function(d){ wdc[weekdayOfIso(d)]++; });
-      var m=Math.max.apply(null,wdc),n=dates.length;
-      var start=lowMedian(first.map(function(o){ return o.start; })),duration=lowMedian(first.map(function(o){ return o.end-o.start; }));
-      var tally={},rep={};
-      first.forEach(function(o){ var k=normLabel(o.label); tally[k]=(tally[k]||0)+1; if(!(k in rep)) rep[k]=o.label; });
-      var bestK=Object.keys(tally).sort(function(a,b){ return tally[b]-tally[a]||(a<b?-1:a>b?1:0); })[0];
-      if(sessionsCoverPattern(sessions,cat,start,rep[bestK])) continue;
-      out.push({cat:cat,catName:known[cat],start:start,duration:duration,label:rep[bestK],count:n,dates:dates,weekdayCounts:wdc,p:Math.min(1,7*binomTailAtLeast(n,m,1/7))});
-    }
-  });
-  return out.sort(function(a,b){
-    return a.p-b.p||b.count-a.count||a.start-b.start||(a.cat<b.cat?-1:a.cat>b.cat?1:0);
-  });
-}
-function dismissedSuggestions(){
-  try{ var a=JSON.parse(readStore(SGKEY)||"[]"); return Array.isArray(a)?a.filter(function(x){ return typeof x==="string"; }):[]; }catch(e){ return []; }
-}
-function dismissSuggestion(sug){
-  if(!sug||typeof sug.cat!=="string"||!Number.isInteger(sug.start)) return;
-  var key=sug.cat+"@"+sug.start,list=dismissedSuggestions().filter(function(x){ return x!==key; });
-  list.push(key);
-  writeStore(SGKEY,JSON.stringify(list.slice(-SESSION_DISMISSED_MAX)));
-}
-function suggestionDismissed(sug,list){
-  return list.some(function(k){
-    var at=k.lastIndexOf("@");
-    return k.slice(0,at)===sug.cat&&Math.abs(+k.slice(at+1)-sug.start)<=DETECT_TOLERANCE_MIN;
-  });
-}
-function suggestSessions(st){
-  var dismissed=dismissedSuggestions();
-  return detectPatterns(st.entries,st.categories,st.sessions).filter(function(x){ return !suggestionDismissed(x,dismissed); }).slice(0,DETECT_TOP);
-}
-/* accept = create ONE session with ONE block (offset 0, the pattern's median duration, its label and
-   category), no schedule. It logs nothing. The CALLER's name; one snapshot. */
-function createSessionFromSuggestion(sug,name){
-  if(!sug||typeof sug.cat!=="string"||!Number.isInteger(sug.duration)||sug.duration<1||typeof sug.label!=="string") return null;
-  var nm=normalizeSessionName(name);
-  if(!nm) return null;
-  snapshot('create session "'+nm+'" from a suggestion');
-  var id=uid();
-  setSession(id,nm,[{offset:0,duration:Math.min(sug.duration,SESSION_MAX_DURATION),label:sug.label,cat:sug.cat}],null);
-  persist();
-  return id;
-}
 
 /* ---------------- noise filter (stage 3 redesign, R1) ----------------
    Is a cluster of dates a real habit, or the kind of coincidence a log of this size throws up by chance?
@@ -1397,6 +1284,59 @@ function detectPackages(entriesByDate,categories,sessions,asOf){
       weekdayCounts:p.weekdayCounts,via:p.via,firstDate:p.firstDate,lastDate:p.lastDate,rate:p.rate,effort:p.effort,mergedFrom:p.mergedFrom};
   });
   return out;
+}
+
+/* ---- suggestions: what the Sessions sheet offers (R4) ----
+   suggestPackages() runs the pure detector on the ledger as of TODAY (so "recent" means the last 56 days up to now),
+   drops what this device has dismissed and keeps the top SUGGEST_TOP. A dismissal is device-local (SGKEY, capped),
+   never synced, and is remembered as "category sequence @ anchor minute"; it hides a package with the same sequence
+   whose anchor is within PKG_ABSORB_MINUTES (30), because the anchor moves a little as data grows. Old keys of the
+   form "cat@start" (the one-block detector) still match one-block packages of that category. */
+function dismissedSuggestions(){
+  try{ var a=JSON.parse(readStore(SGKEY)||"[]"); return Array.isArray(a)?a.filter(function(x){ return typeof x==="string"; }):[]; }catch(e){ return []; }
+}
+function dismissSuggestion(pkg){
+  if(!pkg||!Array.isArray(pkg.cats)||!pkg.cats.length||!pkg.cats.every(function(c){ return typeof c==="string"; })||!Number.isInteger(pkg.anchor)) return;
+  var key=pkg.cats.join(">")+"@"+pkg.anchor,list=dismissedSuggestions().filter(function(x){ return x!==key; });
+  list.push(key);
+  writeStore(SGKEY,JSON.stringify(list.slice(-SESSION_DISMISSED_MAX)));
+}
+function suggestionDismissed(pkg,list){
+  var seq=pkg.cats.join(">");
+  return list.some(function(k){
+    var at=k.lastIndexOf("@");
+    return k.slice(0,at)===seq&&Math.abs(+k.slice(at+1)-pkg.anchor)<=PKG_ABSORB_MINUTES;
+  });
+}
+function suggestPackages(st,asOf){
+  var res=detectPackages(st.entries,st.categories,st.sessions,asOf||iso(sessionNow())),dismissed=dismissedSuggestions();
+  return {n:res.n,eligible:res.thresholds.eligible,minDays:NOISE_MIN_LOGGED_DAYS,found:res.packages.length,
+    shown:res.packages.filter(function(x){ return !suggestionDismissed(x,dismissed); }).slice(0,SUGGEST_TOP)};
+}
+/* the exact clock times a package would log, from its anchor and offsets (an end past 24:00 wraps to the next day's clock) */
+function packageSteps(pkg){
+  return pkg.blocks.map(function(b){
+    var s=pkg.anchor+b.offset,e=s+b.duration;
+    return {start:s%1440,end:e%1440,label:b.label,catName:b.catName,cat:b.cat,duration:b.duration,nextDay:e>1440};
+  });
+}
+function packageName(pkg){ return normalizeSessionName(pkg.blocks[0].label||pkg.blocks[0].catName||""); }
+/* accept = create ONE session from the whole package: every block with its offset, duration, label and category,
+   NO schedule. It logs nothing. One snapshot = one undo step. Any malformed block makes it create nothing. */
+function createSessionFromPackage(pkg,name){
+  if(!pkg||!Array.isArray(pkg.blocks)||!pkg.blocks.length||pkg.blocks.length>SESSION_MAX_BLOCKS) return null;
+  var raw=pkg.blocks.map(function(b){
+    return {offset:b.offset,duration:Number.isInteger(b.duration)?Math.min(b.duration,SESSION_MAX_DURATION):b.duration,label:b.label,cat:b.cat};
+  });
+  var bl=cleanBlocks(raw);
+  if(bl.length!==raw.length) return null;
+  var nm=normalizeSessionName(name);
+  if(!nm) return null;
+  snapshot('create session "'+nm+'" from a suggestion');
+  var id=uid();
+  setSession(id,nm,bl,null);
+  persist();
+  return id;
 }
 
 /* ---- save as session / apply ---- */
@@ -3205,7 +3145,7 @@ function weekHighlights(ws){
 var WEEK_EXPORT_SCHEMA=1;
 var WEEKDAY_FULL=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
 var WEEK_EXPORT_DEFINITIONS={
-  logged:"loggedMinutes is the union of all entries' time: a minute covered by two or more entries is counted once.",
+  logged:"loggedMinutes is the union of all entries' time: a minute covered by two or more entries is counted once. Entries created from a saved session (the 'Yes, log' button or Apply) are ordinary entries, are not marked in this file, and carry the session's stored times, so they may differ from what actually happened; the file cannot tell them from entries logged by hand.",
   categoryTotals:"Each categoryTotals minutes value is a plain sum of entry durations, so the rows together can exceed loggedMinutes. The excess is the overlap, summary.doubleBookedMinutes: sumOfEntryMinutes - loggedMinutes.",
   doubleBookedMinutes:"In summary and per day: sum of entry durations minus the union, including overlap inside one category. Per category: minutes of that category's time also covered by an entry of another category or an uncategorised entry (as the app's on-screen 'overlaps' line); overlap between two entries of the same category is not counted there. Per-category values are not additive: they do not sum to the week's doubleBookedMinutes (a minute shared by two categories appears in both rows but once in the week figure, and same-category overlap appears in no row).",
   unlogged:"unloggedMinutes is 10080 minus loggedMinutes, over all 24 hours of all 7 days. The app's visible hours range is a display setting and does not change anything in this file.",
@@ -5041,13 +4981,22 @@ function weekdayEvidence(wdc){
     .sort(function(a,b){ return b.c-a.c||a.i-b.i; }).map(function(x){ return DAYNAMES[x.i]+" \u00d7"+x.c; }).join(", ");
 }
 function renderSuggestions(){
-  var el=document.getElementById("sessSuggest");
-  suggestCurrent=suggestSessions(state);
+  var el=document.getElementById("sessSuggest"),r=suggestPackages(state);
+  suggestCurrent=r.shown;
+  if(!r.eligible){
+    el.innerHTML=r.n>0?'<h3>Patterns in your log</h3><p class="hint">Suggestions start once you have '+r.minDays+' logged days; you have '+r.n+'.</p>':"";
+    return;
+  }
   if(!suggestCurrent.length){ el.innerHTML=""; return; }
-  el.innerHTML='<h3>Patterns in your log</h3><p class="hint">Proposals only &mdash; nothing is logged. Each is something you logged at about the same time of day on several days; weekdays it leans toward come first.</p>'+
+  el.innerHTML='<h3>Patterns in your log</h3><p class="hint">Proposals only &mdash; nothing is logged. Each is a run of things you logged in the same order at about the same time on many days, ranked by how many entries it would save you a week.</p>'+
     suggestCurrent.map(function(x,i){
-      return '<div class="sugg" data-i="'+i+'"><div class="sess-main"><b>'+escapeHtml(x.label||x.catName)+'</b>'+
-        '<span class="sess-meta">'+escapeHtml(x.catName)+" &middot; about "+toHM(x.start)+" &middot; "+dur(x.duration)+" &middot; "+x.count+" days &middot; "+weekdayEvidence(x.weekdayCounts)+'</span>'+
+      var steps=packageSteps(x),title=steps.map(function(t){ return t.label||t.catName; }).join(" \u203a ");
+      return '<div class="sugg" data-i="'+i+'"><div class="sess-main"><b>'+escapeHtml(title)+'</b>'+
+        steps.map(function(t){
+          return '<span class="sess-meta">'+toHM(t.start)+"&ndash;"+toHM(t.end)+(t.nextDay?" (next day)":"")+" &middot; "+escapeHtml(t.label||t.catName)+" &middot; "+escapeHtml(t.catName)+" &middot; "+dur(t.duration)+'</span>';
+        }).join("")+
+        '<span class="sess-meta">'+x.count+(x.count===1?" full day":" full days")+(x.anchorCount>x.count?" (of "+x.anchorCount+" with the first step)":"")+" &middot; "+weekdayEvidence(x.weekdayCounts)+
+        " &middot; about "+(Math.round(x.effort*10)/10)+' entries a week</span>'+
         '<span class="sess-meta">e.g. '+x.dates.slice(-3).join(", ")+'</span></div>'+
         '<div class="sess-btns"><button class="ghost sugg-create">Create session from this</button><button class="ghost sugg-no">Not now</button></div></div>';
     }).join("");
@@ -5172,8 +5121,10 @@ document.getElementById("sessSuggest").addEventListener("click",function(ev){
   if(!ev.target.closest(".sugg-create")) return;
   closeSessApply(); closeSessSched();
   suggestPending=x;
-  document.getElementById("sessSuggestName").value=normalizeSessionName(x.label||x.catName);
-  document.getElementById("sessSuggestSummary").textContent=x.catName+", about "+toHM(x.start)+", "+dur(x.duration)+" ("+x.count+" days). This creates a session with that one block. It logs nothing and sets no schedule.";
+  document.getElementById("sessSuggestName").value=packageName(x);
+  var st=packageSteps(x);
+  document.getElementById("sessSuggestSummary").textContent=st.map(function(t){ return toHM(t.start)+"\u2013"+toHM(t.end)+" "+(t.label||t.catName); }).join(", ")+
+    " ("+x.count+" full days). This creates a session with "+st.length+(st.length===1?" block":" blocks")+". It logs nothing and sets no schedule.";
   document.getElementById("sessSuggestForm").hidden=false;
 });
 document.getElementById("sessSuggestCancel").addEventListener("click",closeSessSuggest);
@@ -5185,7 +5136,7 @@ document.getElementById("sessSuggestGo").addEventListener("click",function(){
   var nm=normalizeSessionName(document.getElementById("sessSuggestName").value);
   if(!nm) return;
   suggestPending=null;
-  var id=createSessionFromSuggestion(x,nm);
+  var id=createSessionFromPackage(x,nm);
   closeSessSuggest();
   renderSessions();
   if(!id){ showToast("Could not create that session.",false); return; }
@@ -5227,7 +5178,7 @@ function renderSessionBanner(){
   el.innerHTML=list.map(function(p){
     return '<div class="sessprompt" data-id="'+escapeHtml(p.id)+'" data-date="'+p.date+'"><span>Did &ldquo;'+escapeHtml(p.name)+'&rdquo; happen on '+
       dayLabel(p.date)+", "+toHM(p.start)+"&ndash;"+toHM(p.end%1440)+'?</span>'+
-      '<span class="sessprompt-btns"><button class="ghost sessprompt-yes">Yes, log it</button><button class="ghost sessprompt-no">No</button></span></div>';
+      '<span class="sessprompt-btns"><button class="ghost sessprompt-yes">Yes, log '+toHM(p.start)+"&ndash;"+toHM(p.end%1440)+'</button><button class="ghost sessprompt-no">No</button></span></div>';
   }).join("");
   el.hidden=false;
 }
@@ -5238,12 +5189,12 @@ document.getElementById("sessBanner").addEventListener("click",function(ev){
   if(!pendingSessionPrompts().some(function(p){ return p.id===id&&p.date===date; })) return;
   if(ev.target.closest(".sessprompt-no")){ dismissSessionPrompt(id,date); renderSessionBanner(); return; }
   if(!ev.target.closest(".sessprompt-yes")) return;
-  var sess=state.sessions[id],name=sess.name;
+  var sess=state.sessions[id],name=sess.name,span=toHM(sess.schedule.start)+"\u2013"+toHM((sess.schedule.start+sessionSpan(sess))%1440);
   var n=applySession(id,date,sess.schedule.start);
   render();
   if(n===null){ showToast("Could not log that session.",false); return; }
   if(localSaveFailed){ showToast("Not saved on this device — storage is full",false); return; }
-  showToast('Logged "'+name+'" for '+dayLabel(date)+" ("+n+(n===1?" entry":" entries")+") — adjust the entries if it ran differently",true);
+  showToast('Logged "'+name+'" for '+dayLabel(date)+", "+span+" ("+n+(n===1?" entry":" entries")+") — these are the session's stored times; adjust them if it ran differently",true);
 });
 if(!TEST_MODE){
   setInterval(renderSessionBanner,60000);
@@ -5293,7 +5244,6 @@ if(TEST_MODE){
     saveDayHighlight:saveDayHighlight,
     getDayHighlightMax:function(){ return DAY_HIGHLIGHT_MAX; },
     migrateSessions:migrateSessions,
-    detectPatterns:detectPatterns,
     noiseThresholds:noiseThresholds,
     foldMidnightHalves:foldMidnightHalves,
     detectPackages:detectPackages,
@@ -5301,12 +5251,13 @@ if(TEST_MODE){
     getPackageConstants:function(){ return {retention:PKG_RETENTION,rateWindowDays:PKG_RATE_WINDOW_DAYS,mergeMinutes:PKG_MERGE_MINUTES,absorbMinutes:PKG_ABSORB_MINUTES,tolerance:DETECT_TOLERANCE_MIN,gapMinutes:PKG_GAP_MINUTES,maxBlocks:PKG_MAX_BLOCKS,matchWindow:PKG_MATCH_WINDOW_MINUTES}; },
     clusterQualifies:clusterQualifies,
     getNoiseConstants:function(){ return {alpha:NOISE_ALPHA,c0All:NOISE_C0_ALL,c0Wd:NOISE_C0_WD,minLoggedDays:NOISE_MIN_LOGGED_DAYS,windowMinutes:NOISE_WINDOW_MINUTES}; },
-    suggestSessions:suggestSessions,
+    suggestPackages:suggestPackages,
+    packageSteps:packageSteps,
     dismissSuggestion:dismissSuggestion,
     getDismissedSuggestions:dismissedSuggestions,
     clearDismissedSuggestionsForTest:function(){ try{ localStorage.removeItem(SGKEY); }catch(e){} },
-    createSessionFromSuggestion:createSessionFromSuggestion,
-    getDetectConstants:function(){ return {tolerance:DETECT_TOLERANCE_MIN,minDates:DETECT_MIN_DATES,top:DETECT_TOP}; },
+    createSessionFromPackage:createSessionFromPackage,
+    getDetectConstants:function(){ return {tolerance:DETECT_TOLERANCE_MIN,top:SUGGEST_TOP}; },
     setTestNow:function(d){ testNow=d; },
     setSessionSchedule:setSessionSchedule,
     pendingSessionPrompts:pendingSessionPrompts,

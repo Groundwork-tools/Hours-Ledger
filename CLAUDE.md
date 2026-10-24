@@ -3133,32 +3133,12 @@ before the build and is recorded with its reason so it is not reopened by accide
   declared and that day counts (a question recorded in OVERNIGHT-STATUS.md).
 - **Not tested because it cannot be under TEST_MODE:** the 60 s timer and the focus/visibility refresh (skipped there).
 
-**Stage 3 - pattern detection (proposes creating a session, nothing else)**
-- **A pure function, `detectPatterns(entries, categories, sessions)`**, returns the full ranked candidate list; it never logs, writes
-  state or touches storage. `suggestSessions(state)` drops this device's dismissals and keeps the top 3. Accepting
-  (`createSessionFromSuggestion`) makes ONE one-block session with no schedule and logs nothing.
-- **Cluster = category + the 15-minute window (inclusive) holding the most distinct dates; at least 12 dates; one occurrence per date.**
-  Excluded: uncategorised entries, entries whose category is gone, entries starting at 00:00 (the morning half of a split-at-midnight entry).
-  Why the densest window rather than one anchored at the first start: a stray entry just before a real cluster would slice its natural jitter.
-- **Ranked by weekday concentration**, p = min(1, 7 x P(Bin(n,1/7) >= busiest weekday count)); ties: more dates, earlier start, category id.
-  **No p cutoff:** the weekday-shuffle null on the real export showed none separates the real habit (p about 0.0035-0.0115) from noise at
-  this size (the null's best p has median 0.013, 5th percentile 0.0007). A ranked list the owner can say "Not now" to, not a gate.
-- **Where the numbers come from.** 15 min: the real Muay Thai block's start spread was 10 min (ONE pattern: the weakest number here).
-  12 dates: the smallest k for which scrambling each day's times (1000 seeds, the detector's own clustering) gave ANY cluster of k dates in at
-  most 5% of seeds (k=11: 5.2%, k=12: 1.1%). It was 11 on a first, simpler derivation and was corrected to 12 by the same rule. It is a
-  property of ~88 logged days and does NOT hold as history grows: measured 2026-10-23 with the same null, the false-positive rate at the fixed 12
-  is 1.0% at 88 days, 3.3% at 100, 8.3% at 110, 20.5% at 120, 75.3% at 150, 100% at 250 - it crosses 5% at about 105 logged days (weeks away,
-  not months; `tools/derive-min-dates.py` holds no data). The stage 3 design is being replaced because of this. Tests pin the
-  three constants (D00) so changing one without redoing the derivation fails loudly.
-- **A session covers a pattern** when a block has the same category and, if the session is scheduled, a block start within 15 min of the
-  pattern's; if it is unscheduled, the same label (case-insensitive).
-- **Dismissals ("Not now") are device-local** (`hours-ledger-sessions-dismissed-suggestions-v1`, capped at 50, matched by category and start
-  within 15 min), never synced; no data is changed by dismissing.
-- **Known limits, said plainly:** the real Muay Thai habit shows up as TWO proposals (its get-ready and its bike), not one three-block
-  session (grouping is cut); a stopped habit is still proposed while it holds 12+ dates; nothing crossing midnight is found. `LEARNING-NOTES.md`
-  explains the method in plain language.
+**Stage 3 - the first detector (REMOVED in R4, 2026-10-24).** One-block clusters with a fixed 12-date minimum, ranked by weekday concentration. Measured wrong
+as the log grows (chance alone cleared a fixed 12 in 1.0% of scrambled logs at 88 days, 8.3% at 110, 75% at 150, always at 250), so it was replaced by the redesign
+below; its code, tests and `tools/derive-min-dates.py` are gone (`tools/validate-noise-filter.py` replaces the tool). Its dismissal key format `category@start` still
+hides a one-block package of that category.
 
-**Stage 3 REDESIGN (decided 2026-10-23/24, replaces the stage 3 design above; R1-R3 BUILT and gated 2026-10-24 - pure functions, not yet wired into the UI - R4/R5 not started; status in OVERNIGHT-STATUS.md)**
+**Stage 3 REDESIGN (decided 2026-10-23/24; R1-R5 built on `feature/sessions`, NOT merged, never seen on a real screen; status in OVERNIGHT-STATUS.md)**
 - **Goal.** Detection exists to make logging as effortless as possible. Frequent habits are the best suggestions, daily ones included. Suggestions are
   PACKAGES (a sequence of blocks, e.g. get ready > bike > Muay Thai); accepting one creates a multi-block session (no schedule). Detection still only
   proposes creating a session and never logs entries. Weekly habits are found as well as daily ones. This replaces "rank by weekday concentration"
@@ -3198,8 +3178,37 @@ before the build and is recorded with its reason so it is not reopened by accide
   not an offset from the first block's start: the first version failed to form School > Walk and Girlfriend > Prep for bed > Sleep on the real log because an earlier block's length varies; a generated test with exact durations had missed it.
   (3) Eligibility is tested per first-block window BEFORE merging variants (the noise null is calibrated for a 16-minute window), so a habit split into two time variants that are each too thin to clear the filter alone is not found.
   On the real export (88 days) the detector lists 14 suggestions: all 12 "yes" habits, B11 (pinned), the three unlabelled candidates; B14 and B15 are absent.
-- **Labels (2026-10-24).** Yes: B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B12, B13. No: B11, B14, B15. Not yet labelled: Breakfast ~08:10, Girlfriend ~19:00 (118 min),
-  School 08:25 (30 min).
+- **As built (R4): the Sessions sheet.** `suggestPackages(state)` runs `detectPackages` as of TODAY, drops this device's dismissals and keeps the top 3
+  (`SUGGEST_TOP`). A card shows the exact clock time of every step (anchor + offsets, a step past 24:00 marked "(next day)"), the full days (and how many days had the
+  first step), the weekday evidence and "about N entries a week" (= effort). Below 35 logged days the sheet says suggestions start at 35 and how many there are.
+  Accept (`createSessionFromPackage`) makes ONE session with every block, no schedule, logs nothing, one undo step; the first click takes the pending suggestion out
+  (double-click guard, no async flag, rule 9); any malformed block creates nothing. "Not now" = `dismissSuggestion`: device-local key
+  (`hours-ledger-sessions-dismissed-suggestions-v1`, capped at 50, never synced), remembered as `category sequence@anchor minute`, hides a package with the same
+  sequence whose anchor is within 30 minutes. Mitigation 1: the "Did this happen?" button reads "Yes, log 06:00-07:40" and the toast repeats the times and says they
+  are the session's stored times. Mitigation 2: a sentence appended to Export week's `definitions.logged` (key set unchanged). Not built: the device-local
+  unedited-entries list.
+- **Cost and when it runs (R4, measured).** `suggestPackages` has NO cache. It runs when the Sessions sheet opens, after every action in the sheet, and on every
+  `render()` WHILE THE SHEET IS OPEN (`renderSessionsIfOpen`); with the sheet closed `render()` does not touch it. On the real 88-day export (1,892 entries; real
+  clock in the browser pane): `detectPackages` 31 ms first call / 19 ms median, `suggestPackages` 41 / 13 ms; `render()` 3 ms with the sheet closed, 10.7 ms median
+  with it open. Generated logs (same clock): 365 days realistic 36 ms, 1,000 days realistic 188 ms, 1,000 days dense (80 entries a day, 8 categories) 742 ms, 1,000
+  days in a 2-hour band 318 ms. **OPEN DECISION before merge:** recomputing on every render while the sheet is open is fine at 88 days and about 0.2-0.7 s per
+  render at 1,000 days; options are a memo keyed on the entries/sessions/dismissals version, or leave it. Not decided.
+- **Complexity (REASONED from the code; the growth numbers above were RAN).** Entry passes (thresholds, fold, grouping) are O(E log E) in the number of entries. The
+  loop that grows fastest is the cluster extraction in `pkgClusters`: each pass is a sweep of one category's n occurrences, each pass removes at least the
+  minimum number of dates (about 6-20), so the worst case is O(n^2 / minDates) per category (n = that category's entries); a single category with 100,000
+  entries would be the slow case (not measured, not realistic). The second matching pass is O(first-block days x blocks x entries that day). Merge/absorb is
+  O(P^2 x blocks) for P qualifying packages (95 found on the dense 1,000-day log). Measured growth from 365 to 1,000 days (2.7x) was 3.8x-5.2x: mildly super-linear.
+- **Timing guard (RS14).** Seven generated logs (88/365/1,000 days; realistic, dense, tight), each call against a stated budget about 10x the measured time
+  (200/500/2000/2000/7500/1000/3000 ms). **The headless run's clock is frozen during synchronous work** (a 4.4 s busy loop inside a timer read 0 ms, measured), so the
+  guard calibrates its clock first: `performance.now()` if it sees a fixed busy loop, otherwise the Date header of a synchronous request to the serving
+  `http.server` (real time, 1 s resolution, budget widened by 2 s), otherwise the rows FAIL. In the headless gate only a gross slowdown is therefore caught; for
+  millisecond budgets run `selftest.html` in a normal browser. A loop that never returns cannot be caught from inside the page; the runner's own cap (NO SUMMARY after
+  ~22 min) stops it. Slow mutant (clustering repeated 25x) turns 5 rows red in the headless run.
+- **UNEXPLAINED, NOT REPRODUCED, NOT RESOLVED (2026-10-24).** The first full run of the new block produced no output for 13+ minutes (an empty dump); bisecting by
+  scenario (RS01-RS10, one run each) found no scenario that hung, the same code then completed, and a mutation run (m09) also ended with "NO SUMMARY" once. No input
+  that makes `app.js` loop was found. Suspected harness (background Chrome processes), but that is a suspicion, not a finding. A second, smaller unexplained item: RS01 failed (no package shown although 60 days were eligible) in 2 of 4 runs of one mutant and in 0 of about 15 runs of the unmutated code or after; a diagnostic row now records why if it recurs.
+- **Labels (2026-10-24).** Yes: B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B12, B13. No: B11, B14, B15. **STILL PENDING (must be filled before any merge):** Breakfast ~08:10 (30 min, 30 days),
+  Girlfriend ~19:00 (118 min), School 08:25 (30 min) - the owner's answers were left as placeholders; their ground-truth specs are not in the R3 tests yet.
 - **Rubber-stamp mitigations (decided):** exact times on the one-tap button and in the toast, and a sentence in Export week's `definitions.logged`; the device-local
   unedited-entries list is deferred.
 
