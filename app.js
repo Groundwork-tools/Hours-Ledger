@@ -1308,10 +1308,38 @@ function suggestionDismissed(pkg,list){
     return k.slice(0,at)===seq&&Math.abs(+k.slice(at+1)-pkg.anchor)<=PKG_ABSORB_MINUTES;
   });
 }
+/* suggestPackages is MEMOIZED on the content that decides its answer: the reference date, this device's dismissals (the raw
+   stored text), the categories (id and name), the sessions, and every entry (date, id, start, end, category, label). The
+   key is an exact string, not a hash, so two different inputs can never share a cache entry; building it is one linear pass
+   over the entries (a few ms at 20,000 entries) against 20-700 ms for the detection it saves. One entry is kept (the sheet
+   asks for the same thing again and again: every render() while it is open); it is memory only, never stored. The state is
+   mutated in place all over the app, so object identity cannot serve as a version - that is why the key is the content. */
+var suggestCache=null, suggestStats={hits:0,misses:0};
+function suggestionKey(st,asOf,dismissedRaw){
+  var parts=[asOf,dismissedRaw],ents=st.entries||{};
+  Object.keys(ents).sort().forEach(function(d){
+    var l=ents[d];
+    if(!l||!l.length) return;
+    parts.push(d);
+    for(var i=0;i<l.length;i++){ var e=l[i]; parts.push(e.id+"|"+e.start+"|"+e.end+"|"+e.cat+"|"+e.label); }
+  });
+  (st.categories||[]).forEach(function(c){ parts.push("c"+c.id+"|"+c.name); });
+  parts.push(JSON.stringify(st.sessions||{}));
+  return parts.join("\n");
+}
 function suggestPackages(st,asOf){
-  var res=detectPackages(st.entries,st.categories,st.sessions,asOf||iso(sessionNow())),dismissed=dismissedSuggestions();
-  return {n:res.n,eligible:res.thresholds.eligible,minDays:NOISE_MIN_LOGGED_DAYS,found:res.packages.length,
+  var ref=asOf||iso(sessionNow()),raw=readStore(SGKEY)||"[]",key=suggestionKey(st,ref,raw);
+  if(suggestCache&&suggestCache.key===key){
+    suggestStats.hits++;
+    var c=suggestCache.value;
+    return {n:c.n,eligible:c.eligible,minDays:c.minDays,found:c.found,shown:c.shown.slice()};
+  }
+  suggestStats.misses++;
+  var res=detectPackages(st.entries,st.categories,st.sessions,ref),dismissed=dismissedSuggestions();
+  var value={n:res.n,eligible:res.thresholds.eligible,minDays:NOISE_MIN_LOGGED_DAYS,found:res.packages.length,
     shown:res.packages.filter(function(x){ return !suggestionDismissed(x,dismissed); }).slice(0,SUGGEST_TOP)};
+  suggestCache={key:key,value:value};
+  return {n:value.n,eligible:value.eligible,minDays:value.minDays,found:value.found,shown:value.shown.slice()};
 }
 /* the exact clock times a package would log, from its anchor and offsets (an end past 24:00 wraps to the next day's clock) */
 function packageSteps(pkg){
@@ -5252,6 +5280,8 @@ if(TEST_MODE){
     clusterQualifies:clusterQualifies,
     getNoiseConstants:function(){ return {alpha:NOISE_ALPHA,c0All:NOISE_C0_ALL,c0Wd:NOISE_C0_WD,minLoggedDays:NOISE_MIN_LOGGED_DAYS,windowMinutes:NOISE_WINDOW_MINUTES}; },
     suggestPackages:suggestPackages,
+    getSuggestStats:function(){ return {hits:suggestStats.hits,misses:suggestStats.misses}; },
+    resetSuggestCacheForTest:function(){ suggestCache=null; suggestStats.hits=0; suggestStats.misses=0; },
     packageSteps:packageSteps,
     dismissSuggestion:dismissSuggestion,
     getDismissedSuggestions:dismissedSuggestions,

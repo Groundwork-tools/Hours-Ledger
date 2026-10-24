@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1309;
+var EXPECTED_MIN_ROWS=1333;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -5102,6 +5102,108 @@ function runSuggestionTests(){
           check("RS14 "+key+": detectPackages finishes within its "+BUDGET[key]+" ms budget"+(SLACK?" (+2 s clock slack)":""),a.ms<=BUDGET[key]+SLACK,Math.round(a.ms)+" ms ["+clockName+"]");
           check("RS14 "+key+": suggestPackages finishes within its "+BUDGET[key]+" ms budget"+(SLACK?" (+2 s clock slack)":""),b.ms<=BUDGET[key]+SLACK,Math.round(b.ms)+" ms ["+clockName+"]");
         });
+      });
+    }))
+
+    /* ---- RS15: CLOCK INDEPENDENCE. Every direct call here passes a fixed reference date; the rows that go through the app's own
+       "today" replace Date inside the page with a fixed instant (never the real clock). The same fixtures are then run with the
+       instant moved across midnight. Fixture: a Mon-Fri package, log 2026-07-27..2026-09-24. Moving the reference date from
+       09-24 to 09-25 drops 07-31 (a Friday: a planted day) out of the 56-day window, so exactly one full day (3 entries a week
+       / 8 weeks = 0.375) leaves the effort and NOTHING ELSE changes; moving it from 09-25 to 09-26 drops 08-01 (a Saturday, not
+       planted), so nothing changes at all. */
+    .then(scenario("RS15",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,w=f.el.contentWindow,st=h.getState();
+        st.entries=build(60,5); h.persist(); h.setTestNow(null);
+        function stub(ms){ var Real=w.__RealDate||w.Date; w.__RealDate=Real;
+          function F(){ var a=[].slice.call(arguments); return a.length?new (Function.prototype.bind.apply(Real,[null].concat(a)))():new Real(ms); }
+          F.prototype=Real.prototype; F.now=function(){ return ms; }; F.parse=Real.parse; F.UTC=Real.UTC; w.Date=F; }
+        function shape(r){ return J(r.shown.map(function(p){ return {id:p.id,count:p.count,steps:steps(h,p),wd:p.weekdayCounts}; }))+"|"+r.n+"|"+r.eligible+"|"+r.found; }
+        function effort(r){ return r.shown[0]?r.shown[0].effort:null; }
+        var I=function(y,m,d,hh,mm,ss){ return new Date(y,m-1,d,hh,mm,ss).getTime(); };
+        stub(I(2026,9,24,23,59,30)); var a1=h.suggestPackages(st);
+        stub(I(2026,9,25,0,0,30));   var a2=h.suggestPackages(st);
+        check("RS15 PRECONDITION: with the page's Date fixed at 23:59:30 the planted package is found",a1.shown.length>=1&&a1.shown[0].count>=40,shape(a1).slice(0,120));
+        check("RS15 across midnight (09-24 23:59:30 -> 09-25 00:00:30) everything is identical (ids, steps, counts, weekdays) EXCEPT that the Friday that left the 56-day window lowers the effort by exactly 3/8",
+          shape(a1)===shape(a2)&&Math.abs((effort(a1)-effort(a2))-0.375)<1e-9,effort(a1)+" -> "+effort(a2));
+        stub(I(2026,9,25,23,59,30)); var b1=h.suggestPackages(st);
+        stub(I(2026,9,26,0,0,30));   var b2=h.suggestPackages(st);
+        check("RS15 across the next midnight (09-25 -> 09-26), when only a Saturday leaves the window, the result is IDENTICAL, effort included",shape(b1)===shape(b2)&&effort(b1)===effort(b2),effort(b1)+" -> "+effort(b2));
+        check("RS15 the reference date is the LOCAL date: at 00:00:30 local it is already the next day, whatever UTC says (effort changed across the first midnight, above)",effort(a2)===effort(b1)-0&&effort(a2)<effort(a1));
+        stub(I(2035,1,1,12,0,0)); var far=h.suggestPackages(st,"2026-09-25"), ref=h.suggestPackages(st,"2026-09-25");
+        stub(I(2026,9,25,12,0,0)); var near=h.suggestPackages(st,"2026-09-25");
+        check("RS15 a call with an explicit reference date does not read the clock: the same answer with the page's Date at 2035 and at 2026",shape(far)===shape(near)&&effort(far)===effort(near)&&effort(far)===effort(ref));
+        stub(I(2026,9,25,23,59,30)); h.resetSuggestCacheForTest(); f.d.getElementById("sessionsBtn").click();
+        var u1=cards(f)[0]?cards(f)[0].textContent:""; f.d.getElementById("sessClose").click();
+        stub(I(2026,9,26,0,0,30)); f.d.getElementById("sessionsBtn").click();
+        var u2=cards(f)[0]?cards(f)[0].textContent:"";
+        check("RS15 the sheet's first card reads the same on both sides of that midnight",u1.length>0&&u1===u2,u1.slice(0,90));
+        w.Date=w.__RealDate;
+      });
+    }))
+
+    /* ---- RS16: the memo. suggestPackages recomputes when the entries, the sessions or the dismissals change (and when the reference
+       date or a category name does), and does NOT when none does. Hits and misses are counted by the app (memory only). */
+    .then(scenario("RS16",function(){
+      return freshSandbox(true).then(function(f){
+        var h=setup(f,60,5), st=h.getState(), AS="2026-09-25";
+        h.resetSuggestCacheForTest();
+        function S(){ return h.getSuggestStats(); }
+        function fresh(){ h.resetSuggestCacheForTest(); var r=h.suggestPackages(h.getState(),AS); return J(r.shown.map(function(p){ return p.id+":"+p.count+":"+p.effort; }))+"|"+r.n+"|"+r.found; }
+        function ans(){ var r=h.suggestPackages(h.getState(),AS); return J(r.shown.map(function(p){ return p.id+":"+p.count+":"+p.effort; }))+"|"+r.n+"|"+r.found; }
+        h.resetSuggestCacheForTest();
+        var first=ans(), s1=J(S());
+        check("RS16 the first call is a miss",s1===J({hits:0,misses:1}),s1);
+        ans(); ans(); var s2=S();
+        check("RS16 two more calls with nothing changed are hits: no recompute",s2.hits===2&&s2.misses===1,J(s2));
+        check("RS16 ...and the cached answer is the same as a fresh computation",ans()===first);
+        var top=h.suggestPackages(h.getState(),AS).shown[0];
+        h.resetSuggestCacheForTest(); ans(); var mA=S().misses;
+        h.putEntry("2026-09-20","Extra","seed-work",1000,1030,null); h.getState();
+        var gotA=ans();
+        check("RS16 a new entry: the next call recomputes (a miss) ...",S().misses===mA+1,"misses "+mA+" -> "+S().misses);
+        ans();
+        check("RS16 ... and the call after that is a hit again",S().misses===mA+1);
+        var cur=h.getState(), e0=cur.entries["2026-09-20"].slice(-1)[0];
+        h.resetSuggestCacheForTest(); ans(); var mB=S().misses;
+        h.putEntry("2026-09-20","Extra","seed-work",1000,1030,e0.id); /* an EDIT: same count, a new id */
+        ans();
+        check("RS16 an edit that leaves the number of entries the same still recomputes",S().misses===mB+1,"misses "+mB+" -> "+S().misses);
+        h.resetSuggestCacheForTest(); ans(); var mC=S().misses;
+        h.getState().entries["2026-09-20"].slice(-1)[0].label="Renamed in place"; ans();
+        check("RS16 a change of one entry's label in place recomputes",S().misses===mC+1);
+        h.resetSuggestCacheForTest(); ans(); var mD=S().misses;
+        h.setSession("zz","Z",[{offset:0,duration:30,label:"z",cat:"seed-work"}],null); ans();
+        check("RS16 a new session recomputes",S().misses===mD+1);
+        ans();
+        check("RS16 ...then hits again",S().misses===mD+1);
+        h.resetSuggestCacheForTest(); ans(); var mE=S().misses;
+        h.dismissSuggestion(top); var afterDismiss=h.suggestPackages(h.getState(),AS);
+        check("RS16 a dismissal recomputes, and the dismissed package is gone from the answer",S().misses===mE+1&&afterDismiss.shown.every(function(p){ return p.id!==top.id; }),"misses "+mE+" -> "+S().misses);
+        h.clearDismissedSuggestionsForTest(); var back=h.suggestPackages(h.getState(),AS);
+        check("RS16 clearing the dismissals recomputes and the package is back",S().misses===mE+2&&back.shown.some(function(p){ return p.id===top.id; }),"misses "+S().misses);
+        h.resetSuggestCacheForTest(); ans(); var mF=S().misses;
+        h.suggestPackages(h.getState(),"2026-09-26");
+        check("RS16 a different reference date recomputes",S().misses===mF+1);
+        h.suggestPackages(h.getState(),"2026-09-26");
+        check("RS16 ...the same reference date again is a hit",S().misses===mF+1);
+        h.resetSuggestCacheForTest(); ans(); var mG=S().misses;
+        h.getState().categories[0].name="Renamed category"; ans();
+        check("RS16 renaming a category recomputes",S().misses===mG+1);
+        h.snapshot("before an extra entry"); h.putEntry("2026-09-21","Undo me","seed-work",1100,1130,null);
+        h.resetSuggestCacheForTest(); var withExtra=ans(); var mH=S().misses;
+        h.undo(); /* undo swaps in a different state object whose content is the earlier one */
+        var afterUndo=ans();
+        check("RS16 an undo that changes the content recomputes (a miss) whichever state object it swapped in, and gives the same answer as a fresh computation",S().misses===mH+1&&afterUndo===fresh(),"misses "+mH+" -> "+S().misses);
+        check("RS16 (precondition of the row above) the undo really removed the extra entry",!(h.getState().entries["2026-09-21"]||[]).some(function(e){ return e.label==="Undo me"; }));
+        /* the sheet: opening it twice with nothing changed computes once */
+        h.resetSuggestCacheForTest(); h.setTestNow(nowAfter(60));
+        openSheet(f); f.d.getElementById("sessClose").click(); openSheet(f);
+        var sh=S();
+        check("RS16 opening the Sessions sheet twice with nothing changed computes once and hits once",sh.misses===1&&sh.hits>=1,J(sh));
+        h.render(); h.render();
+        check("RS16 render() while the sheet is open, with nothing changed, does not recompute",S().misses===1,J(S()));
+        h.setTestNow(null);
       });
     }))
 

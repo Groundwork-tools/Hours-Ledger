@@ -475,3 +475,29 @@ Everything in the Sessions sheet: card layout and wrapping below 820 px, tap tar
 5. Press **Not now** on a card: it hides. Close and reopen Sessions: it stays hidden.
 6. Build Muay Thai by hand: pick a day where you logged it, in "Save logged time as a session" set that day and From/To, name it "Muay Thai morning", save. It should appear in the list. Press **Schedule...**, pick the weekdays and the start time, save; later the "Did this happen?" banner should show "Yes, log HH:MM-HH:MM".
 Look at: wrapping of the step lines, buttons that fit, no horizontal scroll at phone width (resize the window below 820 px), and whether any suggestion is one you do NOT recognise as a habit.
+
+## Follow-up round (2026-10-24): clock independence, memo, window-cap question
+
+The owner's reply left the laptop-check results and the three labels as unfilled placeholders (`<what I saw...>`, `<yes/no>`). **Nothing was guessed: the laptop-check results are NOT recorded, and the three labels (Breakfast ~08:10, Girlfriend ~19:00, School 08:25) are STILL PENDING - their ground-truth specs are NOT in the R3 tests and the R3 gate was NOT re-run for them.**
+
+### 1. Clock independence (RS15) - does it explain the RS01 flake? NO.
+- RAN: RS15 runs the same Mon-Fri fixture with the page's `Date` replaced by a fixed instant and moved across midnight. 09-24 23:59:30 -> 09-25 00:00:30: ids, steps, counts and weekdays identical, effort 15 -> 14.625 (exactly 3/8: a planted Friday left the 56-day window). 09-25 -> 09-26: identical including effort (a Saturday left). A call with an explicit reference date gives the same answer with the page's Date at 2035 and at 2026. The sheet's first card reads the same on both sides of a midnight. The same rows pass on the pre-memo code, so they are regression guards, not fail-first.
+- REASONED/RAN (grep): the detection code (`noiseThresholds` to `detectPackages`) contains no `new Date()` or `Date.now()`; the only clock read is the default `asOf` in `suggestPackages` (`sessionNow()`).
+- Mutants killed: n40 (default date from the real clock), n41 (UTC date instead of the local date; killed because this laptop is not on UTC), n42 (explicit reference date ignored).
+- **Verdict on the RS01 flake: not explained by the clock.** RS01 already fixed the clock, the detector reads none, and the flake happened in 2 of 4 runs of one mutant and in about 15 later runs of the same and the unmutated code it did not. It stays "unexplained, not reproduced". So does the hang.
+
+### 2. Memo (RS16)
+- RAN: `suggestPackages` is memoized on an exact string key: reference date, raw dismissals, categories, sessions, every entry (date, id, start, end, category, label). Fail-first: 2 failing on the old code (hook missing). RS16 rows: first call miss; unchanged calls hit; new entry / edit with the same count / label changed in place / new session / dismissal / cleared dismissals / new reference date / renamed category / undo each recompute and equal a fresh computation; the sheet opened twice and `render()` twice with nothing changed compute once.
+- Mutants, all killed: n31 entries ignored (6 failing), n32 sessions (3), n33 dismissals (5), n34 date (5), n35 categories (1), n36 never cached (11), n37 count-only entries (2), n38 always-hit (27), n39 label dropped (1), n43 id dropped (1).
+- Cost not re-measured; the key is one linear pass over the entries. Memory: one key string (about 1-2 MB at 20,000 entries), not stored.
+
+### 3. Should the scan be capped to the last ~250 days? Recommendation: yes, as its own decision. NOT built.
+RAN (real clock, browser pane):
+- Real 88-day export: identical 14 packages with and without the cap (all 88 days fall inside 250).
+- Generated 1,000-day log, habit throughout: 838 ms full vs 266 ms capped; thresholds 42 / 15 full vs 17 / 8 capped.
+- Habit stopped at day 400 of 1,000: still listed (effort 0, last) without the cap, gone with it.
+- Habit with a 300-day gap: found either way.
+Why: the thresholds were only tested to 250 days (150 on real days), so a cap keeps the filter inside what was checked and bounds the cost. Cost: habits older than 250 days vanish; the fade of stopped habits (D1) changes from threshold-driven to window-driven; needs tests and mutants. Muay Thai: no effect today.
+
+### Tests
+- RAN: full `selftest.html` on the working tree: `PASS - 0 failing / 1333 total` (`EXPECTED_MIN_ROWS` 1333; one run first failed only the row-count guard at 1334, my miscount).
