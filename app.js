@@ -1349,12 +1349,13 @@ function suggestPackages(st,asOf){
   return {n:value.n,eligible:value.eligible,minDays:value.minDays,found:value.found,shown:value.shown.slice()};
 }
 /* the exact clock times a package would log, from its anchor and offsets (an end past 24:00 wraps to the next day's clock) */
-function packageSteps(pkg){
-  return pkg.blocks.map(function(b){
-    var s=pkg.anchor+b.offset,e=s+b.duration;
-    return {start:s%1440,end:e%1440,label:b.label,catName:b.catName,cat:b.cat,duration:b.duration,nextDay:e>1440};
+function stepsFor(blocks,anchor){
+  return blocks.map(function(b){
+    var st=anchor+b.offset,e=st+b.duration;
+    return {start:st%1440,end:e%1440,label:b.label,catName:b.catName,cat:b.cat,duration:b.duration,nextDay:e>1440};
   });
 }
+function packageSteps(pkg){ return stepsFor(pkg.blocks,pkg.anchor); }
 function packageName(pkg){ return normalizeSessionName(pkg.blocks[0].label||pkg.blocks[0].catName||""); }
 /* accept = create ONE session from the whole package: every block with its offset, duration, label and category,
    NO schedule. It logs nothing. One snapshot = one undo step. Any malformed block makes it create nothing. */
@@ -5043,15 +5044,58 @@ if(state.driveConnected){
 if(!TEST_MODE&&state.driveConnected) loadGisScript(function(){});
 
 /* ---------------- Sessions sheet ----------------
-   One sheet: the saved sessions (Apply / Delete), an apply panel (date + start time, with a preview of
-   what it would overlap), and a form that saves logged time as a session. Delete and apply both take
-   a snapshot (hard rule 5) and offer Undo in the toast. Nothing in here is sent anywhere. */
-var sessScrimEl=document.getElementById("sessScrim"), sessApplyId=null;
+   One sheet: the suggestions (Create session saves at once), the saved sessions (Log today, Other day, Start time,
+   rename, delete), and a folded form that saves logged time as a session. Every change takes a snapshot (hard
+   rule 5) and offers Undo in the toast. The old manual Apply panel is gone: Log today is the only way to log a
+   session. Nothing in here is sent anywhere. */
+var sessScrimEl=document.getElementById("sessScrim");
 function sessionSpan(r){ return r.blocks.reduce(function(m,b){ return Math.max(m,b.offset+b.duration); },0); }
-var suggestCurrent=[], suggestPending=null;
+var suggestCurrent=[], lastSuggestCreateAt=0;
 function weekdayEvidence(wdc){
   return wdc.map(function(c,i){ return {c:c,i:i}; }).filter(function(x){ return x.c>0; })
     .sort(function(a,b){ return b.c-a.c||a.i-b.i; }).map(function(x){ return DAYNAMES[x.i]+" \u00d7"+x.c; }).join(", ");
+}
+/* a category's colour as a square dot before a step; grey for no category or a deleted one. The colour is never the only
+   signal: the category text stays (shown when it differs from the label). The colour comes from the user's own category
+   record and is only used if it is a plain hex colour. */
+function catColor(catId){ var c=catId&&catById(catId); return (c&&typeof c.color==="string"&&/^#[0-9a-fA-F]{3,8}$/.test(c.color))?c.color:null; }
+function catNameOf(catId){ var c=catId&&catById(catId); return c?c.name:"No category"; }
+function dotHtml(catId){ return '<span class="sugg-dot" style="background:'+(catColor(catId)||"var(--none)")+'"></span>'; }
+function stepsHtml(steps){
+  return steps.map(function(t){
+    var name=t.label||t.catName,cat=normLabel(name)!==normLabel(t.catName)?'<span class="sugg-cat">'+escapeHtml(t.catName)+'</span>':"";
+    return '<div class="sugg-step">'+dotHtml(t.cat)+'<span class="sugg-time"><span class="sugg-range">'+toHM(t.start)+"–"+toHM(t.end)+'</span>'+(t.nextDay?'<span class="sugg-next">(next day)</span>':"")+'</span>'+
+      '<span class="sugg-label">'+escapeHtml(name)+cat+'</span><span class="sugg-dur">'+dur(t.duration)+'</span></div>';
+  }).join("");
+}
+function sessionSteps(sess,start){
+  return stepsFor(sess.blocks.map(function(b){ return {offset:b.offset,duration:b.duration,label:b.label,cat:b.cat,catName:catNameOf(b.cat)}; }),start);
+}
+/* how often the PATTERN repeats: the ranking's own number (full-package days in the last 56 days, per week), worded as
+   nights when the package runs past midnight and as days otherwise */
+function rateText(rate,nights){
+  var r=Math.round(rate*10)/10,t=Number.isInteger(r)?String(r):r.toFixed(1);
+  return "about "+t+" "+(nights?(r===1?"night":"nights"):(r===1?"day":"days"))+" a week";
+}
+/* weekday counts over the SAME window as the rate (the last PKG_RATE_WINDOW_DAYS days up to the reference date) */
+function windowWeekdayCounts(dates,ref){
+  var c=[0,0,0,0,0,0,0];
+  dates.forEach(function(d){ var ago=isoDaysBetween(d,ref); if(ago>=0&&ago<PKG_RATE_WINDOW_DAYS) c[weekdayOfIso(d)]++; });
+  return c;
+}
+/* per-step frequency, computed here from the log and NOT by the detector: for each of the last PKG_RATE_WINDOW_DAYS days,
+   does an entry of that step's category start within the cluster tolerance of the time that step would have that day? (midnight
+   halves folded, so a night is one entry on its evening; a step that begins after midnight is looked for on the next date) */
+function stepFrequencies(pkg,ref){
+  var days=foldMidnightHalves(state.entries||{}).days,out=pkg.blocks.map(function(){ return 0; });
+  for(var a=0;a<PKG_RATE_WINDOW_DAYS;a++){
+    var D=addDays(parseIso(ref),-a);
+    pkg.blocks.forEach(function(b,k){
+      var abs=pkg.anchor+b.offset,shift=Math.floor(abs/1440),want=abs-shift*1440,es=days[iso(addDays(D,shift))]||[];
+      if(es.some(function(e){ return e.cat===b.cat&&Math.abs(e.start-want)<=DETECT_TOLERANCE_MIN; })) out[k]++;
+    });
+  }
+  return out;
 }
 function renderSuggestions(){
   var el=document.getElementById("sessSuggest"),r=suggestPackages(state);
@@ -5061,42 +5105,56 @@ function renderSuggestions(){
     return;
   }
   if(!suggestCurrent.length){ el.innerHTML=""; return; }
-  var WL=["M","T","W","T","F","S","S"];
+  var WL=["M","T","W","T","F","S","S"],ref=iso(sessionNow()),weeks=PKG_RATE_WINDOW_DAYS/7;
   el.innerHTML='<h3>Patterns in your log</h3><p class="hint">Proposals only. Nothing is logged.</p>'+
     suggestCurrent.map(function(x,i){
-      var steps=packageSteps(x),title=steps[0].label||steps[0].catName;
-      return '<div class="sugg" data-i="'+i+'"><b class="sugg-title">'+escapeHtml(title)+'</b>'+
-        '<div class="sugg-steps">'+steps.map(function(t){
-          var name=t.label||t.catName,cat=normLabel(name)!==normLabel(t.catName)?'<span class="sugg-cat">'+escapeHtml(t.catName)+'</span>':"";
-          return '<div class="sugg-step"><span class="sugg-time"><span class="sugg-range">'+toHM(t.start)+"\u2013"+toHM(t.end)+'</span>'+(t.nextDay?'<span class="sugg-next">(next day)</span>':"")+'</span>'+
-            '<span class="sugg-label">'+escapeHtml(name)+cat+'</span><span class="sugg-dur">'+dur(t.duration)+'</span></div>';
-        }).join("")+'</div>'+
-        '<div class="sugg-meta">'+x.count+" of "+x.anchorCount+" days &middot; about "+(Math.round(x.effort*10)/10)+' entries a week</div>'+
-        '<div class="sugg-week" role="img" aria-label="'+escapeHtml(weekdayEvidence(x.weekdayCounts))+'">'+x.weekdayCounts.map(function(c,k){
+      var steps=packageSteps(x),title=steps[0].label||steps[0].catName,nights=steps.some(function(t){ return t.nextDay; });
+      var wk=windowWeekdayCounts(x.dates,ref),fq=stepFrequencies(x,ref);
+      return '<div class="sugg" data-i="'+i+'" data-id="'+escapeHtml(x.id)+'"><b class="sugg-title">'+escapeHtml(title)+'</b>'+
+        '<div class="sugg-steps">'+stepsHtml(steps)+'</div>'+
+        '<div class="sugg-meta"><span>'+x.count+" of "+x.anchorCount+" days &middot; "+rateText(x.rate,nights)+'</span><span class="sugg-cap">Weekdays, last '+weeks+' weeks</span></div>'+
+        '<div class="sugg-week" role="img" aria-label="'+escapeHtml(weekdayEvidence(wk))+'">'+wk.map(function(c,k){
           return '<span class="sugg-day'+(c?"":" zero")+'"><span class="sugg-dl">'+WL[k]+'</span><span class="sugg-dn">'+c+'</span></span>';
         }).join("")+'</div>'+
+        '<details class="sugg-more"><summary>How often each step</summary>'+steps.map(function(t,k){
+          return '<div class="sugg-freq">'+dotHtml(t.cat)+'<span class="sugg-label">'+escapeHtml(t.label||t.catName)+'</span><span class="sugg-dur">'+fq[k]+" of "+PKG_RATE_WINDOW_DAYS+" days &middot; about "+(Math.round(fq[k]/weeks*10)/10)+" a week"+'</span></div>';
+        }).join("")+'</details>'+
         '<div class="sugg-btns"><button class="solid sugg-create">Create session</button><button class="ghost sugg-no">Not now</button></div></div>';
     }).join("");
 }
+
 /* ---- Log today (saved sessions only; detection never logs) ----
-   Each saved session has a primary button "Log today HH:MM-HH:MM" that shows the exact times it will log. The date is today;
-   "Other day" opens a date field (default tomorrow) and the button then reads "Log Tue 27 Oct HH:MM-HH:MM". A tap logs exactly
-   the date and start the button showed (data attributes), never a recomputation - except that a button that says today after
-   midnight refuses, refreshes and asks for another tap. State here is per-session and in memory only. */
-var sessOther={}, sessStartEditId=null, sessLogPending=null;
+   Each saved session has a full-width dark button "Log today HH:MM-HH:MM" that shows the exact times it will log. The date is
+   today; "Other day" opens a date field (default tomorrow) and the button then reads "Log Tue 27 Oct HH:MM-HH:MM". A tap logs
+   exactly the date and start the button showed (data attributes), never a recomputation - except that a button that says today
+   after midnight refuses, refreshes and asks for another tap. After a log the sheet CLOSES (the toast with Undo stays); it stays
+   open on Cancel, on errors and while the overlap prompt shows. State here is per-session and in memory only. */
+var sessOther={}, sessStartEditId=null, sessLogPending=null, sessRenameId=null, sessDeleteArm=null, sessDeleteTimer=null;
+var SESS_DELETE_ARM_MS=4000;
+var TRASH_SVG='<svg class="sess-trash" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.6 9.5h6.8L12 4M6.8 6.5v4.5M9.2 6.5v4.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="square"/></svg>';
+function delBtnHtml(armed){
+  return armed?'<button class="sess-del armed" aria-label="Confirm delete">Delete?</button>':'<button class="sess-del" aria-label="Delete session" title="Delete session">'+TRASH_SVG+'</button>';
+}
 function logTarget(id){
   var r=state.sessions[id],today=iso(sessionNow()),o=sessOther[id];
-  var date=(o&&o.open&&isIsoDate(o.date))?o.date:today,st=sessionStartFor(r,date).start,end=(st+sessionSpan(r))%1440;
-  return {date:date,start:st,isToday:date===today,label:"Log "+(date===today?"today":dayLabel(date))+" "+toHM(st)+"\u2013"+toHM(end)};
+  var date=(o&&o.open&&isIsoDate(o.date))?o.date:today,sf=sessionStartFor(r,date),st=sf.start,end=(st+sessionSpan(r))%1440;
+  return {date:date,start:st,source:sf.source,isToday:date===today,label:"Log "+(date===today?"today":dayLabel(date))+" "+toHM(st)+"–"+toHM(end)};
+}
+function sessMetaHtml(r,t){
+  var src=t.source==="now"?" (now)":t.source==="startHour"?" (day start)":"";
+  return r.blocks.length+(r.blocks.length===1?" block":" blocks")+" &middot; "+dur(sessionSpan(r))+
+    (r.schedule?" &middot; "+r.schedule.weekdays.map(function(d){ return DAYNAMES[d]; }).join(", ")+" "+toHM(r.schedule.start):" &middot; starts "+toHM(t.start)+src);
 }
 function refreshLogButtons(){
   var list=document.getElementById("sessList");
   if(!list) return;
   Array.prototype.forEach.call(list.querySelectorAll(".sessrow"),function(row){
-    var id=row.dataset.id,btn=row.querySelector(".sess-log");
-    if(!btn||!state.sessions[id]) return;
+    var id=row.dataset.id,btn=row.querySelector(".sess-log"),r=state.sessions[id];
+    if(!btn||!r) return;
     var t=logTarget(id);
     btn.dataset.date=t.date; btn.dataset.start=String(t.start); btn.dataset.today=t.isToday?"1":"0"; btn.textContent=t.label;
+    var st=row.querySelector(".sugg-steps"); if(st) st.innerHTML=stepsHtml(sessionSteps(r,t.start));
+    var mt=row.querySelector(".sess-meta"); if(mt) mt.innerHTML=sessMetaHtml(r,t);
   });
 }
 function renderSessions(){
@@ -5106,38 +5164,31 @@ function renderSessions(){
   });
   document.getElementById("sessList").innerHTML=ids.length?ids.map(function(id){
     var r=state.sessions[id],t=logTarget(id),o=sessOther[id],pend=sessLogPending&&sessLogPending.id===id?sessLogPending:null;
-    return '<div class="sessrow" data-id="'+escapeHtml(id)+'"><div class="sess-main"><b>'+escapeHtml(r.name)+'</b>'+
-      '<span class="sess-meta">'+r.blocks.length+(r.blocks.length===1?" block":" blocks")+" &middot; "+dur(sessionSpan(r))+
-      (r.schedule?" &middot; "+r.schedule.weekdays.map(function(d){ return DAYNAMES[d]; }).join(", ")+" "+toHM(r.schedule.start):(validStart(r.defaultStart)?" &middot; starts "+toHM(r.defaultStart):""))+'</span></div>'+
+    return '<div class="sessrow" data-id="'+escapeHtml(id)+'">'+
+      (sessRenameId===id?'<input type="text" class="sess-rename-in" maxlength="'+SESSION_NAME_MAX+'" value="'+escapeHtml(r.name)+'" aria-label="Session name">':'<button class="sess-name" title="Click to rename">'+escapeHtml(r.name)+'</button>')+
+      '<span class="sess-meta">'+sessMetaHtml(r,t)+'</span>'+
+      '<div class="sugg-steps">'+stepsHtml(sessionSteps(r,t.start))+'</div>'+
       '<button class="solid sess-log" data-date="'+t.date+'" data-start="'+t.start+'" data-today="'+(t.isToday?"1":"0")+'">'+escapeHtml(t.label)+'</button>'+
       (pend?'<div class="sess-confirm"><span>Overlaps '+pend.entries+(pend.entries===1?" entry":" entries")+", "+pend.minutes+' min.</span><button class="solid sess-confirm-go">Log anyway</button><button class="ghost sess-confirm-no">Cancel</button></div>':"")+
       (o&&o.open?'<div class="sess-other"><label>Day <input type="date" class="sess-od-date" value="'+escapeHtml(o.date||"")+'"></label><button class="ghost sess-od-today">Today</button></div>':"")+
       (sessStartEditId===id?'<div class="sess-startedit"><label>Start time <input type="time" class="sess-start-in" value="'+(validStart(r.defaultStart)?toHM(r.defaultStart):"")+'"></label><button class="solid sess-start-save">Save</button><button class="ghost sess-start-cancel">Cancel</button></div>':"")+
-      '<div class="sess-btns"><button class="ghost sess-od">Other day</button>'+(r.schedule?"":'<button class="ghost sess-start">Start time</button>')+'<button class="ghost sess-sched">Schedule&hellip;</button><button class="ghost sess-apply">Apply&hellip;</button><button class="ghost sess-del">Delete</button></div></div>';
+      '<div class="sess-small"><button class="ghost sess-od">Other day</button>'+(r.schedule?"":'<button class="ghost sess-start">Start time</button>')+'<button class="ghost sess-sched">Schedule&hellip;</button>'+delBtnHtml(sessDeleteArm===id)+'</div></div>';
   }).join(""):'<p class="emptyhint">No sessions yet. Log a stretch of time, then save it below.</p>';
+}
+function disarmDelete(){
+  clearTimeout(sessDeleteTimer); sessDeleteTimer=null; sessDeleteArm=null;
+  Array.prototype.forEach.call(document.querySelectorAll("#sessList .sess-del.armed"),function(b){ b.outerHTML=delBtnHtml(false); });
 }
 /* render() calls this on every redraw (a sync landing, an undo): the list is read-only, so redrawing
    it can never replace something being typed - the forms live outside #sessList */
 function renderSessionsIfOpen(){
   if(sessScrimEl&&sessScrimEl.classList.contains("on")) renderSessions();
 }
-function sessApplyPreview(){
-  var r=sessApplyId&&state.sessions[sessApplyId],date=document.getElementById("sessApplyDate").value,t=document.getElementById("sessApplyTime").value;
-  var el=document.getElementById("sessApplyPreview");
-  if(!r||!date||!t||!isIsoDate(date)){ el.textContent="Pick a date and a start time."; return; }
-  var ov=sessionOverlap(r,date,fromHM(t));
-  el.textContent=ov.entries?("Overlaps "+ov.entries+(ov.entries===1?" entry":" entries")+" already logged ("+dur(ov.minutes)+"). They stay; the week will show that time as double-booked."):
-    "No overlap with what is already logged.";
-}
-function closeSessApply(){ sessApplyId=null; document.getElementById("sessApply").hidden=true; }
 var sessSchedId=null;
-function closeSessSuggest(){ suggestPending=null; document.getElementById("sessSuggestForm").hidden=true; }
 function closeSessSched(){ sessSchedId=null; document.getElementById("sessSched").hidden=true; }
 function openSessions(){
   hideToast();
-  closeSessApply();
   closeSessSched();
-  closeSessSuggest();
   var dateEl=document.getElementById("sessSaveDate");
   if(!dateEl.value) dateEl.value=iso(new Date());
   renderSessions();
@@ -5150,9 +5201,8 @@ function openSessions(){
 function closeSessions(){
   if(!sessScrimEl.classList.contains("on")) return;
   sessScrimEl.classList.remove("on");
-  closeSessApply();
   closeSessSched();
-  closeSessSuggest();
+  sessLogPending=null; sessStartEditId=null; sessRenameId=null; disarmDelete();
   unlockBodyScroll();
 }
 wireOutsideClose(sessScrimEl,closeSessions);
@@ -5200,26 +5250,28 @@ document.getElementById("sessList").addEventListener("click",function(ev){
     sessStartEditId=null; renderSessions();
   }else if(ev.target.closest(".sess-start")){
     sessStartEditId=id; sessLogPending=null; renderSessions();
+  }else if(ev.target.closest(".sess-name")){
+    sessRenameId=id; sessLogPending=null; renderSessions();
+    var ri=document.querySelector('#sessList .sessrow[data-id="'+id+'"] .sess-rename-in');
+    if(ri){ ri.focus(); ri.select(); }
   }else if(ev.target.closest(".sess-sched")){
-    closeSessApply();
     sessSchedId=id;
     document.getElementById("sessSchedTitle").textContent='Schedule "'+r.name+'"';
     for(var i=0;i<7;i++) document.getElementById("sessSchedDay"+i).checked=!!(r.schedule&&r.schedule.weekdays.indexOf(i)>=0);
     document.getElementById("sessSchedTime").value=r.schedule?toHM(r.schedule.start):"";
     document.getElementById("sessSchedRemove").hidden=!r.schedule;
     document.getElementById("sessSched").hidden=false;
-  }else if(ev.target.closest(".sess-apply")){
-    closeSessSched();
-    sessApplyId=id;
-    document.getElementById("sessApplyTitle").textContent='Apply "'+r.name+'"';
-    document.getElementById("sessApplyDate").value="";
-    document.getElementById("sessApplyTime").value="";
-    document.getElementById("sessApplyGo").disabled=false;
-    document.getElementById("sessApply").hidden=false;
-    sessApplyPreview();
   }else if(ev.target.closest(".sess-del")){
+    if(sessDeleteArm!==id){
+      /* first tap: arm. The button turns into "Delete?" and resets by itself after a few seconds (a timer, so it cannot stay
+         armed: hard rule 9) or on any tap elsewhere */
+      clearTimeout(sessDeleteTimer); sessDeleteArm=id; sessLogPending=null;
+      sessDeleteTimer=setTimeout(function(){ if(sessDeleteArm===id) disarmDelete(); },SESS_DELETE_ARM_MS);
+      renderSessions();
+      return;
+    }
     var name=r.name;
-    if(sessApplyId===id) closeSessApply();
+    disarmDelete();                     /* taken out BEFORE deleting: a second tap finds nothing armed */
     if(sessSchedId===id) closeSessSched();
     deleteSession(id);
     renderSessions();
@@ -5237,68 +5289,64 @@ function logSession(id,date,start){
   var sess=state.sessions[id];
   if(!sess) return;
   var end=(start+sessionSpan(sess))%1440,n=applySession(id,date,start);
-  render(); renderSessions();
-  if(n===null){ showToast("Could not log that session.",false); return; }
-  if(localSaveFailed){ showToast("Not saved on this device \u2014 storage is full",false); return; }
+  if(n===null){ renderSessions(); showToast("Could not log that session.",false); return; }
+  sessOther[id]={open:false,date:null};
+  render();
+  if(localSaveFailed){ renderSessions(); showToast("Not saved on this device \u2014 storage is full",false); return; }   /* an error keeps the sheet open */
+  closeSessions();                       /* a successful log closes the sheet; the toast with Undo stays */
   showToast('Logged "'+sess.name+'" \u2014 '+(date===iso(sessionNow())?"today":dayLabel(date))+" "+toHM(start)+"\u2013"+toHM(end)+" ("+n+(n===1?" entry":" entries")+") \u2014 adjust the entries if it ran differently",true);
 }
+/* inline rename: one snapshot, a fresh stamp, defaultStart and the schedule kept (setSession carries defaultStart when it is
+   not passed; the schedule is passed on). Enter or leaving the field saves, Escape cancels, an empty name reverts. */
+function renameSession(id,raw){
+  var r=state.sessions&&state.sessions[id],nm=normalizeSessionName(raw);
+  if(!r||!nm||nm===r.name) return false;
+  snapshot('rename session "'+r.name+'"');
+  setSession(id,nm,r.blocks,r.schedule);
+  persist();
+  return true;
+}
+function commitRename(id,input){
+  if(sessRenameId!==id) return;          /* taken out first: Enter followed by the blur it causes saves once */
+  sessRenameId=null;
+  var old=state.sessions[id]&&state.sessions[id].name,changed=renameSession(id,input.value);
+  renderSessions();
+  if(changed) showToast('Renamed "'+old+'" to "'+state.sessions[id].name+'"',true);
+}
+document.getElementById("sessList").addEventListener("keydown",function(ev){
+  var inp=ev.target.closest&&ev.target.closest(".sess-rename-in"),row=inp&&inp.closest(".sessrow");
+  if(!row) return;
+  if(ev.key==="Enter"){ ev.preventDefault(); commitRename(row.dataset.id,inp); }
+  else if(ev.key==="Escape"){ ev.preventDefault(); ev.stopPropagation(); sessRenameId=null; renderSessions(); }
+});
+document.getElementById("sessList").addEventListener("focusout",function(ev){
+  var inp=ev.target.closest&&ev.target.closest(".sess-rename-in"),row=inp&&inp.closest(".sessrow");
+  if(row) commitRename(row.dataset.id,inp);
+});
+/* a tap anywhere else puts an armed delete button back, without rebuilding the row (a rebuild on pointerdown would swallow the click) */
+document.addEventListener("pointerdown",function(ev){
+  if(sessDeleteArm&&!(ev.target.closest&&ev.target.closest(".sess-del"))) disarmDelete();
+},true);
 if(!TEST_MODE){
   setInterval(refreshLogButtons,60000);
   document.addEventListener("visibilitychange",function(){ if(!document.hidden) refreshLogButtons(); });
 }
-document.getElementById("sessApplyDate").addEventListener("input",sessApplyPreview);
-document.getElementById("sessApplyTime").addEventListener("input",sessApplyPreview);
-document.getElementById("sessApplyCancel").addEventListener("click",closeSessApply);
-/* double-submit guard (the category double-tap lesson in SYNC-LESSONS.md): the first click takes the
-   session id out of sessApplyId BEFORE doing anything, so a second click that arrives before the
-   panel has closed finds nothing to apply; the button is also disabled. The apply itself is
-   synchronous, so there is no in-flight state that could stay stuck (hard rule 9): reopening the panel
-   sets the id and enables the button again. */
-document.getElementById("sessApplyGo").addEventListener("click",function(){
-  var id=sessApplyId;
-  if(!id) return;
-  var date=document.getElementById("sessApplyDate").value,t=document.getElementById("sessApplyTime").value;
-  if(!date||!t||!isIsoDate(date)){ document.getElementById("sessApplyPreview").textContent="Pick a date and a start time first."; return; }
-  var r=state.sessions[id],name=r&&r.name;
-  sessApplyId=null;
-  this.disabled=true;
-  var n=applySession(id,date,fromHM(t));
-  closeSessApply();
-  render();
-  if(n===null){ showToast("Could not apply that session.",false); return; }
-  if(localSaveFailed){ showToast("Not saved on this device — storage is full",false); return; }
-  showToast('Applied "'+name+'" — '+n+(n===1?" entry":" entries")+" on "+dayLabel(date),true);
-});
 document.getElementById("sessSuggest").addEventListener("click",function(ev){
   var card=ev.target.closest&&ev.target.closest(".sugg");
   if(!card) return;
-  var x=suggestCurrent[+card.dataset.i];
+  var x=suggestCurrent.filter(function(p){ return p.id===card.dataset.id; })[0];
   if(!x) return;
   if(ev.target.closest(".sugg-no")){ dismissSuggestion(x); renderSessions(); return; }
   if(!ev.target.closest(".sugg-create")) return;
-  closeSessApply(); closeSessSched();
-  suggestPending=x;
-  document.getElementById("sessSuggestName").value=packageName(x);
-  var st=packageSteps(x);
-  document.getElementById("sessSuggestSummary").textContent=st.map(function(t){ return toHM(t.start)+"\u2013"+toHM(t.end)+" "+(t.label||t.catName); }).join(", ")+
-    " ("+x.count+" full days). This creates a session with "+st.length+(st.length===1?" block":" blocks")+". It logs nothing and sets no schedule.";
-  document.getElementById("sessSuggestForm").hidden=false;
-});
-document.getElementById("sessSuggestCancel").addEventListener("click",closeSessSuggest);
-/* double-submit guard, same shape as Apply: the first click takes the pending suggestion out before doing
-   anything, so a second click finds nothing to create; the create is synchronous (no stuck flag, rule 9) */
-document.getElementById("sessSuggestGo").addEventListener("click",function(){
-  var x=suggestPending;
-  if(!x) return;
-  var nm=normalizeSessionName(document.getElementById("sessSuggestName").value);
-  if(!nm) return;
-  suggestPending=null;
-  var id=createSessionFromPackage(x,nm);
-  closeSessSuggest();
+  /* Create session saves at once (no confirm step). The first tap re-renders the list, so the card under the finger changes: a
+     second tap within the next 700 ms is ignored (a timestamp, not a flag: it cannot stay set, hard rule 9). */
+  if(Date.now()-lastSuggestCreateAt<700) return;
+  lastSuggestCreateAt=Date.now();
+  var nm=packageName(x),id=createSessionFromPackage(x,nm);
   renderSessions();
   if(!id){ showToast("Could not create that session.",false); return; }
-  if(localSaveFailed){ showToast("Not saved on this device — storage is full",false); return; }
-  showToast('Created session "'+nm+'" — nothing was logged',true);
+  if(localSaveFailed){ showToast("Not saved on this device \u2014 storage is full",false); return; }
+  showToast('Created session "'+nm+'" \u2014 nothing was logged',true);
 });
 document.getElementById("sessSchedCancel").addEventListener("click",closeSessSched);
 document.getElementById("sessSchedGo").addEventListener("click",function(){

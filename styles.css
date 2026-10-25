@@ -288,10 +288,12 @@ button{cursor:pointer}
    non-shrinking buttons, which left the text a ~120 px column. */
 .sugg{display:block;padding:12px 0;border-bottom:1px solid var(--rule);min-width:0}
 .sugg-title{display:block;font-size:14px;overflow-wrap:anywhere}
-.sugg-steps{display:grid;grid-template-columns:auto minmax(0,1fr) auto;column-gap:10px;margin-top:6px}
+.sugg-steps{display:grid;grid-template-columns:8px auto minmax(0,1fr) auto;column-gap:10px;margin-top:6px}
 /* the rows share the three columns of .sugg-steps (subgrid), so times, labels and durations line up from row to row */
 .sugg-step{display:grid;grid-column:1/-1;grid-template-columns:subgrid;align-items:baseline;padding:2px 0;font-size:12px}
-@supports not (grid-template-columns:subgrid){.sugg-step{grid-template-columns:auto minmax(0,1fr) auto;column-gap:10px}}
+@supports not (grid-template-columns:subgrid){.sugg-step{grid-template-columns:8px auto minmax(0,1fr) auto;column-gap:10px}}
+/* a square dot in the step's category colour (grey: none / deleted); the category text stays, colour is never the only signal */
+.sugg-dot{display:block;width:8px;height:8px;align-self:center;border-radius:0}
 .sugg-time{display:flex;flex-direction:column;font-family:var(--mono);font-size:11px}
 .sugg-range{white-space:nowrap}
 .sugg-next{font-size:9px;color:var(--muted);white-space:nowrap}
@@ -299,6 +301,8 @@ button{cursor:pointer}
 .sugg-cat{margin-left:6px;color:var(--muted);font-size:11px}
 .sugg-dur{font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap;text-align:right}
 .sugg-meta{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:6px;overflow-wrap:anywhere}
+.sugg-meta span{display:block}
+.sugg-cap{font-size:10px}
 .sugg-week{display:flex;margin-top:8px;border:1px solid var(--rule)}
 .sugg-day{flex:1 1 0;min-width:0;display:flex;flex-direction:column;align-items:center;padding:4px 0;border-left:1px solid var(--rule)}
 .sugg-day:first-child{border-left:0}
@@ -331,8 +335,6 @@ button{cursor:pointer}
 .sess-main{display:flex;flex-direction:column;min-width:0}
 .sess-main b{font-size:14px;overflow-wrap:anywhere}
 .sess-meta{font-family:var(--mono);font-size:11px;color:var(--muted)}
-.sess-btns{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-.sess-btns .ghost{min-height:44px;flex:1 1 auto}
 .sheet-actions .solid{flex:1;padding:11px}
 .linkbtn{border:0;background:transparent;color:var(--flag);font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em}
 
@@ -397,3 +399,20 @@ button{cursor:pointer}
   body{background:#fff}.wrap{padding:0}.cols{grid-template-columns:1fr 240px}.grid{min-width:0}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* per-step frequency, in a closed fold-out on each suggestion card */
+.sugg-more{margin-top:8px}
+.sugg-more summary{display:flex;align-items:center;justify-content:space-between;min-height:44px;cursor:pointer;list-style:none;font-family:var(--mono);font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.sugg-more summary::-webkit-details-marker{display:none}
+.sugg-more summary::after{content:"+"}
+.sugg-more[open] summary::after{content:"\2212"}
+.sugg-freq{display:grid;grid-template-columns:8px minmax(0,1fr) auto;column-gap:10px;align-items:center;padding:2px 0;font-size:12px}
+/* saved session rows: same step list as a card, a rename-in-place name, small secondary controls under the Log button */
+.sess-name{display:flex;align-items:center;width:100%;min-height:44px;padding:0;border:0;background:none;font:inherit;font-weight:700;font-size:14px;text-align:left;cursor:text;overflow-wrap:anywhere}
+.sess-rename-in{display:block;width:100%;min-height:44px;box-sizing:border-box;padding:0 8px;border:1px solid var(--ink);border-radius:0;background:var(--paper);font:inherit;font-weight:700;font-size:14px}
+.sessrow>.sess-meta{display:block;margin-bottom:6px}
+.sess-small{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px}
+.sess-small .ghost{min-height:44px;flex:1 1 auto}
+.sess-del{display:inline-flex;align-items:center;justify-content:center;flex:0 0 44px;width:44px;height:44px;padding:0;border:0;background:transparent;color:var(--muted);cursor:pointer}
+.sess-del:hover{color:var(--flag)}
+.sess-del.armed{flex:0 0 auto;width:auto;min-width:88px;padding:0 12px;border:1px solid var(--flag);color:var(--flag);font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}

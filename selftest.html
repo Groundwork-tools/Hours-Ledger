@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1486;
+var EXPECTED_MIN_ROWS=1545;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -4294,29 +4294,49 @@ function runSessionTests(){
         check("S10 ...as one undo step",h.undoDepth()===depth0+1);
         check("S10 ...and the list shows it",/Gym morning/.test(d.getElementById("sessList").textContent));
         var row=q('.sessrow[data-id="'+ids[0]+'"]');
-        check("S10 each row has Apply and Delete buttons",!!row&&!!row.querySelector(".sess-apply")&&!!row.querySelector(".sess-del"));
-        row.querySelector(".sess-apply").click();
-        check("S10 Apply opens the apply panel",!d.getElementById("sessApply").hidden);
-        var depth1=h.undoDepth();
-        d.getElementById("sessApplyGo").click();
-        check("S10 applying with no date chosen does nothing (no entries, no snapshot)",h.undoDepth()===depth1&&Object.keys(h.getState().entries).length===1);
-        setV("sessApplyDate","2026-04-06"); setV("sessApplyTime","09:00");
-        check("S10 the preview says there is no overlap on an empty day",/no overlap/i.test(d.getElementById("sessApplyPreview").textContent),d.getElementById("sessApplyPreview").textContent);
-        h.putEntry("2026-04-06","Already there","seed-work",540,570,null);
-        setV("sessApplyTime","09:10");
-        check("S10 the preview names the overlap with existing entries before anything is applied",/overlap/i.test(d.getElementById("sessApplyPreview").textContent)&&!/no overlap/i.test(d.getElementById("sessApplyPreview").textContent),d.getElementById("sessApplyPreview").textContent);
-        var go=d.getElementById("sessApplyGo"), depth2=h.undoDepth();
+        /* The manual Apply panel is gone (2026-10-25). Every assertion that covered it is MOVED onto the Log today path, same scenario:
+           "each row has Apply and Delete" -> a Log today button and a trash icon, no Apply; "Apply opens the panel" -> there is no panel;
+           "applying with no date chosen does nothing" -> an emptied Other day field keeps the last valid date and logs nothing;
+           "preview: no overlap on an empty day" -> an empty day logs straight away; "preview names the overlap" -> the prompt names it and
+           logs nothing; "DOUBLE-SUBMIT" -> Log anyway twice logs once; "panel closed after applying" -> the sheet closes; "toast confirms +
+           Undo" -> the Logged toast with Undo. Delete is now two taps (arm, then confirm). */
+        var T="2026-04-06",T2="2026-04-07";
+        h.setTestNow(new Date(2026,3,6,12,0,0,0));
+        d.getElementById("sessClose").click(); d.getElementById("sessionsBtn").click();
+        row=q('.sessrow[data-id="'+ids[0]+'"]');
+        check("S10 each row has a Log today button and a trash icon, and NO Apply button or Apply panel",!!row&&!!row.querySelector(".sess-log")&&!!row.querySelector(".sess-del")&&!row.querySelector(".sess-apply")&&!d.getElementById("sessApply"));
+        check("S10 the Log today button shows the real times of the session ('Log today 06:00–07:15')",row.querySelector(".sess-log").textContent==="Log today 06:00–07:15",row.querySelector(".sess-log").textContent);
+        var depth1=h.undoDepth(), entriesN=Object.keys(h.getState().entries).length;
+        row.querySelector(".sess-od").click();
+        var od=q('.sessrow[data-id="'+ids[0]+'"] .sess-od-date'); od.value=""; od.dispatchEvent(new f.el.contentWindow.Event("input",{bubbles:true}));
+        var lb=q('.sessrow[data-id="'+ids[0]+'"] .sess-log');
+        check("S10 [was: applying with no date chosen] with Other day open and its date field EMPTIED the button keeps its last valid date, nothing is logged, no snapshot",/^\d{4}-\d{2}-\d{2}$/.test(lb.dataset.date)&&h.undoDepth()===depth1&&Object.keys(h.getState().entries).length===entriesN,lb.dataset.date);
+        od=q('.sessrow[data-id="'+ids[0]+'"] .sess-od-date'); od.value=T2; od.dispatchEvent(new f.el.contentWindow.Event("input",{bubbles:true}));
+        q('.sessrow[data-id="'+ids[0]+'"] .sess-log').click();
+        check("S10 [was: the preview says no overlap on an empty day] on an empty day Log logs straight away: no prompt, 2 entries on 2026-04-07, the sheet closes",dayEntries(h,T2).length===2&&!d.getElementById("sessScrim").classList.contains("on"),dayEntries(h,T2).length+" entries");
+        h.undo();
+        h.putEntry(T,"Already there","seed-work",390,420,null);
+        d.getElementById("sessionsBtn").click();
+        var depth2=h.undoDepth();
+        q('.sessrow[data-id="'+ids[0]+'"] .sess-log').click();
+        var pr=q('.sessrow[data-id="'+ids[0]+'"] .sess-confirm');
+        check("S10 [was: the preview names the overlap before anything is applied] the prompt names it ('Overlaps 1 entry, 30 min.') and nothing is logged yet",!!pr&&/Overlaps 1 entry, 30 min\./.test(pr.textContent)&&dayEntries(h,T).length===1&&h.undoDepth()===depth2,pr&&pr.textContent);
+        var go=pr.querySelector(".sess-confirm-go");
         go.click(); go.click();
-        check("S10 DOUBLE-SUBMIT: two rapid clicks on Apply apply the session exactly once (3 entries: 1 existing + 2 blocks)",
-          dayEntries(h,"2026-04-06").length===3&&h.undoDepth()===depth2+1,dayEntries(h,"2026-04-06").length+" entries, depth +"+(h.undoDepth()-depth2));
-        check("S10 after applying, the apply panel is closed again",d.getElementById("sessApply").hidden===true);
-        check("S10 a toast confirms and offers Undo",/applied/i.test(d.getElementById("toastText").textContent)&&!d.getElementById("toastUndo").hidden,d.getElementById("toastText").textContent);
+        check("S10 DOUBLE-SUBMIT: two rapid taps on Log anyway log the session exactly once (3 entries: 1 existing + 2 blocks), one undo step",
+          dayEntries(h,T).length===3&&h.undoDepth()===depth2+1,dayEntries(h,T).length+" entries, depth +"+(h.undoDepth()-depth2));
+        check("S10 [was: after applying, the apply panel is closed again] after logging, the Sessions sheet is closed",!d.getElementById("sessScrim").classList.contains("on"));
+        check("S10 a toast confirms ('Logged ...') and offers Undo",/logged/i.test(d.getElementById("toastText").textContent)&&!d.getElementById("toastUndo").hidden,d.getElementById("toastText").textContent);
+        d.getElementById("sessionsBtn").click();
         row=q('.sessrow[data-id="'+ids[0]+'"]');
         row.querySelector(".sess-del").click();
-        check("S10 Delete removes the session without a confirm dialog (it is undoable)",!h.getState().sessions[ids[0]]);
+        check("S10 Delete is TWO steps: the first tap only arms it ('Delete?'), the session is still there",!!h.getState().sessions[ids[0]]&&/Delete\?/.test(q('.sessrow[data-id="'+ids[0]+'"] .sess-del').textContent));
+        q('.sessrow[data-id="'+ids[0]+'"] .sess-del').click();
+        check("S10 the second tap removes the session without a confirm dialog (it is undoable)",!h.getState().sessions[ids[0]]);
         check("S10 ...and the toast offers Undo",/deleted/i.test(d.getElementById("toastText").textContent)&&!d.getElementById("toastUndo").hidden,d.getElementById("toastText").textContent);
         h.undo();
         check("S10 Undo brings the deleted session back",!!h.getState().sessions[ids[0]],names(h.getState()));
+        h.setTestNow(null);
         d.getElementById("sessClose").click();
         check("S10 Close closes the sheet",!d.getElementById("sessScrim").classList.contains("on"));
       });
@@ -4912,19 +4932,15 @@ function runSuggestionTests(){
         check("RS06 with the planted history the sheet offers at least one and at most 3 cards, the first the three-step package",cs.length>=1&&cs.length<=3&&/Get ready/.test(cs[0].textContent)&&/Bike/.test(cs[0].textContent)&&/Muay Thai/.test(cs[0].textContent),cs.length+" "+(cs[0]&&cs[0].textContent));
         var tx=cs[0]?cs[0].textContent:"";
         check("RS06 a card shows the EXACT clock time of every step (06:00 / 06:20 / 07:00 within the 3-minute jitter), the days it was seen, the weekday evidence and the entries a week",
-          /0(5:5\d|6:0\d)/.test(tx)&&/0(6:1\d|6:2\d|6:3\d)/.test(tx)&&/0(6:5\d|7:0\d)/.test(tx)&&/\d+ of \d+ days/.test(tx)&&/entries a week/.test(tx)&&!!cs[0].querySelector(".sugg-week"),tx);
+          /0(5:5\d|6:0\d)/.test(tx)&&/0(6:1\d|6:2\d|6:3\d)/.test(tx)&&/0(6:5\d|7:0\d)/.test(tx)&&/\d+ of \d+ days/.test(tx)&&/days a week/.test(tx)&&!!cs[0].querySelector(".sugg-week"),tx);
         check("RS06 the section says these are proposals and that nothing is logged",/nothing is logged/i.test(d.getElementById("sessSuggest").textContent));
         var entriesBefore=J(st.entries), d0=h.undoDepth();
         cs[0].querySelector(".sugg-create").click();
-        check("RS06 'Create session from this' opens a form pre-filled with the FIRST block's label as the name",!d.getElementById("sessSuggestForm").hidden&&d.getElementById("sessSuggestName").value==="Get ready",d.getElementById("sessSuggestName").value);
-        var sum=d.getElementById("sessSuggestSummary").textContent;
-        check("RS06 ...its summary lists every step with its time, says 3 blocks, logs nothing, sets no schedule",/Get ready/.test(sum)&&/Bike/.test(sum)&&/Muay Thai/.test(sum)&&/3 blocks/.test(sum)&&/logs nothing/.test(sum)&&/no schedule/.test(sum),sum);
-        check("RS06 ...nothing exists yet",Object.keys(st.sessions).length===0&&h.undoDepth()===d0);
-        d.getElementById("sessSuggestName").value="Muay Thai morning";
-        d.getElementById("sessSuggestGo").click(); d.getElementById("sessSuggestGo").click();
-        check("RS06 DOUBLE-SUBMIT: Save creates exactly one session with three blocks, one undo step, entries untouched",
-          Object.keys(st.sessions).length===1&&st.sessions[Object.keys(st.sessions)[0]].blocks.length===3&&h.undoDepth()===d0+1&&J(st.entries)===entriesBefore,Object.keys(st.sessions).length+" sessions, depth +"+(h.undoDepth()-d0));
-        check("RS06 the toast says it was created and that nothing was logged",/Muay Thai morning/.test(d.getElementById("toastText").textContent)&&/nothing was logged/.test(d.getElementById("toastText").textContent),d.getElementById("toastText").textContent);
+        var ids06=Object.keys(st.sessions);
+        check("RS06 'Create session' SAVES AT ONCE: one session with all three blocks and no schedule, named after the card (the first step's label), no confirm step",ids06.length===1&&st.sessions[ids06[0]].blocks.length===3&&st.sessions[ids06[0]].name==="Get ready"&&st.sessions[ids06[0]].schedule===null&&!d.getElementById("sessSuggestForm")&&!d.getElementById("sessSuggestGo"),J(ids06));
+        check("RS06 ... as exactly one undo step, entries untouched",h.undoDepth()===d0+1&&J(st.entries)===entriesBefore,"depth +"+(h.undoDepth()-d0));
+        check("RS06 the toast says it was created and that nothing was logged, and offers Undo",/Get ready/.test(d.getElementById("toastText").textContent)&&/nothing was logged/.test(d.getElementById("toastText").textContent)&&!d.getElementById("toastUndo").hidden,d.getElementById("toastText").textContent);
+        check("RS06 the new session shows up in the saved list, with its Log today button",!!d.querySelector('#sessList .sessrow[data-id="'+ids06[0]+'"] .sess-log'));
         check("RS06 the new session covers the package, so its card is gone",!Array.prototype.some.call(cards(f),function(c){ return /Get ready/.test(c.textContent)&&/Muay Thai/.test(c.textContent); }));
         h.undo();
         d.getElementById("sessClose").click(); openSheet(f);
@@ -5225,7 +5241,7 @@ function runSuggestionTests(){
         if(!c) return;
         var kids=Array.prototype.map.call(c.children,function(k){ return k.className; });
         var title=c.querySelector(".sugg-title"),steps=c.querySelector(".sugg-steps"),meta=c.querySelector(".sugg-meta"),week=c.querySelector(".sugg-week"),btns=c.querySelector(".sugg-btns");
-        check("RS17 the card's direct children are, in this order: title, steps, meta line, weekday strip, buttons",J(kids)===J(["sugg-title","sugg-steps","sugg-meta","sugg-week","sugg-btns"]),J(kids));
+        check("RS17 the card's direct children are, in this order: title, steps, meta line, weekday strip, the closed fold-out, buttons",J(kids)===J(["sugg-title","sugg-steps","sugg-meta","sugg-week","sugg-more","sugg-btns"]),J(kids));
         function before(a,b){ return !!a&&!!b&&!!(a.compareDocumentPosition(b)&4); }
         check("RS17 the buttons come AFTER the weekday strip, the strip after the meta line, the meta line after the steps, the steps after the title",before(title,steps)&&before(steps,meta)&&before(meta,week)&&before(week,btns));
         var cd=f.el.contentWindow.getComputedStyle(c);
@@ -5235,10 +5251,10 @@ function runSuggestionTests(){
         check("RS17 a step whose category differs from its label shows the category, muted, once ('Get ready' / Admin & errands)",rows[0]&&rows[0].querySelectorAll(".sugg-cat").length===1&&/Admin/.test(rows[0].querySelector(".sugg-cat").textContent));
         function noRepeat(r){ var l=r.querySelector(".sugg-label"),ln=l?l.firstChild&&l.firstChild.textContent:"",t=r.textContent; return ln&&t.indexOf(ln)===t.lastIndexOf(ln); }
         check("RS17 no step line contains its label (or category) twice",Array.prototype.every.call(rows,noRepeat),Array.prototype.map.call(rows,function(r){ return r.textContent; }).join(" | "));
-        check("RS17 the meta line is short plain text: 'N of M days' and 'about N entries a week', no weekday names",!!meta&&/^\d+ of \d+ days/.test(meta.textContent)&&/about [\d.]+ entries a week/.test(meta.textContent)&&!/Mon|Tue|Wed|Thu|Fri|Sat|Sun|\u00d7/.test(meta.textContent),meta&&meta.textContent);
-        var cells=week?week.querySelectorAll(".sugg-day"):[],counts=h.suggestPackages(h.getState(),"2026-09-25").shown[0].weekdayCounts,cw0=f.el.contentWindow;
+        check("RS17 the meta line is short plain text: 'N of M days' and how often the PATTERN repeats ('about N days a week'), no weekday names, no entries-a-week",!!meta&&/^\d+ of \d+ days/.test(meta.textContent)&&/about [\d.]+ days a week/.test(meta.textContent)&&!/entries a week/.test(meta.textContent)&&!/Mon|Tue|Wed|Thu|Fri|Sat|Sun|\u00d7/.test(meta.textContent),meta&&meta.textContent);
+        var cells=week?week.querySelectorAll(".sugg-day"):[],counts=(function(){ var tp=h.suggestPackages(h.getState(),"2026-09-25").shown[0],c=[0,0,0,0,0,0,0]; tp.dates.forEach(function(dt){ var q=dt.split("-"),ago=Math.round((new Date(2026,8,25)-new Date(+q[0],+q[1]-1,+q[2]))/86400000); if(ago>=0&&ago<56) c[(new Date(+q[0],+q[1]-1,+q[2]).getDay()+6)%7]++; }); return c; })(),cw0=f.el.contentWindow;
         check("RS17 the weekday strip has seven cells reading M T W T F S S",cells.length===7&&Array.prototype.map.call(cells,function(x){ return x.querySelector(".sugg-dl").textContent; }).join("")==="MTWTFSS",Array.prototype.map.call(cells,function(x){ return x.textContent; }).join("|"));
-        check("RS17 ...each cell shows that weekday's count (the package's weekdayCounts)",cells.length===7&&Array.prototype.every.call(cells,function(x,i){ return x.querySelector(".sugg-dn").textContent===String(counts[i]); }),Array.prototype.map.call(cells,function(x){ return x.querySelector(".sugg-dn").textContent; }).join(",")+" vs "+counts.join(","));
+        check("RS17 ...each cell shows that weekday's count over the SAME 56-day window as the rate (not the whole log)",cells.length===7&&Array.prototype.every.call(cells,function(x,i){ return x.querySelector(".sugg-dn").textContent===String(counts[i]); }),Array.prototype.map.call(cells,function(x){ return x.querySelector(".sugg-dn").textContent; }).join(",")+" vs "+counts.join(","));
         check("RS17 ...a day with no occurrences is marked zero and drawn MUTED (a different colour from a day with some)",cells.length===7&&Array.prototype.every.call(cells,function(x,i){ return x.classList.contains("zero")===(counts[i]===0); })&&(function(){ var z=Array.prototype.filter.call(cells,function(x){ return x.classList.contains("zero"); })[0],nz=Array.prototype.filter.call(cells,function(x){ return !x.classList.contains("zero"); })[0]; return !!z&&!!nz&&cw0.getComputedStyle(z.querySelector(".sugg-dn")).color!==cw0.getComputedStyle(nz.querySelector(".sugg-dn")).color; })());
         var sg=d.getElementById("sessSuggest");
         check("RS17 the section intro is one short line of text that still says nothing is logged (under 45 characters)",!!sg.querySelector(".hint")&&/nothing is logged/i.test(sg.querySelector(".hint").textContent)&&sg.querySelector(".hint").textContent.length<45,sg.querySelector(".hint")&&sg.querySelector(".hint").textContent);
@@ -5381,6 +5397,105 @@ function runSuggestionTests(){
         }
         h.setTestNow(null);
         document.body.removeChild(el);
+      });
+    }))
+
+    /* ---- RS20 (a): the card says how often the PATTERN repeats, from the ranking's own 56-day window ---- */
+    .then(scenario("RS20",function(){
+      return freshSandbox(true).then(function(f){
+        var h=setup(f,60,5),st=h.getState(),top=h.suggestPackages(st,"2026-09-25").shown[0];
+        openSheet(f);
+        var c=cards(f)[0],meta=c&&c.querySelector(".sugg-meta"),r=Math.round(top.rate*10)/10,rt=Number.isInteger(r)?String(r):r.toFixed(1);
+        check("RS20 the meta line is exactly 'N of M days · about R days a week' with R the ranking's own rate over the last 56 days ("+rt+")",!!meta&&meta.querySelector("span").textContent===top.count+" of "+top.anchorCount+" days · about "+rt+" days a week",meta&&meta.textContent);
+        check("RS20 ... no 'entries a week' anywhere on the card, and the weekday strip says what window it covers",!!c&&c.textContent.indexOf("entries a week")<0&&/Weekdays, last 8 weeks/.test(meta.textContent),meta&&meta.textContent);
+        h.setTestNow(null);
+      });
+    }))
+    .then(scenario("RS20b",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,st=h.getState(),en={};
+        dayList(60).forEach(function(dd){
+          var q=dd.date.split("-"),nd=isoOf(new Date(+q[0],+q[1]-1,+q[2]+1));
+          (en[dd.date]=en[dd.date]||[]).push(E("seed-sleep",1380,1440,"Sleep"));
+          (en[nd]=en[nd]||[]).push(E("seed-sleep",0,420,"Sleep"));
+        });
+        st.entries=en; h.persist(); h.setTestNow(nowAfter(62));
+        openSheet(f);
+        var c=cards(f)[0];
+        check("RS20b a package that runs past midnight counts NIGHTS ('about 7 nights a week'), a daytime one counts days",!!c&&/about [\d.]+ nights? a week/.test(c.querySelector(".sugg-meta").textContent),c&&c.querySelector(".sugg-meta").textContent);
+        h.setTestNow(null);
+      });
+    }))
+
+    /* ---- RS21 (b): per-step frequency in a closed fold-out; computed from the log over the same window, checked against an oracle ---- */
+    .then(scenario("RS21",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,st=h.getState(),en=build(60,5);
+        Object.keys(en).forEach(function(date){ if(date>="2026-09-10") en[date]=en[date].filter(function(e){ return e.cat!=="seed-training"; }); });
+        st.entries=en; h.persist(); h.setTestNow(nowAfter(59)); /* 2026-09-24, a Thursday: the 56th day back (07-31) is a planted Friday, so a window one day short is visible */
+        var top=h.suggestPackages(st,"2026-09-24").shown[0];
+        openSheet(f);
+        var c=cards(f)[0],det=c&&c.querySelector(".sugg-more");
+        check("RS21 PRECONDITION: the card has a fold-out and the package still has all three steps",!!det&&!!top&&top.blocks.length===3,top&&String(top.blocks.length));
+        check("RS21 the fold-out is CLOSED by default, its row is a tap target at least 44 px tall",!!det&&det.open===false&&parseFloat(f.el.contentWindow.getComputedStyle(det.querySelector("summary")).minHeight)>=44);
+        det.querySelector("summary").click();
+        var rows=Array.prototype.slice.call(det.querySelectorAll(".sugg-freq"));
+        function oracle(k){
+          var n=0,b=top.blocks[k],want=top.anchor+b.offset;
+          for(var a=0;a<56;a++){ var d0=new Date(2026,8,24-a),key=isoOf(d0);
+            if((en[key]||[]).some(function(e){ return e.cat===b.cat&&Math.abs(e.start-want)<=15; })) n++; }
+          return n;
+        }
+        var got=rows.map(function(r){ var m=r.textContent.match(/(\d+) of 56 days/); return m?+m[1]:-1; }),want=[0,1,2].map(oracle);
+        check("RS21 each step's count equals an independent count from the entries over the last 56 days ("+want.join(", ")+")",rows.length===3&&J(got)===J(want),J(got)+" vs "+J(want));
+        check("RS21 ... and they differ per step (the Bike was skipped on recent days, so it is lower than the others)",want[1]<want[0]&&want[1]<want[2]&&got[1]<got[0],J(got));
+        check("RS21 each row shows a rate ('about N a week') and its step's colour dot",rows.every(function(r){ return /about [\d.]+ a week/.test(r.textContent)&&!!r.querySelector(".sugg-dot"); }));
+        h.setTestNow(null);
+      });
+    }))
+
+    /* ---- RS22 (c): a small SQUARE dot before each step, in the step's category colour (grey: none / deleted) ---- */
+    .then(scenario("RS22",function(){
+      return freshSandbox(true).then(function(f){
+        var h=setup(f,60,5),st=h.getState(),cw=f.el.contentWindow;
+        function rgb(hex){ var n=parseInt(hex.slice(1),16); return "rgb("+(n>>16&255)+", "+(n>>8&255)+", "+(n&255)+")"; }
+        openSheet(f);
+        var c=cards(f)[0],dots=Array.prototype.slice.call(c.querySelectorAll(".sugg-steps .sugg-dot")),cols=["seed-admin","seed-training","seed-people"].map(function(id){ return rgb(st.categories.filter(function(x){ return x.id===id; })[0].color); });
+        check("RS22 every step has a dot in ITS category's colour (Admin, Training, People): "+cols.join(" / "),dots.length===3&&dots.every(function(d,i){ return cw.getComputedStyle(d).backgroundColor===cols[i]; }),dots.map(function(d){ return cw.getComputedStyle(d).backgroundColor; }).join(" / "));
+        check("RS22 the dots are SQUARE (no radius, width equals height, 8 px)",dots.length===3&&dots.every(function(d){ var cs=cw.getComputedStyle(d); return cs.borderTopLeftRadius==="0px"&&cs.width===cs.height&&cs.width==="8px"; }));
+        check("RS22 colour is never the only signal: the category name is still written on the step ('Admin & errands' beside 'Get ready')",/Admin/.test(c.querySelector(".sugg-step").textContent));
+        check("RS22 the step dots in the fold-out are the same colours",(function(){ c.querySelector(".sugg-more").open=true; var fd=Array.prototype.slice.call(c.querySelectorAll(".sugg-freq .sugg-dot")); return fd.length===3&&fd.every(function(d,i){ return cw.getComputedStyle(d).backgroundColor===cols[i]; }); })());
+        st.categories.filter(function(x){ return x.id==="seed-admin"; })[0].color="#112233";
+        h.render(); openSheet(f);
+        check("RS22 the dot follows the category's colour when it is changed (#112233)",cw.getComputedStyle(cards(f)[0].querySelector(".sugg-dot")).backgroundColor===rgb("#112233"));
+        h.setTestNow(null);
+      });
+    }))
+
+    /* ---- RS23 (6): Create session saves at once; a fast double-tap creates exactly one ---- */
+    .then(scenario("RS23",function(){
+      return freshSandbox(true).then(function(f){
+        var en={}; dayList(60).forEach(function(dd){ en[dd.date]=[]; });
+        var P=[[360,"seed-admin","seed-training"],[540,"seed-work","seed-studies"],[720,"seed-people","seed-drift"],[900,"seed-side-projects","seed-work"],[1080,"seed-studies","seed-admin"]];
+        P.forEach(function(p,i){ plant(en,40+i,p[0],[{cat:p[1],label:"A"+i,len:30},{cat:p[2],label:"B"+i,len:30}],ALLDAYS); });
+        var h=setup(f,60,0,en),d=f.d,st=h.getState();
+        openSheet(f);
+        var c0=cards(f)[0],second=cards(f)[1],d0=h.undoDepth(),firstTitle=c0.querySelector(".sugg-title").textContent;
+        var btn=c0.querySelector(".sugg-create");
+        btn.click(); btn.click();
+        cards(f)[0].querySelector(".sugg-create").click();   /* the card that moved up under the finger */
+        check("RS23 a FAST DOUBLE-TAP (the same button twice, then the card that moved up under it) creates exactly ONE session, one undo step",Object.keys(h.getState().sessions).length===1&&h.undoDepth()===d0+1,Object.keys(h.getState().sessions).length+" sessions, depth +"+(h.undoDepth()-d0));
+        var made=h.getState().sessions[Object.keys(h.getState().sessions)[0]];
+        check("RS23 it is named after the card (the first step's label '"+firstTitle+"'), has no schedule, and the sheet stays open",made.name===firstTitle&&made.schedule===null&&d.getElementById("sessScrim").classList.contains("on"),made.name);
+        check("RS23 the toast says it was created and that nothing was logged, with Undo",/nothing was logged/.test(d.getElementById("toastText").textContent)&&!d.getElementById("toastUndo").hidden);
+        check("RS23 the new session is in the saved list",d.querySelectorAll("#sessList .sessrow").length===1&&d.querySelector("#sessList .sess-name").textContent===firstTitle);
+        return new Promise(function(r){ setTimeout(r,900); }).then(function(){
+          cards(f)[0].querySelector(".sugg-create").click();
+          check("RS23 the guard is not permanent: a tap 900 ms later creates the next session (2 now)",Object.keys(h.getState().sessions).length===2,String(Object.keys(h.getState().sessions).length));
+          h.undo(); h.undo();
+          check("RS23 two Undos remove both sessions",Object.keys(h.getState().sessions).length===0);
+          h.setTestNow(null);
+        });
       });
     }))
 
@@ -5608,12 +5723,14 @@ function runLogTodayTests(){
         b.click();
         check("LT08 a tap logs ON THAT DAY and not today",rg(h,"2026-10-27")==="375-385,385-395,395-475"&&!h.getState().entries[D0],rg(h,"2026-10-27"));
         check("LT08 the toast names the day and the times",/Tue 27 Oct/.test(d.getElementById("toastText").textContent)&&/06:15–07:55/.test(d.getElementById("toastText").textContent),d.getElementById("toastText").textContent);
-        h.undo();
+        h.undo(); openIt(f);
+        rowOf(d,"mt").querySelector(".sess-od").click();
         rowOf(d,"mt").querySelector(".sess-od-today").click();
         check("LT08 'Today' puts it back: no date field, the button says Log today",!rowOf(d,"mt").querySelector(".sess-od-date")&&/^Log today/.test(rowOf(d,"mt").querySelector(".sess-log").textContent));
         rowOf(d,"mt").querySelector(".sess-od").click(); setV(f,rowOf(d,"mt").querySelector(".sess-od-date"),"2026-10-20");
         rowOf(d,"mt").querySelector(".sess-log").click();
         check("LT08 a PAST day works too",rg(h,"2026-10-20")==="375-385,385-395,395-475");
+        openIt(f);
         rowOf(d,"ns").querySelector(".sess-od").click();
         check("LT08 a session with NO stored start on another day starts at the day start (06:00): 'Log Sun 25 Oct 06:00–07:40'",/06:00–07:40$/.test(rowOf(d,"ns").querySelector(".sess-log").textContent),rowOf(d,"ns").querySelector(".sess-log").textContent);
         check("LT08 ... and with NO stored start TODAY it starts at the clock rounded to 5 minutes (12:00): 'Log today 12:00–13:40'",(function(){ rowOf(d,"ns").querySelector(".sess-od-today").click(); return /^Log today 12:00–13:40$/.test(rowOf(d,"ns").querySelector(".sess-log").textContent); })(),rowOf(d,"ns").querySelector(".sess-log").textContent);
@@ -5684,7 +5801,7 @@ function runLogTodayTests(){
         check("LT12 Log today AFTER the edit uses the new start and still asks about an overlap (07:20-07:50 is inside 07:10-08:50)",/Overlaps 1 entry, 30 min\./.test((rowOf(d,"mt").querySelector(".sess-confirm")||{}).textContent||"")&&ent(h,D0).length===1&&h.undoDepth()===d2,(rowOf(d,"mt").querySelector(".sess-confirm")||{}).textContent);
         rowOf(d,"mt").querySelector(".sess-confirm-go").click();
         check("LT12 Log anyway: the three blocks at 07:10-08:50 (430-440, 440-450, 450-530) plus the old entry, one undo step",rg(h,D0)==="430-440,440-450,440-470,450-530"&&h.undoDepth()===d2+1,rg(h,D0));
-        h.undo(); h.undo();
+        h.undo(); h.undo(); openIt(f);
         check("LT12 undoing the log and then the start edit restores 06:15 and the button",h.getState().sessions.mt.defaultStart===375&&rowOf(d,"mt").querySelector(".sess-log").textContent==="Log today 06:15–07:55",rowOf(d,"mt").querySelector(".sess-log").textContent);
         rowOf(d,"mt").querySelector(".sess-start").click(); setV(f,rowOf(d,"mt").querySelector(".sess-start-in"),"");
         rowOf(d,"mt").querySelector(".sess-start-save").click();
@@ -5713,8 +5830,11 @@ function runLogTodayTests(){
         function box(x){ return x.getBoundingClientRect(); }
         var b=row.querySelector(".sess-log");
         check("LT14 @390px the Log today button spans the row and is at least 44 px tall ("+Math.round(box(b).width)+" of "+Math.round(box(row).width)+" px, "+Math.round(box(b).height)+" px high), its label on one line",box(b).width>=box(row).width*0.95&&box(b).height>=44&&(function(){ var r=d.createRange(); r.selectNodeContents(b); return r.getClientRects().length===1; })());
-        var small=Array.prototype.slice.call(row.querySelectorAll(".sess-btns .ghost"));
-        check("LT14 @390px every secondary button is at least 44 px tall and inside the row ("+small.map(function(x){ return Math.round(box(x).height); }).join(",")+")",small.length>=4&&small.every(function(x){ return box(x).height>=44&&box(x).right<=box(row).right+1; }));
+        var small=Array.prototype.slice.call(row.querySelectorAll(".sess-small .ghost"));
+        var trash=row.querySelector(".sess-del");
+        check("LT14 @390px every small control is at least 44 px tall and inside the row: Other day, Start time, Schedule ("+small.map(function(x){ return Math.round(box(x).height); }).join(",")+") and the trash icon ("+Math.round(box(trash).width)+"x"+Math.round(box(trash).height)+", icon "+Math.round(box(trash.querySelector("svg")).width)+" px)",small.length===3&&small.every(function(x){ return box(x).height>=44&&box(x).right<=box(row).right+1; })&&Math.round(box(trash).width)===44&&Math.round(box(trash).height)===44&&Math.abs(box(trash.querySelector("svg")).width-16)<=2&&box(trash).right<=box(row).right+1);
+        var logB=row.querySelector(".sess-log"),smallBox=row.querySelector(".sess-small"),cs2=function(x){ return w.getComputedStyle(x); };
+        check("LT21 @390px Log today is a FULL-WIDTH DARK button ("+cs2(logB).backgroundColor+", "+Math.round(box(logB).width)+" of "+Math.round(box(row).width)+" px) and the small controls sit UNDER it, not dark",box(logB).width>=box(row).width*0.95&&cs2(logB).backgroundColor===cs2(d.getElementById("sessSaveGo")).backgroundColor&&box(smallBox).top>=box(logB).bottom-1&&small.every(function(x){ return cs2(x).backgroundColor==="rgba(0, 0, 0, 0)"; }));
         row.querySelector(".sess-od").click(); rowOf(d,"nt").querySelector(".sess-start").click();
         rowOf(d,"nt").querySelector(".sess-log").click();
         var row2=rowOf(d,"nt");
@@ -5723,6 +5843,145 @@ function runLogTodayTests(){
         check("LT14 @390px the prompt's two buttons are at least 44 px tall",conf.length===2&&conf.every(function(x){ return box(x).height>=44; }));
         h.setTestNow(null);
         document.body.removeChild(el);
+      });
+    }))
+    /* ---- LT16 (1): a successful log closes the sheet; Cancel, an open prompt and errors keep it open ---- */
+    .then(scenario("LT16",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,d=f.d,on=function(){ return d.getElementById("sessScrim").classList.contains("on"); };
+        h.setSession("mt","Muay Thai",B3,null,375);
+        h.setTestNow(at(2026,10,24,12,0));
+        openIt(f);
+        var depth=h.undoDepth();
+        rowOf(d,"mt").querySelector(".sess-log").click();
+        check("LT16 Log today closes the Sessions sheet",!on()&&ent(h,D0).length===3);
+        check("LT16 ... and the toast with Undo stays",d.getElementById("toast").classList.contains("on")&&!d.getElementById("toastUndo").hidden&&/Logged/.test(d.getElementById("toastText").textContent));
+        h.undo(); openIt(f);
+        check("LT16 reopened, the row is clean (no Other day field, no prompt)",!rowOf(d,"mt").querySelector(".sess-od-date")&&!rowOf(d,"mt").querySelector(".sess-confirm"));
+        h.putEntry(D0,"Already","seed-work",390,420,null);
+        openIt(f);
+        rowOf(d,"mt").querySelector(".sess-log").click();
+        check("LT16 while the overlap prompt is showing the sheet STAYS OPEN",on()&&!!rowOf(d,"mt").querySelector(".sess-confirm"));
+        rowOf(d,"mt").querySelector(".sess-confirm-no").click();
+        check("LT16 Cancel keeps it open",on()&&!rowOf(d,"mt").querySelector(".sess-confirm"));
+        rowOf(d,"mt").querySelector(".sess-log").click();
+        rowOf(d,"mt").querySelector(".sess-confirm-go").click();
+        check("LT16 Log anyway closes it",!on()&&ent(h,D0).length===4);
+        h.undo(); openIt(f);
+        rowOf(d,"mt").querySelector(".sess-od").click(); setV(f,rowOf(d,"mt").querySelector(".sess-od-date"),"2026-10-30");
+        rowOf(d,"mt").querySelector(".sess-log").click();
+        check("LT16 logging through Other day closes it too",!on()&&rg(h,"2026-10-30")==="375-385,385-395,395-475");
+        h.undo(); openIt(f);
+        check("LT16 the Other day field was reset by that log (a reopened sheet is back on today)",!rowOf(d,"mt").querySelector(".sess-od-date")&&/^Log today/.test(rowOf(d,"mt").querySelector(".sess-log").textContent));
+        h.setTestNow(null);
+      });
+    }))
+
+    /* ---- LT17 (2): a small trash icon; the delete is two taps, resets by itself, no browser dialog ---- */
+    .then(scenario("LT17",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,d=f.d,w=f.el.contentWindow,confirms=0;
+        w.confirm=function(){ confirms++; return true; };
+        h.setSession("a","Alpha",B3,null,375); h.setSession("b","Beta",B3,null,400);
+        h.setTestNow(at(2026,10,24,12,0));
+        openIt(f);
+        var depth=h.undoDepth(),A=function(){ return rowOf(d,"a").querySelector(".sess-del"); },B=function(){ return rowOf(d,"b").querySelector(".sess-del"); };
+        check("LT17 the delete control is a small icon (an svg), not a labelled button",!!A().querySelector("svg")&&A().textContent.trim()==="",A().innerHTML.slice(0,40));
+        A().click();
+        check("LT17 the FIRST tap only arms it: it reads 'Delete?', the session is still there, no snapshot",/Delete\?/.test(A().textContent)&&!!h.getState().sessions.a&&h.undoDepth()===depth);
+        B().dispatchEvent(new w.Event("pointerdown",{bubbles:true})); B().click();
+        check("LT17 arming another row disarms the first (only one armed at a time) and does not delete it",!/Delete\?/.test(A().textContent)&&/Delete\?/.test(B().textContent)&&!!h.getState().sessions.a&&!!h.getState().sessions.b);
+        d.querySelector("#sessScrim .sheet h2").dispatchEvent(new w.Event("pointerdown",{bubbles:true}));
+        check("LT17 a tap elsewhere puts it back to the icon and deletes nothing",!/Delete\?/.test(B().textContent)&&!!h.getState().sessions.b);
+        B().click(); B().click();
+        check("LT17 the SECOND tap deletes the session: one undo step, no browser confirm dialog",!h.getState().sessions.b&&h.undoDepth()===depth+1&&confirms===0,"confirm calls "+confirms);
+        check("LT17 ... the toast says Deleted and offers Undo; the other row is untouched",/Deleted/.test(d.getElementById("toastText").textContent)&&!d.getElementById("toastUndo").hidden&&!!h.getState().sessions.a);
+        h.undo();
+        check("LT17 Undo brings it back",!!h.getState().sessions.b);
+        A().click();
+        return new Promise(function(r){ setTimeout(r,4600); }).then(function(){
+          check("LT17 left alone for a few seconds the armed button resets by itself",!/Delete\?/.test(A().textContent)&&!!h.getState().sessions.a);
+          A().click(); /* arms again (it was reset), it does not delete */
+          check("LT17 after the reset the first tap arms again instead of deleting",/Delete\?/.test(A().textContent)&&!!h.getState().sessions.a);
+          h.setTestNow(null);
+        });
+      });
+    }))
+
+    /* ---- LT18 (3)+(4): a saved row shows the same step list as a card, at the start Log today would use; the old Apply is gone ---- */
+    .then(scenario("LT18",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,d=f.d,cw=f.el.contentWindow;
+        function rgb(hex){ var n=parseInt(hex.slice(1),16); return "rgb("+(n>>16&255)+", "+(n>>8&255)+", "+(n&255)+")"; }
+        var cat=function(id){ return h.getState().categories.filter(function(x){ return x.id===id; })[0].color; };
+        h.setSession("mt","Muay Thai",B3,null,375);
+        h.setSession("nt","Bedtime",NIGHT,null,1290);
+        h.setSession("odd","Odd one",[{offset:0,duration:20,label:"Break",cat:null},{offset:20,duration:30,label:"Gone",cat:"deleted-cat"}],null);
+        h.setTestNow(at(2026,10,24,12,0));
+        openIt(f);
+        var r=rowOf(d,"mt"),rows=Array.prototype.slice.call(r.querySelectorAll(".sugg-step"));
+        check("LT18 a saved row lists its steps like a card: time range at the start Log today uses, label, duration",rows.length===3&&/^06:15–06:25/.test(rows[0].textContent)&&/Get ready/.test(rows[0].textContent)&&/10m/.test(rows[0].textContent)&&/^06:35–07:55/.test(rows[2].textContent)&&/1h 20m/.test(rows[2].textContent),rows.map(function(x){ return x.textContent; }).join(" | "));
+        check("LT18 ... each step has a square dot in its category's colour",rows.every(function(x,i){ return cw.getComputedStyle(x.querySelector(".sugg-dot")).backgroundColor===rgb(cat(["seed-admin","seed-training","seed-people"][i])); }));
+        check("LT18 ... and the row shows the session's start time ('starts 06:15')",/starts 06:15/.test(r.querySelector(".sess-meta").textContent),r.querySelector(".sess-meta").textContent);
+        check("LT18 a night shows '(next day)' under its range",/\(next day\)/.test(rowOf(d,"nt").querySelector(".sugg-step").textContent)&&/21:30–06:25/.test(rowOf(d,"nt").querySelector(".sugg-step").textContent));
+        var odd=Array.prototype.slice.call(rowOf(d,"odd").querySelectorAll(".sugg-dot"));
+        check("LT18 an uncategorised block and a block whose category was deleted get a GREY dot (#9AA5A0) and the words 'No category'",odd.length===2&&odd.every(function(x){ return cw.getComputedStyle(x).backgroundColor==="rgb(154, 165, 160)"; })&&/No category/.test(rowOf(d,"odd").textContent),odd.map(function(x){ return cw.getComputedStyle(x).backgroundColor; }).join(" / "));
+        check("LT18 a session with no stored start shows the start Log today would use ('starts 12:00 (now)') and its steps start there",/starts 12:00 \(now\)/.test(rowOf(d,"odd").querySelector(".sess-meta").textContent)&&/^12:00–12:20/.test(rowOf(d,"odd").querySelector(".sugg-step").textContent),rowOf(d,"odd").querySelector(".sess-meta").textContent);
+        rowOf(d,"mt").querySelector(".sess-start").click(); setV(f,rowOf(d,"mt").querySelector(".sess-start-in"),"07:10");
+        rowOf(d,"mt").querySelector(".sess-start-save").click();
+        check("LT18 changing the start time moves the steps with it (07:10–07:20 first)",/^07:10–07:20/.test(rowOf(d,"mt").querySelector(".sugg-step").textContent)&&/starts 07:10/.test(rowOf(d,"mt").querySelector(".sess-meta").textContent),rowOf(d,"mt").querySelector(".sugg-step").textContent);
+        h.setTestNow(at(2026,10,24,13,0)); h.refreshLogButtons();
+        check("LT18 the steps of a session with no stored start follow the clock when the buttons refresh (13:00 now)",/^13:00\u201313:20/.test(rowOf(d,"odd").querySelector(".sugg-step").textContent)&&/starts 13:00 \(now\)/.test(rowOf(d,"odd").querySelector(".sess-meta").textContent),rowOf(d,"odd").querySelector(".sugg-step").textContent);
+        rowOf(d,"mt").querySelector(".sess-od").click();
+        check("LT18 and on Other day the steps use that day's start (day start 06:00 only for a session with no start; this one keeps 07:10)",/^07:10/.test(rowOf(d,"mt").querySelector(".sugg-step").textContent));
+        check("LT18 the old manual Apply is gone: no panel, no button, no code",!d.getElementById("sessApply")&&!d.querySelector(".sess-apply"));
+        h.setTestNow(null);
+      });
+    }))
+    .then(function(){
+      return Promise.all([fetch("app.js?v="+Date.now()).then(function(r){ return r.text(); }),fetch("index.html?v="+Date.now()).then(function(r){ return r.text(); })]).then(function(t){
+        var left=["sessApply","closeSessApply","sess-apply","sessSuggestForm","sessSuggestGo","suggestPending"].filter(function(n){ return t[0].indexOf(n)>=0||t[1].indexOf(n)>=0; });
+        check("LT19 no dead code is left from the old Apply panel or the suggestion confirm form (app.js and index.html)",left.length===0,J(left));
+      });
+    })
+
+    /* ---- LT20 (5): click the name to rename it, inline ---- */
+    .then(scenario("LT20",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,d=f.d,w=f.el.contentWindow;
+        h.setSession("a","Alpha",B3,null,375); h.setSessionSchedule("a",[4],360);
+        h.setSession("b","Beta",B3,null,400);
+        var cs=h.getState(); cs.deletedEntries=cs.deletedEntries||{}; cs.deletedCategories=cs.deletedCategories||{}; cs.deletedSessions=cs.deletedSessions||{};
+        h.setTestNow(at(2026,10,24,12,0));
+        openIt(f);
+        var nm=function(id){ return rowOf(d,id).querySelector(".sess-name"); },inp=function(id){ return rowOf(d,id).querySelector(".sess-rename-in"); };
+        check("LT20 the name is a click target (not an input) until clicked",!!nm("a")&&!inp("a")&&nm("a").textContent==="Alpha");
+        nm("a").click();
+        check("LT20 a click turns it into a text field holding the current name",!!inp("a")&&inp("a").value==="Alpha"&&!nm("a"));
+        var depth=h.undoDepth(),old=h.getState().sessions.a.updatedAt;
+        inp("a").value="Alpha renamed"; inp("a").dispatchEvent(new w.KeyboardEvent("keydown",{key:"Enter",bubbles:true}));
+        var r=h.getState().sessions.a;
+        check("LT20 Enter saves: the new name, ONE undo step, the field is gone",r.name==="Alpha renamed"&&h.undoDepth()===depth+1&&!inp("a")&&nm("a").textContent==="Alpha renamed",r.name+" depth +"+(h.undoDepth()-depth));
+        check("LT20 a rename KEEPS defaultStart (375) and the schedule (Fri 06:00)",r.defaultStart===375&&!!r.schedule&&r.schedule.start===360&&J(r.schedule.weekdays)==="[4]",J(r));
+        check("LT20 a rename gets a fresh sync stamp (updatedAt moved, updatedBy this device)",!!r.updatedAt&&r.updatedAt!==old&&!!r.updatedBy,old+" -> "+r.updatedAt);
+        check("LT20 the toast offers Undo and Undo restores the old name, start and schedule",(function(){ h.undo(); var q=h.getState().sessions.a; return q.name==="Alpha"&&q.defaultStart===375&&!!q.schedule; })());
+        openIt(f);
+        var d2=h.undoDepth(); nm("a").click(); inp("a").value="Second"; var held=inp("a");
+        held.dispatchEvent(new w.KeyboardEvent("keydown",{key:"Enter",bubbles:true}));
+        held.dispatchEvent(new w.FocusEvent("focusout",{bubbles:true}));   /* the blur that taking the field out of the page can cause */
+        check("LT20 Enter followed by the blur it causes saves ONCE (exactly one snapshot)",h.getState().sessions.a.name==="Second"&&h.undoDepth()===d2+1,String(h.undoDepth()-d2));
+        nm("b").click(); var depthB=h.undoDepth(); inp("b").value="Beta two";
+        inp("b").dispatchEvent(new w.FocusEvent("focusout",{bubbles:true}));
+        check("LT20 leaving the field saves it",h.getState().sessions.b.name==="Beta two"&&h.undoDepth()===depthB+1);
+        nm("b").click(); var depthE=h.undoDepth(); inp("b").value="Nope";
+        inp("b").dispatchEvent(new w.KeyboardEvent("keydown",{key:"Escape",bubbles:true}));
+        inp("b")&&inp("b").dispatchEvent(new w.FocusEvent("focusout",{bubbles:true}));
+        check("LT20 Escape cancels: the name is unchanged, no snapshot, the field is gone",h.getState().sessions.b.name==="Beta two"&&h.undoDepth()===depthE&&!inp("b"),h.getState().sessions.b.name);
+        nm("b").click(); inp("b").value="   "; inp("b").dispatchEvent(new w.KeyboardEvent("keydown",{key:"Enter",bubbles:true}));
+        check("LT20 an EMPTY name reverts: unchanged, no snapshot",h.getState().sessions.b.name==="Beta two"&&h.undoDepth()===depthE&&nm("b").textContent==="Beta two");
+        nm("b").click(); inp("b").value="Beta two"; inp("b").dispatchEvent(new w.KeyboardEvent("keydown",{key:"Enter",bubbles:true}));
+        check("LT20 saving the same name changes nothing and takes no snapshot",h.undoDepth()===depthE);
+        h.setTestNow(null);
       });
     }))
     .then(function(){ return results; });
