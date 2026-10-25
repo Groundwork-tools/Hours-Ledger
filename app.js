@@ -705,7 +705,10 @@ function logSupersededHighlights(localFlat,remoteFlat,mergedFlat,deviceId){
    Category ids inside blocks are remapped wherever entries' are: dedupeCategoriesByName and
    doDeleteCategory with a target - otherwise a block orphans on a dead id. */
 var SESSION_NAME_MAX=60, SESSION_MAX_BLOCKS=40, SESSION_MAX_OFFSET=2879, SESSION_MAX_DURATION=1439;
-var SESSION_FIELDS=["name","blocks","schedule","deleted","deletedAt"];
+var SESSION_FIELDS=["name","blocks","schedule","defaultStart","deleted","deletedAt"];
+/* defaultStart: the session's typical start, minutes from midnight (an integer 0..1439) or null = unknown. Optional and
+   additive (CLAUDE.md, "Log today"): a missing value reads as unknown; nothing is migrated or rewritten. */
+function validStart(x){ return Number.isInteger(x)&&x>=0&&x<=1439; }
 function isMapObj(x){ return !!x&&typeof x==="object"&&!Array.isArray(x); }
 function cleanBlock(b){
   if(!isMapObj(b)) return null;
@@ -749,6 +752,8 @@ function migrateSessions(s){
       return;
     }
     r.id=id; r.blocks=blocks; r.schedule=cleanSchedule(r.schedule);
+    if("defaultStart" in r&&r.defaultStart!==null&&!validStart(r.defaultStart)) console.log("[session] dropped an invalid defaultStart on "+id+": "+JSON.stringify(r.defaultStart));
+    r.defaultStart=validStart(r.defaultStart)?r.defaultStart:null;
   });
   if(s.deletedSessions!==undefined){
     if(!isMapObj(s.deletedSessions)) s.deletedSessions={};
@@ -760,11 +765,13 @@ function migrateSessions(s){
 }
 /* create or replace one session (the edit primitive). Returns the stored record, or null when the
    name or blocks are unusable - nothing is stored then. The CALLER takes the snapshot. */
-function setSession(id,name,blocks,schedule){
+function setSession(id,name,blocks,schedule,defaultStart){
   var nm=normalizeSessionName(name),bl=cleanBlocks(blocks);
   if(!nm||!bl.length||bl.length>SESSION_MAX_BLOCKS) return null;
   if(!state.sessions) state.sessions={};
-  var rec={id:id,name:nm,blocks:bl,schedule:cleanSchedule(schedule)};
+  /* defaultStart: undefined = keep what the session has (a rename or a schedule change must not drop it), null = clear, a number = set */
+  var prev=state.sessions[id],ds=defaultStart===undefined?(prev&&validStart(prev.defaultStart)?prev.defaultStart:null):(validStart(defaultStart)?defaultStart:null);
+  var rec={id:id,name:nm,blocks:bl,schedule:cleanSchedule(schedule),defaultStart:ds};
   if(state.deletedEntries){ rec.updatedAt=nowIso(); rec.updatedBy=getDeviceId(); }
   state.sessions[id]=rec;
   /* a live record and its own tombstone must never coexist - see flattenSessions */
@@ -789,13 +796,13 @@ function flattenSessions(s){
   Object.keys(liveMap).forEach(function(id){
     var r=liveMap[id],t=deadMap[id];
     if(t&&sessionTombstoneWins(r,t)) return;
-    out.push({id:id,name:r.name,blocks:JSON.stringify(cleanBlocks(r.blocks)),schedule:JSON.stringify(cleanSchedule(r.schedule)),
+    out.push({id:id,name:r.name,blocks:JSON.stringify(cleanBlocks(r.blocks)),schedule:JSON.stringify(cleanSchedule(r.schedule)),defaultStart:validStart(r.defaultStart)?r.defaultStart:null,
       updatedAt:r.updatedAt,updatedBy:r.updatedBy,deleted:false,deletedAt:null});
   });
   Object.keys(deadMap).forEach(function(id){
     var r=liveMap[id],t=deadMap[id];
     if(r&&!sessionTombstoneWins(r,t)) return;
-    out.push({id:id,name:null,blocks:null,schedule:null,updatedAt:t.updatedAt,updatedBy:t.updatedBy,deleted:true,deletedAt:t.deletedAt});
+    out.push({id:id,name:null,blocks:null,schedule:null,defaultStart:null,updatedAt:t.updatedAt,updatedBy:t.updatedBy,deleted:true,deletedAt:t.deletedAt});
   });
   return out;
 }
@@ -814,7 +821,7 @@ function unflattenSessions(flat){
       console.log("[session] ignored a synced session "+r.id+" that can't be read: "+JSON.stringify(r));
       return;
     }
-    sessions[r.id]={id:r.id,name:r.name,blocks:blocks,schedule:schedule,updatedAt:r.updatedAt,updatedBy:r.updatedBy};
+    sessions[r.id]={id:r.id,name:r.name,blocks:blocks,schedule:schedule,defaultStart:validStart(r.defaultStart)?r.defaultStart:null,updatedAt:r.updatedAt,updatedBy:r.updatedBy};
   });
   return {sessions:sessions,deletedSessions:deleted};
 }
@@ -1362,9 +1369,35 @@ function createSessionFromPackage(pkg,name){
   if(!nm) return null;
   snapshot('create session "'+nm+'" from a suggestion');
   var id=uid();
-  setSession(id,nm,bl,null);
+  setSession(id,nm,bl,null,validStart(pkg.anchor)?pkg.anchor:null);
   persist();
   return id;
+}
+
+/* ---- Log today: which start a session uses, and the start-time edit ---- */
+function roundedNowStart(){
+  var n=sessionNow(),m=Math.round((n.getHours()*60+n.getMinutes())/5)*5;
+  return m>1435?1435:m;
+}
+/* precedence: a declared schedule's start, then defaultStart, then (today) the current clock time rounded to 5 minutes,
+   (any other day) the start of the displayed day (settings.startHour). Clock minutes throughout, as the whole app. */
+function sessionStartFor(sess,dateStr){
+  if(sess.schedule&&validStart(sess.schedule.start)) return {start:sess.schedule.start,source:"schedule"};
+  if(validStart(sess.defaultStart)) return {start:sess.defaultStart,source:"default"};
+  if(dateStr===iso(sessionNow())) return {start:roundedNowStart(),source:"now"};
+  var sh=state.settings&&Number.isInteger(state.settings.startHour)?state.settings.startHour:6;
+  return {start:Math.min(1435,Math.max(0,sh*60)),source:"startHour"};
+}
+/* the start-time edit: one snapshot, one forward edit. minutes null clears (back to unknown). Returns whether anything changed. */
+function setSessionStart(id,minutes){
+  var r=state.sessions&&state.sessions[id];
+  if(!r) return false;
+  if(minutes!==null&&!validStart(minutes)) return false;
+  if((validStart(r.defaultStart)?r.defaultStart:null)===minutes) return false;
+  snapshot('start time of session "'+r.name+'"');
+  setSession(id,r.name,r.blocks,r.schedule,minutes);
+  persist();
+  return true;
 }
 
 /* ---- save as session / apply ---- */
@@ -1383,13 +1416,23 @@ function sessionBlocksFromRange(dateStr,from,to){
   var origin=list[0].s;
   return list.map(function(g){ return {offset:g.s-origin,duration:g.e-g.s,label:g.label||"",cat:g.cat||null}; });
 }
+/* where the first saved block starts (the clipped start of the earliest overlapping entry): the session's typical start */
+function sessionRangeOrigin(dateStr,from,to){
+  var best=null;
+  (state.entries[dateStr]||[]).forEach(function(e){
+    if(!(e.start<to&&e.end>from)) return;
+    var s0=Math.max(e.start,from);
+    if(best===null||s0<best) best=s0;
+  });
+  return validStart(best)?best:null;
+}
 function saveSessionFromRange(dateStr,from,to,name){
   if(!isIsoDate(dateStr)||!validMinute(from)||!validMinute(to)||from>=to) return null;
   var nm=normalizeSessionName(name),blocks=sessionBlocksFromRange(dateStr,from,to);
   if(!nm||!blocks.length||blocks.length>SESSION_MAX_BLOCKS) return null;
   snapshot('save session "'+nm+'"');
   var id=uid();
-  setSession(id,nm,blocks,null);
+  setSession(id,nm,blocks,null,sessionRangeOrigin(dateStr,from,to));
   persist();
   return id;
 }
@@ -1637,7 +1680,9 @@ function syncEngine(localStateIn,remoteFile,deviceId){
   logSupersededHighlights(localHighlightsFlat,remoteHighlightsFlat,mergedHighlightsFlat,deviceId);
 
   var localSessionsFlat=flattenSessions(localState);
-  var remoteSessionsFlat=remote.sessions||[];
+  /* a record written before defaultStart existed has no such key: read it as null (unknown), or it would differ from the
+     same session on this device (null) and be decided as a conflict for nothing */
+  var remoteSessionsFlat=(remote.sessions||[]).map(function(r){ return Object.assign({},r,{defaultStart:validStart(r.defaultStart)?r.defaultStart:null}); });
   var mergedSessionsFlat=mergeRecords(localSessionsFlat,remoteSessionsFlat,SESSION_FIELDS,deviceId);
   logSupersededSessions(localSessionsFlat,remoteSessionsFlat,mergedSessionsFlat,deviceId);
 
@@ -2622,7 +2667,7 @@ function undoDayHighlightsAsForwardEdits(snap,cur){
    (or a tombstone if the snapshot had none) with a fresh stamp from this device - unless the current
    record (or its tombstone) was last written by ANOTHER device: it is theirs, and an undo of something
    unrelated must not roll it back. Only runs once the device has sync fields. */
-function sessionSig(r){ return r?JSON.stringify([r.name,r.blocks,r.schedule||null]):null; }
+function sessionSig(r){ return r?JSON.stringify([r.name,r.blocks,r.schedule||null,validStart(r.defaultStart)?r.defaultStart:null]):null; }
 function undoSessionsAsForwardEdits(snap,cur){
   var dev=getDeviceId(),now=nowIso();
   var snapLive=snap.sessions||{},curLive=cur.sessions||{},curDead=cur.deletedSessions||{};
@@ -5033,17 +5078,42 @@ function renderSuggestions(){
         '<div class="sugg-btns"><button class="solid sugg-create">Create session</button><button class="ghost sugg-no">Not now</button></div></div>';
     }).join("");
 }
+/* ---- Log today (saved sessions only; detection never logs) ----
+   Each saved session has a primary button "Log today HH:MM-HH:MM" that shows the exact times it will log. The date is today;
+   "Other day" opens a date field (default tomorrow) and the button then reads "Log Tue 27 Oct HH:MM-HH:MM". A tap logs exactly
+   the date and start the button showed (data attributes), never a recomputation - except that a button that says today after
+   midnight refuses, refreshes and asks for another tap. State here is per-session and in memory only. */
+var sessOther={}, sessStartEditId=null, sessLogPending=null;
+function logTarget(id){
+  var r=state.sessions[id],today=iso(sessionNow()),o=sessOther[id];
+  var date=(o&&o.open&&isIsoDate(o.date))?o.date:today,st=sessionStartFor(r,date).start,end=(st+sessionSpan(r))%1440;
+  return {date:date,start:st,isToday:date===today,label:"Log "+(date===today?"today":dayLabel(date))+" "+toHM(st)+"\u2013"+toHM(end)};
+}
+function refreshLogButtons(){
+  var list=document.getElementById("sessList");
+  if(!list) return;
+  Array.prototype.forEach.call(list.querySelectorAll(".sessrow"),function(row){
+    var id=row.dataset.id,btn=row.querySelector(".sess-log");
+    if(!btn||!state.sessions[id]) return;
+    var t=logTarget(id);
+    btn.dataset.date=t.date; btn.dataset.start=String(t.start); btn.dataset.today=t.isToday?"1":"0"; btn.textContent=t.label;
+  });
+}
 function renderSessions(){
   renderSuggestions();
   var ids=Object.keys(state.sessions||{}).sort(function(a,b){
     return state.sessions[a].name.toLowerCase()<state.sessions[b].name.toLowerCase()?-1:1;
   });
   document.getElementById("sessList").innerHTML=ids.length?ids.map(function(id){
-    var r=state.sessions[id];
+    var r=state.sessions[id],t=logTarget(id),o=sessOther[id],pend=sessLogPending&&sessLogPending.id===id?sessLogPending:null;
     return '<div class="sessrow" data-id="'+escapeHtml(id)+'"><div class="sess-main"><b>'+escapeHtml(r.name)+'</b>'+
       '<span class="sess-meta">'+r.blocks.length+(r.blocks.length===1?" block":" blocks")+" &middot; "+dur(sessionSpan(r))+
-      (r.schedule?" &middot; "+r.schedule.weekdays.map(function(d){ return DAYNAMES[d]; }).join(", ")+" "+toHM(r.schedule.start):"")+'</span></div>'+
-      '<div class="sess-btns"><button class="ghost sess-sched">Schedule&hellip;</button><button class="ghost sess-apply">Apply&hellip;</button><button class="ghost sess-del">Delete</button></div></div>';
+      (r.schedule?" &middot; "+r.schedule.weekdays.map(function(d){ return DAYNAMES[d]; }).join(", ")+" "+toHM(r.schedule.start):(validStart(r.defaultStart)?" &middot; starts "+toHM(r.defaultStart):""))+'</span></div>'+
+      '<button class="solid sess-log" data-date="'+t.date+'" data-start="'+t.start+'" data-today="'+(t.isToday?"1":"0")+'">'+escapeHtml(t.label)+'</button>'+
+      (pend?'<div class="sess-confirm"><span>Overlaps '+pend.entries+(pend.entries===1?" entry":" entries")+", "+pend.minutes+' min.</span><button class="solid sess-confirm-go">Log anyway</button><button class="ghost sess-confirm-no">Cancel</button></div>':"")+
+      (o&&o.open?'<div class="sess-other"><label>Day <input type="date" class="sess-od-date" value="'+escapeHtml(o.date||"")+'"></label><button class="ghost sess-od-today">Today</button></div>':"")+
+      (sessStartEditId===id?'<div class="sess-startedit"><label>Start time <input type="time" class="sess-start-in" value="'+(validStart(r.defaultStart)?toHM(r.defaultStart):"")+'"></label><button class="solid sess-start-save">Save</button><button class="ghost sess-start-cancel">Cancel</button></div>':"")+
+      '<div class="sess-btns"><button class="ghost sess-od">Other day</button>'+(r.schedule?"":'<button class="ghost sess-start">Start time</button>')+'<button class="ghost sess-sched">Schedule&hellip;</button><button class="ghost sess-apply">Apply&hellip;</button><button class="ghost sess-del">Delete</button></div></div>';
   }).join(""):'<p class="emptyhint">No sessions yet. Log a stretch of time, then save it below.</p>';
 }
 /* render() calls this on every redraw (a sync landing, an undo): the list is read-only, so redrawing
@@ -5097,7 +5167,40 @@ document.getElementById("sessList").addEventListener("click",function(ev){
   if(!row) return;
   var id=row.dataset.id,r=state.sessions[id];
   if(!r) return;
-  if(ev.target.closest(".sess-sched")){
+  if(ev.target.closest(".sess-log")){
+    var btn=ev.target.closest(".sess-log"),lDate=btn.dataset.date,lStart=+btn.dataset.start;
+    if(!isIsoDate(lDate)||!validStart(lStart)) return;
+    /* a button that says "today" is only trusted while it IS today: after midnight, refresh it and ask for another tap */
+    if(btn.dataset.today==="1"&&lDate!==iso(sessionNow())){ refreshLogButtons(); showToast("The day changed - check the times and tap again.",false); return; }
+    var ov=sessionOverlap(r,lDate,lStart);
+    if(ov.entries>0){ sessLogPending={id:id,date:lDate,start:lStart,entries:ov.entries,minutes:ov.minutes}; renderSessions(); return; }
+    logSession(id,lDate,lStart);
+  }else if(ev.target.closest(".sess-confirm-go")){
+    var p=sessLogPending;
+    if(!p||p.id!==id) return;
+    sessLogPending=null;                /* taken out BEFORE logging: a second tap finds nothing to log */
+    logSession(p.id,p.date,p.start);
+  }else if(ev.target.closest(".sess-confirm-no")){
+    sessLogPending=null; renderSessions();
+  }else if(ev.target.closest(".sess-od")){
+    var cur=sessOther[id];
+    if(cur&&cur.open) sessOther[id]={open:false,date:null};
+    else sessOther[id]={open:true,date:iso(addDays(parseIso(iso(sessionNow())),1))};
+    sessLogPending=null; renderSessions();
+  }else if(ev.target.closest(".sess-od-today")){
+    sessOther[id]={open:false,date:null}; sessLogPending=null; renderSessions();
+  }else if(ev.target.closest(".sess-start-save")){
+    if(sessStartEditId!==id) return;
+    var inp=row.querySelector(".sess-start-in"),v=inp?inp.value:"";
+    sessStartEditId=null;               /* taken out first: a second tap on the same button does nothing */
+    var mins=v?fromHM(v):null,changed=setSessionStart(id,mins);
+    sessLogPending=null; renderSessions();
+    if(changed) showToast(mins===null?'Start time of "'+r.name+'" cleared':'Start time of "'+r.name+'" is now '+toHM(mins),true);
+  }else if(ev.target.closest(".sess-start-cancel")){
+    sessStartEditId=null; renderSessions();
+  }else if(ev.target.closest(".sess-start")){
+    sessStartEditId=id; sessLogPending=null; renderSessions();
+  }else if(ev.target.closest(".sess-sched")){
     closeSessApply();
     sessSchedId=id;
     document.getElementById("sessSchedTitle").textContent='Schedule "'+r.name+'"';
@@ -5123,6 +5226,26 @@ document.getElementById("sessList").addEventListener("click",function(ev){
     showToast('Deleted session "'+name+'"',true);
   }
 });
+document.getElementById("sessList").addEventListener("input",function(ev){
+  var inp=ev.target.closest&&ev.target.closest(".sess-od-date"),row=inp&&inp.closest(".sessrow");
+  if(!row) return;
+  var id=row.dataset.id;
+  if(!state.sessions[id]||!sessOther[id]) return;
+  if(isIsoDate(inp.value)){ sessOther[id].date=inp.value; sessLogPending=null; refreshLogButtons(); }
+});
+function logSession(id,date,start){
+  var sess=state.sessions[id];
+  if(!sess) return;
+  var end=(start+sessionSpan(sess))%1440,n=applySession(id,date,start);
+  render(); renderSessions();
+  if(n===null){ showToast("Could not log that session.",false); return; }
+  if(localSaveFailed){ showToast("Not saved on this device \u2014 storage is full",false); return; }
+  showToast('Logged "'+sess.name+'" \u2014 '+(date===iso(sessionNow())?"today":dayLabel(date))+" "+toHM(start)+"\u2013"+toHM(end)+" ("+n+(n===1?" entry":" entries")+") \u2014 adjust the entries if it ran differently",true);
+}
+if(!TEST_MODE){
+  setInterval(refreshLogButtons,60000);
+  document.addEventListener("visibilitychange",function(){ if(!document.hidden) refreshLogButtons(); });
+}
 document.getElementById("sessApplyDate").addEventListener("input",sessApplyPreview);
 document.getElementById("sessApplyTime").addEventListener("input",sessApplyPreview);
 document.getElementById("sessApplyCancel").addEventListener("click",closeSessApply);
@@ -5304,6 +5427,10 @@ if(TEST_MODE){
     clearDismissedSessionPromptsForTest:function(){ try{ localStorage.removeItem(SDKEY); }catch(e){} },
     renderSessionBanner:renderSessionBanner,
     setSession:setSession,
+    setSessionStart:setSessionStart,
+    sessionStartFor:sessionStartFor,
+    validStart:validStart,
+    refreshLogButtons:refreshLogButtons,
     removeSession:removeSession,
     deleteSession:deleteSession,
     saveSessionFromRange:saveSessionFromRange,

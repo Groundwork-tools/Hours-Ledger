@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1404;
+var EXPECTED_MIN_ROWS=1486;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -3013,7 +3013,8 @@ function runAsyncTests(H,d){
     .then(function(r){ return runSuggestionTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runNoiseFilterTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runMidnightFoldTests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runPackageTests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runPackageTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runLogTodayTests().then(function(more){ return r.concat(more); }); });
 }
 
 /* ---------------------------------------------------------------------
@@ -5391,6 +5392,339 @@ function runSuggestionTests(){
         check("RS11 the old one-block detector is gone from app.js: none of its functions or constants remain",left.length===0,J(left));
       });
     })
+    .then(function(){ return results; });
+}
+
+/* ---------------------------------------------------------------------
+   Log today (2026-10-25) - a primary "Log today HH:MM-HH:MM" button on every SAVED session, an "Other day" control, and a
+   one-field "Start time" edit. Decisions (owner): detection never logs; a session's typical start is a new optional field
+   defaultStart (minutes from midnight or null); precedence schedule.start > defaultStart > today: the clock rounded to 5
+   minutes / another day: settings.startHour; overlap with what is already logged asks first; one undo step; a tap logs
+   exactly the times on the button. Rows are tagged LT. HONEST NOTE: the code was written before these rows; the rows were then
+   run against the committed pre-feature code to watch them fail (result in OVERNIGHT-STATUS.md). */
+function runLogTodayTests(){
+  var results=[];
+  function check(name,cond,observed){ results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond}); }
+  function J(x){ return JSON.stringify(x); }
+  function scenario(tag,fn){ return function(){ return Promise.resolve().then(fn).catch(function(e){ check(tag+": scenario threw before finishing",false,String(e&&e.message||e)); }); }; }
+  var OLD="2026-04-20T09:00:00.000Z",NEW="2026-04-20T10:00:00.000Z";
+  var B3=[{offset:0,duration:10,label:"Get ready",cat:"seed-admin"},{offset:10,duration:10,label:"Bike",cat:"seed-training"},{offset:20,duration:80,label:"Muay Thai",cat:"seed-people"}];
+  var NIGHT=[{offset:0,duration:535,label:"Bedtime",cat:"seed-sleep"}];
+  function at(y,m,d,hh,mm,ss){ return new Date(y,m-1,d,hh,mm,ss||0,0); }
+  function rowOf(d,id){ return d.querySelector('.sessrow[data-id="'+id+'"]'); }
+  function openIt(f){ var g=f.d.getElementById("introGo"); if(g) g.click(); f.d.getElementById("sessionsBtn").click(); }
+  function ent(h,date){ return (h.getState().entries[date]||[]).slice().sort(function(a,b){ return a.start-b.start||a.end-b.end; }); }
+  function rg(h,date){ return ent(h,date).map(function(e){ return e.start+"-"+e.end; }).join(","); }
+  function setV(f,el,v){ el.value=v; el.dispatchEvent(new f.el.contentWindow.Event("input",{bubbles:true})); }
+  var D0="2026-10-24",D1="2026-10-25";
+
+  return Promise.resolve()
+
+    /* ---- LT01: setSession keeps defaultStart through a rename and a schedule change */
+    .then(scenario("LT01",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        h.setSession("a","A",B3,null,600);
+        check("LT01 a fifth argument sets defaultStart",h.getState().sessions.a.defaultStart===600,J(h.getState().sessions.a));
+        h.setSession("a","A renamed",B3,null);
+        check("LT01 a rename through the FOUR-argument call keeps it (the rebuild must not drop it)",h.getState().sessions.a.defaultStart===600&&h.getState().sessions.a.name==="A renamed",J(h.getState().sessions.a));
+        h.setSessionSchedule("a",[4],360);
+        check("LT01 a schedule change keeps it",h.getState().sessions.a.defaultStart===600&&!!h.getState().sessions.a.schedule,J(h.getState().sessions.a));
+        h.setSession("a","A",B3,null,null);
+        check("LT01 an explicit null clears it",h.getState().sessions.a.defaultStart===null);
+        h.setSession("a","A",B3,null,600); h.setSession("a","A",B3,null,1440);
+        check("LT01 an invalid value (1440) is stored as null, not as 1440 and not as the old 600",h.getState().sessions.a.defaultStart===null,J(h.getState().sessions.a.defaultStart));
+        h.setSession("b","B",B3,null);
+        check("LT01 a session created with no start reads null (unknown)",h.getState().sessions.b.defaultStart===null);
+      });
+    }))
+
+    /* ---- LT02: sessionSig covers defaultStart; undoing a start-time edit restores the old value; one snapshot each */
+    .then(scenario("LT02",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        h.setSession("a","A",B3,null);
+        var d0=h.undoDepth();
+        check("LT02 setSessionStart sets it, one undo step",h.setSessionStart("a",600)===true&&h.getState().sessions.a.defaultStart===600&&h.undoDepth()===d0+1);
+        check("LT02 changing it again is another single step",h.setSessionStart("a",700)===true&&h.undoDepth()===d0+2);
+        h.undo();
+        check("LT02 UNDO restores the OLD value (600), not a no-op",h.getState().sessions.a.defaultStart===600,String(h.getState().sessions.a&&h.getState().sessions.a.defaultStart));
+        h.undo();
+        check("LT02 undoing the first edit restores unknown (null)",h.getState().sessions.a&&h.getState().sessions.a.defaultStart===null,String(h.getState().sessions.a&&h.getState().sessions.a.defaultStart));
+        var d1=h.undoDepth();
+        check("LT02 setting the same value, an invalid one (1440, -1, 600.5) or clearing an unknown start takes no snapshot",
+          h.setSessionStart("a",null)===false&&h.setSessionStart("a",1440)===false&&h.setSessionStart("a",-1)===false&&h.setSessionStart("a",600.5)===false&&h.undoDepth()===d1);
+        /* a CONNECTED device (it has sync fields) undoes sessions as FORWARD edits, which compare sessionSig: if the signature
+           ignored defaultStart the start-time edit would look like "nothing changed" and the undo would silently do nothing */
+        var cs=h.getState(); cs.deletedEntries=cs.deletedEntries||{}; cs.deletedCategories=cs.deletedCategories||{}; cs.deletedSessions=cs.deletedSessions||{};
+        h.setSessionStart("a",600); h.setSessionStart("a",700);
+        h.undo();
+        check("LT02 on a device WITH sync fields (forward-edit undo) undoing a start-time edit restores 600 and stamps it as this device's edit",h.getState().sessions.a.defaultStart===600&&!!h.getState().sessions.a.updatedAt,J(h.getState().sessions.a));
+        h.undo();
+        check("LT02 ... and undoing the first one restores unknown",h.getState().sessions.a.defaultStart===null,J(h.getState().sessions.a));
+      });
+    }))
+
+    /* ---- LT03: sync */
+    .then(scenario("LT03",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H;
+        function st(rec){ var s=JSON.parse(J(h.getState())); s.sessions={x:rec}; s.deletedSessions={}; s.deletedEntries=s.deletedEntries||{}; s.deletedCategories=s.deletedCategories||{}; return s; }
+        var oldFmt={id:"x",name:"X",blocks:B3,schedule:null,updatedAt:OLD,updatedBy:"dev-A"};
+        var flat=h.flattenSessions(st(oldFmt))[0];
+        check("LT03 a session without the field flattens defaultStart to null, never undefined",flat.defaultStart===null&&("defaultStart" in flat),J(flat));
+        var tomb=h.flattenSessions((function(){ var s=st(oldFmt); s.deletedSessions={x:{updatedAt:NEW,updatedBy:"dev-B",deletedAt:NEW}}; return s; })());
+        check("LT03 a tombstone carries defaultStart null too",tomb.length===1&&tomb[0].deleted===true&&tomb[0].defaultStart===null,J(tomb));
+        var A=h.flattenSessions(st(oldFmt)),B=h.flattenSessions(st(Object.assign({},oldFmt,{updatedAt:NEW,updatedBy:"dev-B"})));
+        var m=h.mergeRecords(A,B,h.getSessionFields(),"dev-A");
+        check("LT03 two devices, BOTH without the field, merge as the same content: one record, the local stamp kept (no conflict decided)",m.length===1&&m[0].updatedAt===OLD,J(m));
+        var eng=h.syncEngine(st(oldFmt),{categories:[],entries:[],verdicts:[],closeouts:[],dayHighlights:[],sessions:[{id:"x",name:"X",blocks:J(B3),schedule:"null",updatedAt:NEW,updatedBy:"dev-B",deleted:false,deletedAt:null}]},"dev-A");
+        check("LT03 a remote record written BEFORE the field existed (no key) is read as null: same content as the local one, no conflict (local stamp kept)",eng.newLocalState.sessions.x.updatedAt===OLD,J(eng.newLocalState.sessions.x));
+        var withStart=st(Object.assign({},oldFmt,{defaultStart:600}));
+        var m2=h.mergeRecords(h.flattenSessions(withStart),h.flattenSessions(st(Object.assign({},oldFmt,{defaultStart:700,updatedAt:NEW,updatedBy:"dev-B"}))),h.getSessionFields(),"dev-A");
+        check("LT03 two devices that DISAGREE on defaultStart: it is a conflict and the newer write wins (700 arrives)",m2.length===1&&m2[0].defaultStart===700,J(m2));
+        check("LT03 the field is part of the content whitelist",h.getSessionFields().indexOf("defaultStart")>=0,J(h.getSessionFields()));
+        var back=h.unflattenSessions(m2);
+        check("LT03 it survives flatten -> merge -> unflatten as a number",back.sessions.x.defaultStart===700,J(back.sessions.x));
+      });
+    }))
+
+    /* ---- LT04: invalid values become null, boundaries survive */
+    .then(scenario("LT04",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,bad=[1440,-1,600.5,"600",NaN,Infinity,true,{},[600],0/0],okays=[0,1439,600];
+        var ok1=true,ok2=true,seen=[];
+        bad.forEach(function(v,i){
+          var s=JSON.parse(J(h.getState())); s.sessions={x:{id:"x",name:"X",blocks:B3,schedule:null,defaultStart:v,updatedAt:OLD,updatedBy:"dev-A"}};
+          if(typeof v==="number"&&!isFinite(v)) s.sessions.x.defaultStart=v; /* JSON would turn NaN/Infinity into null: set directly after */
+          h.migrateSessions(s);
+          if(s.sessions.x.defaultStart!==null){ ok1=false; seen.push("migrate:"+String(v)); }
+          var u=h.unflattenSessions([{id:"x",name:"X",blocks:J(B3),schedule:"null",defaultStart:v,updatedAt:OLD,updatedBy:"dev-A",deleted:false,deletedAt:null}]);
+          if(!u.sessions.x||u.sessions.x.defaultStart!==null){ ok2=false; seen.push("unflatten:"+String(v)); }
+        });
+        check("LT04 migrateSessions turns 1440, -1, 600.5, '600', NaN, Infinity, true, {}, [600] into null",ok1,J(seen));
+        check("LT04 unflatten does the same for a synced record",ok2,J(seen));
+        var good=okays.every(function(v){ var s={sessions:{x:{id:"x",name:"X",blocks:B3,schedule:null,defaultStart:v}}}; h.migrateSessions(s); var u=h.unflattenSessions([{id:"x",name:"X",blocks:J(B3),schedule:"null",defaultStart:v,updatedAt:OLD,updatedBy:"d",deleted:false,deletedAt:null}]); return s.sessions.x.defaultStart===v&&u.sessions.x.defaultStart===v; });
+        check("LT04 the edges 0 and 1439 (and 600) are kept as they are",good);
+        var s2={sessions:{x:{id:"x",name:"X",blocks:B3,schedule:null}}}; h.migrateSessions(s2);
+        check("LT04 a record with no key at all becomes null (unknown) on load",s2.sessions.x.defaultStart===null);
+      });
+    }))
+
+    /* ---- LT05: the two creation paths set it; detection itself logs nothing */
+    .then(scenario("LT05",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,st=h.getState();
+        var entriesBefore=J(st.entries);
+        var id=h.createSessionFromPackage({anchor:375,blocks:B3.map(function(b){ return Object.assign({catName:"x"},b); })},"From package");
+        check("LT05 Create session from a suggestion stores the package's start (anchor 375 = 06:15) and LOGS NOTHING",h.getState().sessions[id].defaultStart===375&&J(h.getState().entries)===entriesBefore,String(h.getState().sessions[id].defaultStart));
+        var id2=h.createSessionFromPackage({anchor:1500,blocks:B3},"Bad anchor");
+        check("LT05 an impossible anchor (1500) is stored as unknown",h.getState().sessions[id2].defaultStart===null);
+        h.putEntry(D0,"a","seed-admin",375,385,null); h.putEntry(D0,"b","seed-people",385,475,null);
+        var id3=h.saveSessionFromRange(D0,360,480,"From range");
+        check("LT05 Save logged time stores where the first saved block starts (06:15 = 375)",h.getState().sessions[id3].defaultStart===375,String(h.getState().sessions[id3].defaultStart));
+        var id4=h.saveSessionFromRange(D0,380,480,"From range clipped");
+        check("LT05 ...clipped to the range when the range begins inside the first entry (380)",h.getState().sessions[id4].defaultStart===380,String(h.getState().sessions[id4].defaultStart));
+      });
+    }))
+
+    /* ---- LT06: precedence and fallbacks */
+    .then(scenario("LT06",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,S=function(o){ return Object.assign({id:"z",name:"Z",blocks:B3,schedule:null,defaultStart:null},o); };
+        h.setTestNow(at(2026,10,24,14,32));
+        check("LT06 a declared schedule's start wins over defaultStart",h.sessionStartFor(S({schedule:{weekdays:[4],start:360,since:D0},defaultStart:600}),D0).start===360);
+        check("LT06 defaultStart wins over the fallback",h.sessionStartFor(S({defaultStart:600}),D0).start===600);
+        check("LT06 TODAY with no start: the clock rounded to 5 minutes (14:32 -> 14:30)",h.sessionStartFor(S({}),D0).start===870);
+        h.setTestNow(at(2026,10,24,14,33));
+        check("LT06 ... 14:33 -> 14:35",h.sessionStartFor(S({}),D0).start===875);
+        h.setTestNow(at(2026,10,24,23,58));
+        check("LT06 ... 23:58 never rounds past the day: 23:55",h.sessionStartFor(S({}),D0).start===1435);
+        h.setTestNow(at(2026,10,24,14,32));
+        check("LT06 ANOTHER day with no start: settings.startHour (06:00 by default)",h.sessionStartFor(S({}),D1).start===360);
+        h.getState().settings.startHour=8;
+        check("LT06 ... and it follows the setting (08:00)",h.sessionStartFor(S({}),D1).start===480);
+        check("LT06 another day does NOT use the clock",h.sessionStartFor(S({}),D1).start!==870);
+        h.setTestNow(null);
+      });
+    }))
+
+    /* ---- LT07 / LT09: the default date is today, the button shows the real times, a tap logs exactly those */
+    .then(scenario("LT07",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,d=f.d;
+        h.setSession("mt","Muay Thai",B3,null,375);
+        h.setSession("nt","Bedtime",NIGHT,null,1290);
+        h.setTestNow(at(2026,10,24,12,0));
+        openIt(f);
+        var b=rowOf(d,"mt").querySelector(".sess-log");
+        check("LT07 the button of a saved session says 'Log today' and the exact times: 'Log today 06:15–07:55'",!!b&&b.textContent==="Log today 06:15–07:55",b&&b.textContent);
+        check("LT07 its date is today (2026-10-24) and its start 375",b&&b.dataset.date===D0&&b.dataset.start==="375");
+        var bn=rowOf(d,"nt").querySelector(".sess-log");
+        check("LT07 a night that crosses midnight reads 'Log today 21:30–06:25'",bn&&bn.textContent==="Log today 21:30–06:25",bn&&bn.textContent);
+        var depth=h.undoDepth();
+        b.click();
+        check("LT09 a tap logs EXACTLY the times on the button: 06:15-06:25, 06:25-06:35, 06:35-07:55 (375-385, 385-395, 395-475)",rg(h,D0)==="375-385,385-395,395-475",rg(h,D0));
+        check("LT09 ... as one undo step",h.undoDepth()===depth+1);
+        var tx=d.getElementById("toastText").textContent;
+        check("LT09 the toast repeats the exact times, says 'today', and offers Undo",/06:15–07:55/.test(tx)&&/today/.test(tx)&&/adjust/.test(tx)&&!d.getElementById("toastUndo").hidden,tx);
+        rowOf(d,"nt").querySelector(".sess-log").click();
+        check("LT09 the night logs 21:30 to midnight today and 00:00-06:25 on the NEXT date",rg(h,D0).indexOf("1290-1440")>=0&&rg(h,D1)==="0-385",rg(h,D0)+" | "+rg(h,D1));
+        /* the default date follows the app's clock, across midnight and on the day the clocks changed (2026-10-25 in Europe) */
+        h.undo(); h.undo();
+        h.setTestNow(at(2026,10,25,2,30)); h.refreshLogButtons();
+        check("LT07 on 2026-10-25 02:30 (the clock-change night in Europe) the default date is 2026-10-25",rowOf(d,"mt").querySelector(".sess-log").dataset.date===D1,rowOf(d,"mt").querySelector(".sess-log").dataset.date);
+        h.setTestNow(at(2026,10,25,23,59,30)); h.refreshLogButtons();
+        var stale=rowOf(d,"mt").querySelector(".sess-log");
+        check("LT07 at 23:59:30 it is still 2026-10-25",stale.dataset.date===D1);
+        h.setTestNow(at(2026,10,26,0,0,30));
+        var dd=h.undoDepth();
+        stale.click();
+        check("LT07 a tap on the button that was rendered BEFORE midnight (it says today, the day has changed) logs nothing, takes no snapshot",Object.keys(h.getState().entries).length===0&&h.undoDepth()===dd,J(Object.keys(h.getState().entries)));
+        check("LT07 ... and the button now shows the NEW date 2026-10-26 (it asks for another tap)",rowOf(d,"mt").querySelector(".sess-log").dataset.date==="2026-10-26",rowOf(d,"mt").querySelector(".sess-log").dataset.date);
+        rowOf(d,"mt").querySelector(".sess-log").click();
+        check("LT07 the second tap logs on 2026-10-26, the new today",rg(h,"2026-10-26")==="375-385,385-395,395-475"&&!h.getState().entries[D1],rg(h,"2026-10-26"));
+        h.setTestNow(null);
+      });
+    }))
+
+    /* ---- LT08: Other day */
+    .then(scenario("LT08",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,d=f.d;
+        h.setSession("mt","Muay Thai",B3,null,375);
+        h.setSession("ns","No start",B3,null);
+        h.setTestNow(at(2026,10,24,12,0));
+        openIt(f);
+        check("LT08 PRECONDITION: no date field is on screen by default (no picker in the main path)",!rowOf(d,"mt").querySelector(".sess-od-date"));
+        rowOf(d,"mt").querySelector(".sess-od").click();
+        var inp=rowOf(d,"mt").querySelector(".sess-od-date");
+        check("LT08 'Other day' opens a date field, starting at tomorrow (2026-10-25)",!!inp&&inp.value===D1,inp&&inp.value);
+        var b=rowOf(d,"mt").querySelector(".sess-log");
+        check("LT08 the button now names that day with the same times: 'Log Sun 25 Oct 06:15–07:55'",/^Log Sun 25 Oct 06:15–07:55$/.test(b.textContent)&&b.dataset.date===D1,b.textContent);
+        inp=rowOf(d,"mt").querySelector(".sess-od-date"); setV(f,inp,"2026-10-27");
+        b=rowOf(d,"mt").querySelector(".sess-log");
+        check("LT08 changing the date changes the button's date (2026-10-27) without rebuilding the field",b.dataset.date==="2026-10-27"&&/Tue 27 Oct/.test(b.textContent)&&rowOf(d,"mt").querySelector(".sess-od-date")===inp,b.textContent);
+        b.click();
+        check("LT08 a tap logs ON THAT DAY and not today",rg(h,"2026-10-27")==="375-385,385-395,395-475"&&!h.getState().entries[D0],rg(h,"2026-10-27"));
+        check("LT08 the toast names the day and the times",/Tue 27 Oct/.test(d.getElementById("toastText").textContent)&&/06:15–07:55/.test(d.getElementById("toastText").textContent),d.getElementById("toastText").textContent);
+        h.undo();
+        rowOf(d,"mt").querySelector(".sess-od-today").click();
+        check("LT08 'Today' puts it back: no date field, the button says Log today",!rowOf(d,"mt").querySelector(".sess-od-date")&&/^Log today/.test(rowOf(d,"mt").querySelector(".sess-log").textContent));
+        rowOf(d,"mt").querySelector(".sess-od").click(); setV(f,rowOf(d,"mt").querySelector(".sess-od-date"),"2026-10-20");
+        rowOf(d,"mt").querySelector(".sess-log").click();
+        check("LT08 a PAST day works too",rg(h,"2026-10-20")==="375-385,385-395,395-475");
+        rowOf(d,"ns").querySelector(".sess-od").click();
+        check("LT08 a session with NO stored start on another day starts at the day start (06:00): 'Log Sun 25 Oct 06:00–07:40'",/06:00–07:40$/.test(rowOf(d,"ns").querySelector(".sess-log").textContent),rowOf(d,"ns").querySelector(".sess-log").textContent);
+        check("LT08 ... and with NO stored start TODAY it starts at the clock rounded to 5 minutes (12:00): 'Log today 12:00–13:40'",(function(){ rowOf(d,"ns").querySelector(".sess-od-today").click(); return /^Log today 12:00–13:40$/.test(rowOf(d,"ns").querySelector(".sess-log").textContent); })(),rowOf(d,"ns").querySelector(".sess-log").textContent);
+        h.setTestNow(null);
+      });
+    }))
+
+    /* ---- LT10 / LT11: overlap prompt, one undo step, double-tap */
+    .then(scenario("LT10",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,d=f.d;
+        h.setSession("mt","Muay Thai",B3,null,375);
+        h.setTestNow(at(2026,10,24,12,0));
+        h.putEntry(D0,"Already logged","seed-work",390,420,null);
+        openIt(f);
+        var depth=h.undoDepth();
+        rowOf(d,"mt").querySelector(".sess-log").click();
+        var c=rowOf(d,"mt").querySelector(".sess-confirm");
+        check("LT10 a log that overlaps something already logged does NOT log: it asks, 'Overlaps 1 entry, 30 min.'",!!c&&/Overlaps 1 entry, 30 min\./.test(c.textContent)&&ent(h,D0).length===1&&h.undoDepth()===depth,c&&c.textContent);
+        check("LT10 ... with Log anyway and Cancel",!!c&&!!c.querySelector(".sess-confirm-go")&&!!c.querySelector(".sess-confirm-no")&&/Log anyway/.test(c.querySelector(".sess-confirm-go").textContent));
+        c.querySelector(".sess-confirm-no").click();
+        check("LT10 Cancel leaves everything as it was: no prompt, one entry, no snapshot",!rowOf(d,"mt").querySelector(".sess-confirm")&&ent(h,D0).length===1&&h.undoDepth()===depth);
+        rowOf(d,"mt").querySelector(".sess-log").click();
+        var go=rowOf(d,"mt").querySelector(".sess-confirm-go");
+        go.click();
+        check("LT10 Log anyway logs the three blocks next to the existing entry (4 entries) as ONE undo step",ent(h,D0).length===4&&h.undoDepth()===depth+1,ent(h,D0).length+" entries, depth +"+(h.undoDepth()-depth));
+        check("LT10 the prompt is gone once it has been answered (no second Log anyway to tap)",!rowOf(d,"mt").querySelector(".sess-confirm-go"));
+        go.click();
+        check("LT11 DOUBLE-TAP: a second tap on the old Log anyway button does nothing",ent(h,D0).length===4&&h.undoDepth()===depth+1);
+        rowOf(d,"mt").querySelector(".sess-log").click();
+        check("LT11 a second tap on Log today after logging cannot log silently again: it asks (it now overlaps its own entries) and logs nothing",!!rowOf(d,"mt").querySelector(".sess-confirm")&&ent(h,D0).length===4&&h.undoDepth()===depth+1);
+        rowOf(d,"mt").querySelector(".sess-confirm-no").click();
+        h.undo();
+        check("LT10 one Undo removes everything that Log anyway added",ent(h,D0).length===1);
+        h.setTestNow(null);
+      });
+    }))
+
+    /* ---- LT12: the start-time edit, and Log today after it */
+    .then(scenario("LT12",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,d=f.d;
+        h.setSession("mt","Muay Thai",B3,null,375);
+        h.setSession("sc","Scheduled",B3,null);
+        h.setSessionSchedule("sc",[4],360);
+        h.setTestNow(at(2026,10,24,12,0));
+        openIt(f);
+        check("LT12 a session WITH a schedule has no Start time button (its start comes from the schedule)",!rowOf(d,"sc").querySelector(".sess-start")&&!!rowOf(d,"mt").querySelector(".sess-start"));
+        check("LT12 ... and its Log today uses the schedule's start (06:00)",/^Log today 06:00–07:40$/.test(rowOf(d,"sc").querySelector(".sess-log").textContent),rowOf(d,"sc").querySelector(".sess-log").textContent);
+        rowOf(d,"mt").querySelector(".sess-start").click();
+        var inp=rowOf(d,"mt").querySelector(".sess-start-in");
+        check("LT12 'Start time' opens one time field with the current start (06:15) and Save / Cancel",!!inp&&inp.value==="06:15"&&!!rowOf(d,"mt").querySelector(".sess-start-save")&&!!rowOf(d,"mt").querySelector(".sess-start-cancel"),inp&&inp.value);
+        var depth=h.undoDepth();
+        rowOf(d,"mt").querySelector(".sess-start-cancel").click();
+        check("LT12 Cancel changes nothing and takes no snapshot",!rowOf(d,"mt").querySelector(".sess-start-in")&&h.getState().sessions.mt.defaultStart===375&&h.undoDepth()===depth);
+        rowOf(d,"mt").querySelector(".sess-start").click();
+        setV(f,rowOf(d,"mt").querySelector(".sess-start-in"),"07:10");
+        var save=rowOf(d,"mt").querySelector(".sess-start-save");
+        save.click();
+        check("LT12 Save stores 07:10 (430) as ONE undo step",h.getState().sessions.mt.defaultStart===430&&h.undoDepth()===depth+1,String(h.getState().sessions.mt.defaultStart));
+        check("LT12 the button follows at once: 'Log today 07:10–08:50'",rowOf(d,"mt").querySelector(".sess-log").textContent==="Log today 07:10–08:50",rowOf(d,"mt").querySelector(".sess-log").textContent);
+        check("LT12 the toast says the new time and offers Undo",/07:10/.test(d.getElementById("toastText").textContent)&&!d.getElementById("toastUndo").hidden,d.getElementById("toastText").textContent);
+        check("LT12 DOUBLE-TAP: the editor is gone after Save (no second Save to tap) and the old button does nothing",!rowOf(d,"mt").querySelector(".sess-start-save")&&(save.click(),h.undoDepth()===depth+1));
+        /* Log today after the edit: the overlap prompt, one undo step, the new times */
+        h.putEntry(D0,"Already","seed-work",440,470,null);
+        var d2=h.undoDepth();
+        rowOf(d,"mt").querySelector(".sess-log").click();
+        check("LT12 Log today AFTER the edit uses the new start and still asks about an overlap (07:20-07:50 is inside 07:10-08:50)",/Overlaps 1 entry, 30 min\./.test((rowOf(d,"mt").querySelector(".sess-confirm")||{}).textContent||"")&&ent(h,D0).length===1&&h.undoDepth()===d2,(rowOf(d,"mt").querySelector(".sess-confirm")||{}).textContent);
+        rowOf(d,"mt").querySelector(".sess-confirm-go").click();
+        check("LT12 Log anyway: the three blocks at 07:10-08:50 (430-440, 440-450, 450-530) plus the old entry, one undo step",rg(h,D0)==="430-440,440-450,440-470,450-530"&&h.undoDepth()===d2+1,rg(h,D0));
+        h.undo(); h.undo();
+        check("LT12 undoing the log and then the start edit restores 06:15 and the button",h.getState().sessions.mt.defaultStart===375&&rowOf(d,"mt").querySelector(".sess-log").textContent==="Log today 06:15–07:55",rowOf(d,"mt").querySelector(".sess-log").textContent);
+        rowOf(d,"mt").querySelector(".sess-start").click(); setV(f,rowOf(d,"mt").querySelector(".sess-start-in"),"");
+        rowOf(d,"mt").querySelector(".sess-start-save").click();
+        check("LT12 saving an EMPTY field clears the start (unknown): the button falls back to the clock (12:00)",h.getState().sessions.mt.defaultStart===null&&rowOf(d,"mt").querySelector(".sess-log").textContent==="Log today 12:00–13:40",rowOf(d,"mt").querySelector(".sess-log").textContent);
+        h.setTestNow(null);
+      });
+    }))
+
+    /* ---- LT14: layout of a session row at 390 px (real layout in Blink) */
+    .then(scenario("LT14",function(){
+      ["hours-ledger-selftest-v2","hours-ledger-device-id-TESTMODE","hours-ledger-selftest-undo-v1","hours-ledger-fakedrive-TESTMODE","hours-ledger-access-token-TESTMODE","hours-ledger-selftest-sessions-dismissed-v1","hours-ledger-selftest-sessions-dismissed-suggestions-v1"].forEach(function(k){ try{ localStorage.removeItem(k); }catch(e){} });
+      return new Promise(function(resolve){
+        var el=document.createElement("iframe");
+        el.style.cssText="display:block;position:fixed;left:-20000px;top:0;border:0;width:390px;height:1000px";
+        el.addEventListener("load",function onl(){ el.removeEventListener("load",onl); setTimeout(function(){ resolve(el); },150); });
+        el.src="index.html?hltest=1&v="+Date.now();
+        document.body.appendChild(el);
+      }).then(function(el){
+        var w=el.contentWindow,d=el.contentDocument,h=w.__HL_TEST__;
+        h.setSession("nt","Bedtime",NIGHT,null,1290);
+        h.putEntry(D1,"Already","seed-work",1300,1330,null); /* tomorrow: the other-day field is opened below, so that is the day that is logged */
+        h.setTestNow(at(2026,10,24,12,0));
+        var g=d.getElementById("introGo"); if(g) g.click();
+        d.getElementById("sessionsBtn").click();
+        var row=rowOf(d,"nt"),sheet=d.querySelector("#sessScrim .sheet");
+        function box(x){ return x.getBoundingClientRect(); }
+        var b=row.querySelector(".sess-log");
+        check("LT14 @390px the Log today button spans the row and is at least 44 px tall ("+Math.round(box(b).width)+" of "+Math.round(box(row).width)+" px, "+Math.round(box(b).height)+" px high), its label on one line",box(b).width>=box(row).width*0.95&&box(b).height>=44&&(function(){ var r=d.createRange(); r.selectNodeContents(b); return r.getClientRects().length===1; })());
+        var small=Array.prototype.slice.call(row.querySelectorAll(".sess-btns .ghost"));
+        check("LT14 @390px every secondary button is at least 44 px tall and inside the row ("+small.map(function(x){ return Math.round(box(x).height); }).join(",")+")",small.length>=4&&small.every(function(x){ return box(x).height>=44&&box(x).right<=box(row).right+1; }));
+        row.querySelector(".sess-od").click(); rowOf(d,"nt").querySelector(".sess-start").click();
+        rowOf(d,"nt").querySelector(".sess-log").click();
+        var row2=rowOf(d,"nt");
+        check("LT14 @390px with the other-day field, the start-time field and the overlap prompt all open: nothing sticks out sideways (sheet "+sheet.scrollWidth+"/"+sheet.clientWidth+")",!!row2.querySelector(".sess-od-date")&&!!row2.querySelector(".sess-start-in")&&!!row2.querySelector(".sess-confirm")&&sheet.scrollWidth<=sheet.clientWidth+1);
+        var conf=Array.prototype.slice.call(row2.querySelectorAll(".sess-confirm button"));
+        check("LT14 @390px the prompt's two buttons are at least 44 px tall",conf.length===2&&conf.every(function(x){ return box(x).height>=44; }));
+        h.setTestNow(null);
+        document.body.removeChild(el);
+      });
+    }))
     .then(function(){ return results; });
 }
 
