@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1333;
+var EXPECTED_MIN_ROWS=1365;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -5205,6 +5205,97 @@ function runSuggestionTests(){
         check("RS16 render() while the sheet is open, with nothing changed, does not recompute",S().misses===1,J(S()));
         h.setTestNow(null);
       });
+    }))
+
+    /* ---- RS17 / RS18: THE CARD LAYOUT. Written after the owner saw the cards on a real laptop: the text sat in a ~120 px column
+       and the buttons floated to the right (a flex row with non-shrinking buttons). Required structure, top to bottom:
+       title (full width); one row per step "HH:MM-HH:MM label duration" (the category muted, only when it differs from the label);
+       one meta line "N full days of M, weekdays, about N entries a week"; the two buttons in a row below. No "e.g. dates" line.
+       RS17 reads the DOM and computed style in the hidden sandbox (structure, order, no flex row, 44 px buttons). RS18 loads the
+       app in a VISIBLE iframe of 390 px and of 1000 px (media queries see the iframe's width) and measures real Blink layout.
+       WHAT THESE CANNOT PROVE: that it looks right. They check structure and measured boxes, in Blink only - not WebKit, not a
+       phone, not touch, not fonts that fail to load. The owner's own screen is the judge. */
+    .then(scenario("RS17",function(){
+      return freshSandbox(true).then(function(f){
+        var h=setup(f,60,5),d=f.d;
+        openSheet(f);
+        var cs=cards(f),c=cs[0];
+        check("RS17 PRECONDITION: a card is on screen",!!c);
+        if(!c) return;
+        var kids=Array.prototype.map.call(c.children,function(k){ return k.className; });
+        var title=c.querySelector(".sugg-title"),steps=c.querySelector(".sugg-steps"),meta=c.querySelector(".sugg-meta"),btns=c.querySelector(".sugg-btns");
+        check("RS17 the card's direct children are, in this order: title, steps, meta line, buttons",J(kids)===J(["sugg-title","sugg-steps","sugg-meta","sugg-btns"]),J(kids));
+        function before(a,b){ return !!a&&!!b&&!!(a.compareDocumentPosition(b)&4); }
+        check("RS17 the buttons come AFTER the meta line, the meta line after the steps, the steps after the title",before(title,steps)&&before(steps,meta)&&before(meta,btns));
+        var cd=f.el.contentWindow.getComputedStyle(c);
+        check("RS17 the card is not a flex ROW (so the title and steps are not squeezed beside the buttons): display "+cd.display+(cd.display==="flex"?" "+cd.flexDirection:""),cd.display!=="flex"||cd.flexDirection==="column");
+        var rows=c.querySelectorAll(".sugg-step");
+        check("RS17 one row per step (3), each reads as time range, label, duration",rows.length===3&&Array.prototype.every.call(rows,function(r){ return /^\d\d:\d\d\u2013\d\d:\d\d/.test(r.textContent)&&!!r.querySelector(".sugg-time")&&!!r.querySelector(".sugg-label")&&!!r.querySelector(".sugg-dur"); }),Array.prototype.map.call(rows,function(r){ return r.textContent; }).join(" | "));
+        check("RS17 a step whose category differs from its label shows the category, muted, once ('Get ready' / Admin & errands)",rows[0]&&rows[0].querySelectorAll(".sugg-cat").length===1&&/Admin/.test(rows[0].querySelector(".sugg-cat").textContent));
+        function noRepeat(r){ var l=r.querySelector(".sugg-label"),ln=l?l.firstChild&&l.firstChild.textContent:"",t=r.textContent; return ln&&t.indexOf(ln)===t.lastIndexOf(ln); }
+        check("RS17 no step line contains its label (or category) twice",Array.prototype.every.call(rows,noRepeat),Array.prototype.map.call(rows,function(r){ return r.textContent; }).join(" | "));
+        check("RS17 the meta line reads 'N full days of M', the weekdays and 'about N entries a week'",!!meta&&/^\d+ full days? of \d+/.test(meta.textContent)&&/Mon/.test(meta.textContent)&&/about [\d.]+ entries a week/.test(meta.textContent),meta&&meta.textContent);
+        check("RS17 the 'e.g. dates' line is gone",c.textContent.indexOf("e.g.")<0&&!/20\d\d-\d\d-\d\d/.test(c.textContent),c.textContent.slice(-80));
+        check("RS17 the old two-column structure is gone (no .sess-main / .sess-meta inside a card)",!c.querySelector(".sess-main")&&!c.querySelector(".sess-meta"));
+        var bs=btns?btns.querySelectorAll("button"):[];
+        check("RS17 two buttons, 'Create session from this' and 'Not now', each at least 44 px tall (computed min-height)",bs.length===2&&/Create/.test(bs[0].textContent)&&/Not now/.test(bs[1].textContent)&&Array.prototype.every.call(bs,function(b){ return parseFloat(f.el.contentWindow.getComputedStyle(b).minHeight)>=44; }),Array.prototype.map.call(bs,function(b){ return f.el.contentWindow.getComputedStyle(b).minHeight; }).join(","));
+        h.setTestNow(null);
+      });
+    }))
+    .then(scenario("RS17b",function(){
+      return freshSandbox(true).then(function(f){
+        var h=f.H,st=h.getState(),en={};
+        dayList(60).forEach(function(dd){
+          var q=dd.date.split("-"),nd=isoOf(new Date(+q[0],+q[1]-1,+q[2]+1));
+          (en[dd.date]=en[dd.date]||[]).push(E("seed-sleep",1380,1440,"Sleep"));
+          (en[nd]=en[nd]||[]).push(E("seed-sleep",0,420,"Sleep"));
+        });
+        st.entries=en; h.persist(); h.setTestNow(nowAfter(62));
+        openSheet(f);
+        var c=cards(f)[0],r=c&&c.querySelector(".sugg-step");
+        check("RS17b a step whose label equals its category (Sleep / Sleep) shows that word ONCE and no category",!!r&&r.querySelectorAll(".sugg-cat").length===0&&(r.textContent.match(/Sleep/g)||[]).length===1&&/\(next day\)/.test(r.textContent),r&&r.textContent);
+        h.setTestNow(null);
+      });
+    }))
+    .then(scenario("RS18",function(){
+      var widths=[390,1000],chain=Promise.resolve();
+      widths.forEach(function(W){
+        chain=chain.then(function(){
+          ["hours-ledger-selftest-v2","hours-ledger-device-id-TESTMODE","hours-ledger-selftest-undo-v1","hours-ledger-fakedrive-TESTMODE","hours-ledger-access-token-TESTMODE","hours-ledger-selftest-sessions-dismissed-v1","hours-ledger-selftest-sessions-dismissed-suggestions-v1"].forEach(function(k){ try{ localStorage.removeItem(k); }catch(e){} });
+          return new Promise(function(resolve){
+            var el=document.createElement("iframe");
+            el.style.cssText="display:block;position:fixed;left:-20000px;top:0;border:0;width:"+W+"px;height:900px"; /* the page has a global iframe{display:none}; a hidden iframe has no layout at all */
+            el.addEventListener("load",function onl(){ el.removeEventListener("load",onl); setTimeout(function(){ resolve(el); },150); });
+            el.src="index.html?hltest=1&v="+Date.now();
+            document.body.appendChild(el);
+          });
+        }).then(function(el){
+          var w=el.contentWindow,d=el.contentDocument,h=w.__HL_TEST__,st=h.getState();
+          st.entries=build(60,5); h.persist(); h.setTestNow(nowAfter(60));
+          d.getElementById("sessionsBtn").click();
+          var c=d.querySelector(".sugg"),tag="RS18 @"+W+"px";
+          check(tag+" PRECONDITION: the page really is "+W+" px wide and a card is laid out",w.innerWidth===W&&!!c&&c.getBoundingClientRect().width>100,"innerWidth "+w.innerWidth+", card "+(c&&Math.round(c.getBoundingClientRect().width)));
+          if(!c){ document.body.removeChild(el); return; }
+          var cr=c.getBoundingClientRect(),cw=cr.width;
+          var title=c.querySelector(".sugg-title"),steps=c.querySelector(".sugg-steps"),meta=c.querySelector(".sugg-meta"),btns=c.querySelector(".sugg-btns");
+          function box(x){ return x?x.getBoundingClientRect():{left:0,right:0,top:0,bottom:0,width:0,height:0}; }
+          check(tag+" the title spans the card's full width ("+Math.round(box(title).width)+" of "+Math.round(cw)+" px)",!!title&&box(title).width>=cw*0.95);
+          check(tag+" the steps span the card's full width ("+Math.round(box(steps).width)+" of "+Math.round(cw)+" px)",!!steps&&box(steps).width>=cw*0.95);
+          check(tag+" the title is at most two lines tall ("+Math.round(box(title).height)+" px)",!!title&&box(title).height<=44);
+          var rows=c.querySelectorAll(".sugg-step");
+          check(tag+" every step row is at most two lines tall (tallest "+Math.max.apply(null,Array.prototype.map.call(rows,function(r){ return Math.round(r.getBoundingClientRect().height); }))+" px)",rows.length===3&&Array.prototype.every.call(rows,function(r){ return r.getBoundingClientRect().height<=40; }));
+          check(tag+" the buttons sit BELOW the meta line, which sits below the steps (tops "+Math.round(box(steps).top)+" < "+Math.round(box(meta).top)+" < "+Math.round(box(btns).top)+")",!!btns&&box(meta).top>=box(steps).bottom-1&&box(btns).top>=box(meta).bottom-1);
+          var bs=btns?Array.prototype.slice.call(btns.querySelectorAll("button")):[];
+          check(tag+" the two buttons are side by side in one row and together span the card's width ("+bs.map(function(b){ return Math.round(b.getBoundingClientRect().width); }).join("+")+" of "+Math.round(cw)+" px)",bs.length===2&&Math.abs(bs[0].getBoundingClientRect().top-bs[1].getBoundingClientRect().top)<2&&(bs[0].getBoundingClientRect().width+bs[1].getBoundingClientRect().width)>=cw*0.9);
+          check(tag+" each button is at least 44 px tall ("+bs.map(function(b){ return Math.round(b.getBoundingClientRect().height); }).join(",")+")",bs.length===2&&bs.every(function(b){ return b.getBoundingClientRect().height>=44; }));
+          var sheet=d.querySelector("#sessScrim .sheet");
+          check(tag+" no sideways scroll: the sheet's scrollWidth "+sheet.scrollWidth+" <= clientWidth "+sheet.clientWidth+", and the page's "+d.documentElement.scrollWidth+" <= "+w.innerWidth,sheet.scrollWidth<=sheet.clientWidth+1&&d.documentElement.scrollWidth<=w.innerWidth+1);
+          check(tag+" the card fits inside the sheet (right edge "+Math.round(cr.right)+" <= sheet right "+Math.round(sheet.getBoundingClientRect().right)+")",cr.right<=sheet.getBoundingClientRect().right+1&&cr.left>=sheet.getBoundingClientRect().left-1);
+          h.setTestNow(null);
+          document.body.removeChild(el);
+        });
+      });
+      return chain;
     }))
 
     /* ---- RS11: nothing dead is left behind */

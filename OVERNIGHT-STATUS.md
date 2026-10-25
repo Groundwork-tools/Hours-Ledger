@@ -501,3 +501,13 @@ Why: the thresholds were only tested to 250 days (150 on real days), so a cap ke
 
 ### Tests
 - RAN: full `selftest.html` on the working tree: `PASS - 0 failing / 1333 total` (`EXPECTED_MIN_ROWS` 1333; one run first failed only the row-count guard at 1334, my miscount).
+
+## Card layout fix (2026-10-25)
+
+Owner feedback from the real laptop check: cards unusable (text in a ~120 px column, buttons floating right). **Layout and text only; detection, thresholds, ranking, memo untouched.**
+
+- RAN, fail-first: against the old markup 24 of 412 rows failed (RS17/RS17b structure; RS18 real layout). My FIRST fail-first of RS18 was wrong: the selftest page has a global `iframe{display:none}`, so my "visible" iframe had no layout (innerWidth 0) and failed for the wrong reason; fixed with `display:block`, then re-run against the old markup.
+- RAN: new card: title / steps / meta line / buttons. Block `PASS - 0 failing / 412`. At 390 px: card 308 px, title and steps 308 px wide, title 15 px tall, step rows 18 px, buttons 150+150 px and 44 px tall, below the meta line, sheet scrollWidth 348 <= clientWidth 348. At 1000 px: card 398 px, buttons 195+195, 44 px, no sideways scroll. All measured in headless Blink.
+- Mutants (12, all killed): flex row again (13 failing), buttons before meta (4), category always shown (1), "e.g." line back (2), button min-height 30 (3), steps width 120 px (4), buttons as block (1, only at 1000 px), label printed twice (1), " of M" dropped (1), buttons not flexed (1, only at 1000 px), title 100 px wide (4), meta nowrap (2, sideways scroll). Weak spots said plainly: the "buttons fill the width" row passes at 390 px under the block/no-flex mutants because the buttons' natural widths (215+88) happen to be about 98% of the 308 px card, so those two are caught only at 1000 px.
+- RAN: screenshots of the real export (88 days) in the Sessions sheet in an iframe 390 px and 1000 px wide, in the app's own browser pane. Both showed three stacked cards, the steps in rows, the meta line, and two buttons side by side. Observed, not changed: the title repeats the step labels; "CREATE SESSION FROM THIS" wraps to two lines inside its button at both widths; a step with "(next day)" widens the time column.
+- NOT verified: the owner's screen, any phone, WebKit, touch. The UI is NOT called done; the owner judges it.

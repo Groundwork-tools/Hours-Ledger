@@ -5019,14 +5019,15 @@ function renderSuggestions(){
   el.innerHTML='<h3>Patterns in your log</h3><p class="hint">Proposals only &mdash; nothing is logged. Each is a run of things you logged in the same order at about the same time on many days, ranked by how many entries it would save you a week.</p>'+
     suggestCurrent.map(function(x,i){
       var steps=packageSteps(x),title=steps.map(function(t){ return t.label||t.catName; }).join(" \u203a ");
-      return '<div class="sugg" data-i="'+i+'"><div class="sess-main"><b>'+escapeHtml(title)+'</b>'+
-        steps.map(function(t){
-          return '<span class="sess-meta">'+toHM(t.start)+"&ndash;"+toHM(t.end)+(t.nextDay?" (next day)":"")+" &middot; "+escapeHtml(t.label||t.catName)+" &middot; "+escapeHtml(t.catName)+" &middot; "+dur(t.duration)+'</span>';
-        }).join("")+
-        '<span class="sess-meta">'+x.count+(x.count===1?" full day":" full days")+(x.anchorCount>x.count?" (of "+x.anchorCount+" with the first step)":"")+" &middot; "+weekdayEvidence(x.weekdayCounts)+
-        " &middot; about "+(Math.round(x.effort*10)/10)+' entries a week</span>'+
-        '<span class="sess-meta">e.g. '+x.dates.slice(-3).join(", ")+'</span></div>'+
-        '<div class="sess-btns"><button class="ghost sugg-create">Create session from this</button><button class="ghost sugg-no">Not now</button></div></div>';
+      return '<div class="sugg" data-i="'+i+'"><b class="sugg-title">'+escapeHtml(title)+'</b>'+
+        '<div class="sugg-steps">'+steps.map(function(t){
+          var name=t.label||t.catName,cat=normLabel(name)!==normLabel(t.catName)?'<span class="sugg-cat">'+escapeHtml(t.catName)+'</span>':"";
+          return '<div class="sugg-step"><span class="sugg-time"><span class="sugg-range">'+toHM(t.start)+"\u2013"+toHM(t.end)+'</span>'+(t.nextDay?" (next day)":"")+'</span>'+
+            '<span class="sugg-label">'+escapeHtml(name)+cat+'</span><span class="sugg-dur">'+dur(t.duration)+'</span></div>';
+        }).join("")+'</div>'+
+        '<div class="sugg-meta">'+x.count+(x.count===1?" full day":" full days")+" of "+x.anchorCount+", "+weekdayEvidence(x.weekdayCounts)+
+        ", about "+(Math.round(x.effort*10)/10)+' entries a week</div>'+
+        '<div class="sugg-btns"><button class="ghost sugg-create">Create session from this</button><button class="ghost sugg-no">Not now</button></div></div>';
     }).join("");
 }
 function renderSessions(){
