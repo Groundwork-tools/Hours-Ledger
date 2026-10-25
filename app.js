@@ -5018,7 +5018,9 @@ function renderSuggestions(){
   if(!suggestCurrent.length){ el.innerHTML=""; return; }
   el.innerHTML='<h3>Patterns in your log</h3><p class="hint">Proposals only &mdash; nothing is logged. Each is a run of things you logged in the same order at about the same time on many days, ranked by how many entries it would save you a week.</p>'+
     suggestCurrent.map(function(x,i){
-      var steps=packageSteps(x),title=steps.map(function(t){ return t.label||t.catName; }).join(" \u203a ");
+      var steps=packageSteps(x),first=steps[0].label||steps[0].catName,last=steps[steps.length-1].label||steps[steps.length-1].catName;
+      /* short title: the first step's label, plus the last one's when it differs; the full chain is in the step rows */
+      var title=normLabel(first)===normLabel(last)?first:first+", "+last;
       return '<div class="sugg" data-i="'+i+'"><b class="sugg-title">'+escapeHtml(title)+'</b>'+
         '<div class="sugg-steps">'+steps.map(function(t){
           var name=t.label||t.catName,cat=normLabel(name)!==normLabel(t.catName)?'<span class="sugg-cat">'+escapeHtml(t.catName)+'</span>':"";
@@ -5027,7 +5029,7 @@ function renderSuggestions(){
         }).join("")+'</div>'+
         '<div class="sugg-meta">'+x.count+(x.count===1?" full day":" full days")+" of "+x.anchorCount+", "+weekdayEvidence(x.weekdayCounts)+
         ", about "+(Math.round(x.effort*10)/10)+' entries a week</div>'+
-        '<div class="sugg-btns"><button class="ghost sugg-create">Create session from this</button><button class="ghost sugg-no">Not now</button></div></div>';
+        '<div class="sugg-btns"><button class="ghost sugg-create">Create session</button><button class="ghost sugg-no">Not now</button></div></div>';
     }).join("");
 }
 function renderSessions(){

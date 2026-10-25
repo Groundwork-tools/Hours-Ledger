@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1365;
+var EXPECTED_MIN_ROWS=1375;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -5237,8 +5237,9 @@ function runSuggestionTests(){
         check("RS17 the meta line reads 'N full days of M', the weekdays and 'about N entries a week'",!!meta&&/^\d+ full days? of \d+/.test(meta.textContent)&&/Mon/.test(meta.textContent)&&/about [\d.]+ entries a week/.test(meta.textContent),meta&&meta.textContent);
         check("RS17 the 'e.g. dates' line is gone",c.textContent.indexOf("e.g.")<0&&!/20\d\d-\d\d-\d\d/.test(c.textContent),c.textContent.slice(-80));
         check("RS17 the old two-column structure is gone (no .sess-main / .sess-meta inside a card)",!c.querySelector(".sess-main")&&!c.querySelector(".sess-meta"));
+        check("RS17 the title is SHORT: the first step's label, then the last step's label (\"Get ready, Muay Thai\"), not the whole chain",!!title&&title.textContent==="Get ready, Muay Thai"&&title.textContent.indexOf("\u203a")<0,title&&title.textContent);
         var bs=btns?btns.querySelectorAll("button"):[];
-        check("RS17 two buttons, 'Create session from this' and 'Not now', each at least 44 px tall (computed min-height)",bs.length===2&&/Create/.test(bs[0].textContent)&&/Not now/.test(bs[1].textContent)&&Array.prototype.every.call(bs,function(b){ return parseFloat(f.el.contentWindow.getComputedStyle(b).minHeight)>=44; }),Array.prototype.map.call(bs,function(b){ return f.el.contentWindow.getComputedStyle(b).minHeight; }).join(","));
+        check("RS17 two buttons, 'Create session' and 'Not now' (short enough not to wrap), each at least 44 px tall (computed min-height)",bs.length===2&&bs[0].textContent==="Create session"&&bs[1].textContent==="Not now"&&Array.prototype.every.call(bs,function(b){ return parseFloat(f.el.contentWindow.getComputedStyle(b).minHeight)>=44; }),Array.prototype.map.call(bs,function(b){ return f.el.contentWindow.getComputedStyle(b).minHeight; }).join(","));
         h.setTestNow(null);
       });
     }))
@@ -5253,6 +5254,7 @@ function runSuggestionTests(){
         st.entries=en; h.persist(); h.setTestNow(nowAfter(62));
         openSheet(f);
         var c=cards(f)[0],r=c&&c.querySelector(".sugg-step");
+        check("RS17b a one-step card's title is that label ONCE (not 'Sleep, Sleep')",!!c&&c.querySelector(".sugg-title").textContent==="Sleep",c&&c.querySelector(".sugg-title").textContent);
         check("RS17b a step whose label equals its category (Sleep / Sleep) shows that word ONCE and no category",!!r&&r.querySelectorAll(".sugg-cat").length===0&&(r.textContent.match(/Sleep/g)||[]).length===1&&/\(next day\)/.test(r.textContent),r&&r.textContent);
         h.setTestNow(null);
       });
@@ -5287,6 +5289,11 @@ function runSuggestionTests(){
           check(tag+" the buttons sit BELOW the meta line, which sits below the steps (tops "+Math.round(box(steps).top)+" < "+Math.round(box(meta).top)+" < "+Math.round(box(btns).top)+")",!!btns&&box(meta).top>=box(steps).bottom-1&&box(btns).top>=box(meta).bottom-1);
           var bs=btns?Array.prototype.slice.call(btns.querySelectorAll("button")):[];
           check(tag+" the two buttons are side by side in one row and together span the card's width ("+bs.map(function(b){ return Math.round(b.getBoundingClientRect().width); }).join("+")+" of "+Math.round(cw)+" px)",bs.length===2&&Math.abs(bs[0].getBoundingClientRect().top-bs[1].getBoundingClientRect().top)<2&&(bs[0].getBoundingClientRect().width+bs[1].getBoundingClientRect().width)>=cw*0.9);
+          function bw(b){ return b.getBoundingClientRect().width; }
+          check(tag+" the two buttons are EQUAL width (within 2 px): "+bs.map(function(b){ return Math.round(bw(b)); }).join(" vs "),bs.length===2&&Math.abs(bw(bs[0])-bw(bs[1]))<=2);
+          check(tag+" each button is at least 45% of the card's width ("+bs.map(function(b){ return Math.round(100*bw(b)/cw)+"%"; }).join(", ")+")",bs.length===2&&bs.every(function(b){ return bw(b)>=cw*0.45; }));
+          check(tag+" each button's label sits on ONE line and is not clipped",bs.length===2&&bs.every(function(b){ var r=d.createRange(); r.selectNodeContents(b); return r.getClientRects().length===1&&b.scrollWidth<=b.clientWidth+1; }),bs.map(function(b){ var r=d.createRange(); r.selectNodeContents(b); return r.getClientRects().length+" line(s), "+b.scrollWidth+"/"+b.clientWidth; }).join("; "));
+          check(tag+" the title is one line ("+Math.round(box(title).height)+" px) and short",!!title&&box(title).height<=20&&title.textContent==="Get ready, Muay Thai");
           check(tag+" each button is at least 44 px tall ("+bs.map(function(b){ return Math.round(b.getBoundingClientRect().height); }).join(",")+")",bs.length===2&&bs.every(function(b){ return b.getBoundingClientRect().height>=44; }));
           var sheet=d.querySelector("#sessScrim .sheet");
           check(tag+" no sideways scroll: the sheet's scrollWidth "+sheet.scrollWidth+" <= clientWidth "+sheet.clientWidth+", and the page's "+d.documentElement.scrollWidth+" <= "+w.innerWidth,sheet.scrollWidth<=sheet.clientWidth+1&&d.documentElement.scrollWidth<=w.innerWidth+1);
