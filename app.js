@@ -5016,20 +5016,21 @@ function renderSuggestions(){
     return;
   }
   if(!suggestCurrent.length){ el.innerHTML=""; return; }
-  el.innerHTML='<h3>Patterns in your log</h3><p class="hint">Proposals only &mdash; nothing is logged. Each is a run of things you logged in the same order at about the same time on many days, ranked by how many entries it would save you a week.</p>'+
+  var WL=["M","T","W","T","F","S","S"];
+  el.innerHTML='<h3>Patterns in your log</h3><p class="hint">Proposals only. Nothing is logged.</p>'+
     suggestCurrent.map(function(x,i){
-      var steps=packageSteps(x),first=steps[0].label||steps[0].catName,last=steps[steps.length-1].label||steps[steps.length-1].catName;
-      /* short title: the first step's label, plus the last one's when it differs; the full chain is in the step rows */
-      var title=normLabel(first)===normLabel(last)?first:first+", "+last;
+      var steps=packageSteps(x),title=steps[0].label||steps[0].catName;
       return '<div class="sugg" data-i="'+i+'"><b class="sugg-title">'+escapeHtml(title)+'</b>'+
         '<div class="sugg-steps">'+steps.map(function(t){
           var name=t.label||t.catName,cat=normLabel(name)!==normLabel(t.catName)?'<span class="sugg-cat">'+escapeHtml(t.catName)+'</span>':"";
-          return '<div class="sugg-step"><span class="sugg-time"><span class="sugg-range">'+toHM(t.start)+"\u2013"+toHM(t.end)+'</span>'+(t.nextDay?" (next day)":"")+'</span>'+
+          return '<div class="sugg-step"><span class="sugg-time"><span class="sugg-range">'+toHM(t.start)+"\u2013"+toHM(t.end)+'</span>'+(t.nextDay?'<span class="sugg-next">(next day)</span>':"")+'</span>'+
             '<span class="sugg-label">'+escapeHtml(name)+cat+'</span><span class="sugg-dur">'+dur(t.duration)+'</span></div>';
         }).join("")+'</div>'+
-        '<div class="sugg-meta">'+x.count+(x.count===1?" full day":" full days")+" of "+x.anchorCount+", "+weekdayEvidence(x.weekdayCounts)+
-        ", about "+(Math.round(x.effort*10)/10)+' entries a week</div>'+
-        '<div class="sugg-btns"><button class="ghost sugg-create">Create session</button><button class="ghost sugg-no">Not now</button></div></div>';
+        '<div class="sugg-meta">'+x.count+" of "+x.anchorCount+" days &middot; about "+(Math.round(x.effort*10)/10)+' entries a week</div>'+
+        '<div class="sugg-week" role="img" aria-label="'+escapeHtml(weekdayEvidence(x.weekdayCounts))+'">'+x.weekdayCounts.map(function(c,k){
+          return '<span class="sugg-day'+(c?"":" zero")+'"><span class="sugg-dl">'+WL[k]+'</span><span class="sugg-dn">'+c+'</span></span>';
+        }).join("")+'</div>'+
+        '<div class="sugg-btns"><button class="solid sugg-create">Create session</button><button class="ghost sugg-no">Not now</button></div></div>';
     }).join("");
 }
 function renderSessions(){
@@ -5070,6 +5071,8 @@ function openSessions(){
   var dateEl=document.getElementById("sessSaveDate");
   if(!dateEl.value) dateEl.value=iso(new Date());
   renderSessions();
+  /* the save-logged-time form is folded away while there are suggestions to look at, open when there are none */
+  document.getElementById("sessSaveBox").open=(suggestCurrent.length===0);
   sessScrimEl.querySelector(".sheet").scrollTop=0;
   sessScrimEl.classList.add("on");
   lockBodyScroll();
