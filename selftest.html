@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1545;
+var EXPECTED_MIN_ROWS=1687;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -2094,8 +2094,14 @@ function waitFor(predicate,timeoutMs){
    exists specifically to verify state SURVIVES a simulated reload (a
    real regression test for data almost lost that way) - wiping storage
    there would break the exact thing that test is checking. */
+/* a clean start removes every earlier sandbox ONLY while this is true: set by the blocks that start from nothing in every scenario (runSuggestionTests). The older blocks keep references to earlier sandboxes (the first one, #sandbox, is used through H for the whole of runAsyncTests) and would crash on a removed frame. */
+var isolateSandboxes=false;
 function freshSandbox(clean,extraQuery){
   if(clean){
+    /* every earlier sandbox shares this storage and may still have a timer pending (a rename or colour pick persists 250-400 ms later); one that
+       fires AFTER the wipe below writes its old state into the key the new sandbox is about to read (H01). Removing an iframe destroys its
+       browsing context and its timers with it, so a clean start means no earlier sandbox is left alive. */
+    Array.prototype.slice.call(document.querySelectorAll("iframe")).forEach(function(el){ if(!isolateSandboxes) return; if(el.parentNode) el.parentNode.removeChild(el); });
     ["hours-ledger-selftest-v2","hours-ledger-device-id-TESTMODE",
      "hours-ledger-selftest-undo-v1","hours-ledger-fakedrive-TESTMODE",
      "hours-ledger-access-token-TESTMODE","hours-ledger-selftest-sessions-dismissed-v1","hours-ledger-selftest-sessions-dismissed-suggestions-v1"].forEach(function(k){
@@ -4744,6 +4750,7 @@ function runSessionScheduleTests(){
    All fixtures are GENERATED here (seeded PRNG); nothing comes from a real export. Rows are tagged RS00... */
 function runSuggestionTests(){
   var results=[];
+  isolateSandboxes=true;
   function check(name,cond,observed){
     results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
   }
@@ -4812,7 +4819,7 @@ function runSuggestionTests(){
         check("RS01 PRECONDITION: eligible at 60 logged days",r.eligible===true&&r.n===60,J({e:r.eligible,n:r.n}));
         var top=r.shown[0];
         var raw=h.detectPackages(h.getState().entries,h.getState().categories,h.getState().sessions,"2026-09-25");
-        check("RS01 PRECONDITION (diagnostic for an unexplained intermittent failure): the detector finds the package and nothing is dismissed",raw.packages.length>=1&&h.getDismissedSuggestions().length===0,J({found:r.found,shown:r.shown.length,raw:raw.packages.length,dismissed:h.getDismissedSuggestions(),th:raw.thresholds,days:Object.keys(h.getState().entries).length,entries:Object.keys(h.getState().entries).reduce(function(a,k){return a+h.getState().entries[k].length;},0)}));
+        check("RS01 PRECONDITION (diagnostic for an unexplained intermittent failure): the detector finds the package and nothing is dismissed",raw.packages.length>=1&&h.getDismissedSuggestions().length===0,J({cats:h.getState().categories.length,found:r.found,shown:r.shown.length,raw:raw.packages.length,dismissed:h.getDismissedSuggestions(),th:raw.thresholds,days:Object.keys(h.getState().entries).length,entries:Object.keys(h.getState().entries).reduce(function(a,k){return a+h.getState().entries[k].length;},0)}));
         check("RS01 the planted Get ready > Bike > Muay Thai package is shown first, as ONE three-block package",!!top&&top.blocks.length===3&&J(top.cats)===J(["seed-admin","seed-training","seed-people"]),top&&J(top.cats));
         var st=top?steps(h,top):[];
         check("RS01 its exact times: 06:00-06:20 Get ready, 06:20-07:00 Bike, 07:00-08:30 Muay Thai (anchor within the 3-minute jitter)",
@@ -5405,8 +5412,10 @@ function runSuggestionTests(){
       return freshSandbox(true).then(function(f){
         var h=setup(f,60,5),st=h.getState(),top=h.suggestPackages(st,"2026-09-25").shown[0];
         openSheet(f);
+        /* CHANGED 2026-10-25 (owner's sanity check, RS25): the line used to say top.count of top.anchorCount (all-time numbers) beside a 56-day rate; now N is counted in the rate's own window, by hand here, and M is the window's length */
+        function inWin56(dates){ return dates.filter(function(dt){ var q=dt.split("-"),ago=Math.round((new Date(2026,8,25)-new Date(+q[0],+q[1]-1,+q[2]))/86400000); return ago>=0&&ago<56; }).length; }
         var c=cards(f)[0],meta=c&&c.querySelector(".sugg-meta"),r=Math.round(top.rate*10)/10,rt=Number.isInteger(r)?String(r):r.toFixed(1);
-        check("RS20 the meta line is exactly 'N of M days · about R days a week' with R the ranking's own rate over the last 56 days ("+rt+")",!!meta&&meta.querySelector("span").textContent===top.count+" of "+top.anchorCount+" days · about "+rt+" days a week",meta&&meta.textContent);
+        check("RS20 the meta line is exactly 'N of M days · about R days a week' with R the ranking's own rate over the last 56 days ("+rt+")",!!meta&&meta.querySelector("span").textContent===inWin56(top.dates)+" of 56 days · about "+rt+" days a week",meta&&meta.textContent);
         check("RS20 ... no 'entries a week' anywhere on the card, and the weekday strip says what window it covers",!!c&&c.textContent.indexOf("entries a week")<0&&/Weekdays, last 8 weeks/.test(meta.textContent),meta&&meta.textContent);
         h.setTestNow(null);
       });
@@ -5499,6 +5508,305 @@ function runSuggestionTests(){
       });
     }))
 
+    /* ---- RS24: THE SESSIONS BUTTON IN THE MASTHEAD (owner's request 2026-10-25). At phone widths (the app's own 820 px mobile
+       breakpoint) the masthead gets a SECOND ROW: This week, Review and Sessions as three EQUAL buttons, each at least 44 px tall,
+       directly under the week stepper. "Close out last week" (shown only in some weeks) takes its own full-width row UNDER those three,
+       so the three never move. At wider widths everything stays in one row with Sessions beside Review. No badge, no count, no dot.
+       The old Your-data button is REMOVED (one entry point; see CLAUDE.md). Real Blink layout in a VISIBLE iframe (the page has a
+       global iframe{display:none}); cannot prove WebKit, a phone, or touch. */
+    .then(scenario("RS24",function(){
+      function visibleFrame(W,H){
+        ["hours-ledger-selftest-v2","hours-ledger-device-id-TESTMODE","hours-ledger-selftest-undo-v1","hours-ledger-fakedrive-TESTMODE","hours-ledger-access-token-TESTMODE","hours-ledger-selftest-sessions-dismissed-v1","hours-ledger-selftest-sessions-dismissed-suggestions-v1"].forEach(function(k){ try{ localStorage.removeItem(k); }catch(e){} });
+        return new Promise(function(resolve){
+          var el=document.createElement("iframe");
+          el.style.cssText="display:block;position:fixed;left:-20000px;top:0;border:0;width:"+W+"px;height:"+H+"px";
+          el.addEventListener("load",function onl(){ el.removeEventListener("load",onl); setTimeout(function(){ resolve(el); },150); });
+          el.src="index.html?hltest=1&v="+Date.now();
+          document.body.appendChild(el);
+        });
+      }
+      /* 320 px is here ONLY for the three labels (RS24e/f/g...): the page itself scrolls sideways at 320 px because the log panel (Add entry row and day grid) is 338 px wide there - found 2026-10-26, present before this work, NOT fixed, not part of the request (RS24d/RS24l skip 320) */
+      var cases=[[320,"phone"],[360,"phone"],[390,"phone"],[700,"phone"],[820,"phone"],[821,"wide"],[1000,"wide"],[1360,"wide"]],chain=Promise.resolve();
+      cases.forEach(function(cs){
+        chain=chain.then(function(){ return visibleFrame(cs[0],800); }).then(function(el){
+          var W=cs[0],kind=cs[1],w=el.contentWindow,d=el.contentDocument,tag="RS24 @"+W+"px";
+          var g=d.getElementById("introGo"); if(g) g.click();
+          function R(id){ var x=d.getElementById(id); return x?x.getBoundingClientRect():{left:0,right:0,top:0,bottom:0,width:0,height:0}; }
+          function cy(r){ return (r.top+r.bottom)/2; }
+          var co=d.getElementById("closeoutBtn"),ss=d.getElementById("sessionsBtn"),tw=d.getElementById("thisweek"),rv=d.getElementById("reviewToggle");
+          check(tag+" PRECONDITION: the page really is "+W+" px wide and the buttons exist",w.innerWidth===W&&!!ss&&!!tw&&!!rv&&!!co,"innerWidth "+w.innerWidth);
+          if(!ss||!tw||!rv||!co){ document.body.removeChild(el); return; }
+          check(tag+" RS24a Sessions is IN the masthead (not in the Your-data tools), and it is the only Sessions button on the page",!!ss.closest(".masthead")&&!ss.closest(".tools")&&d.querySelectorAll("#sessionsBtn").length===1&&d.querySelectorAll(".tools #sessionsBtn").length===0);
+          check(tag+" RS24b no badge, no count, no dot: the button holds only the word 'Sessions' and the masthead has no badge/count/dot element",ss.children.length===0&&ss.textContent.trim()==="Sessions"&&!d.querySelector(".masthead [class*=badge],.masthead [class*=count],.masthead [class*=dot]"),ss.innerHTML);
+          co.hidden=true;
+          var A={tw:R("thisweek"),rv:R("reviewToggle"),ss:R("sessionsBtn"),an:R("anchor"),pv:R("prev"),nx:R("next")};
+          check(tag+" RS24c Sessions is visible WITHOUT scrolling: inside the "+W+" x 800 window at scroll position 0 ("+Math.round(A.ss.left)+","+Math.round(A.ss.top)+" to "+Math.round(A.ss.right)+","+Math.round(A.ss.bottom)+")",w.scrollY===0&&A.ss.width>0&&A.ss.left>=0&&A.ss.right<=w.innerWidth+0.5&&A.ss.top>=0&&A.ss.bottom<=w.innerHeight);
+          if(W>320) check(tag+" RS24d no sideways scroll: page scrollWidth "+d.documentElement.scrollWidth+" <= "+w.innerWidth+", masthead "+d.querySelector(".masthead").scrollWidth+" <= "+d.querySelector(".masthead").clientWidth,d.documentElement.scrollWidth<=w.innerWidth+1&&d.querySelector(".masthead").scrollWidth<=d.querySelector(".masthead").clientWidth+1);
+          function oneLine(b){ var r=d.createRange(); r.selectNodeContents(b); return r.getClientRects().length===1&&b.scrollWidth<=b.clientWidth+1; }
+          check(tag+" RS24e each of the three labels sits on ONE line and is not clipped",[tw,rv,ss].every(oneLine),[tw,rv,ss].map(function(b){ return b.scrollWidth+"/"+b.clientWidth; }).join(" "));
+          if(kind==="phone"){
+            var ws=[A.tw.width,A.rv.width,A.ss.width];
+            check(tag+" RS24f the three buttons are in ONE row (tops "+[A.tw.top,A.rv.top,A.ss.top].map(Math.round).join(",")+") and EQUAL width ("+ws.map(Math.round).join(" / ")+")",Math.abs(A.tw.top-A.rv.top)<=1&&Math.abs(A.rv.top-A.ss.top)<=1&&Math.abs(ws[0]-ws[1])<=1&&Math.abs(ws[1]-ws[2])<=1);
+            check(tag+" RS24g each of the three is at least 44 px tall ("+[A.tw,A.rv,A.ss].map(function(r){ return Math.round(r.height); }).join(", ")+")",[A.tw,A.rv,A.ss].every(function(r){ return r.height>=44; }));
+            check(tag+" RS24h they are a SECOND row: below the stepper row (previous, date, next) and in the order This week, Review, Sessions left to right",A.tw.top>=Math.max(A.an.bottom,A.pv.bottom,A.nx.bottom)-1&&A.tw.left<A.rv.left&&A.rv.left<A.ss.left,"stepper bottom "+Math.round(Math.max(A.an.bottom,A.pv.bottom,A.nx.bottom))+", row top "+Math.round(A.tw.top));
+            var nav=R("weeknav");
+            check(tag+" RS24i the second row spans the masthead's width ("+Math.round(A.ss.right-A.tw.left)+" of "+Math.round(nav.width)+" px)",(A.ss.right-A.tw.left)>=nav.width*0.97);
+            co.hidden=false;
+            var B={tw:R("thisweek"),rv:R("reviewToggle"),ss:R("sessionsBtn"),co:R("closeoutBtn")};
+            check(tag+" RS24j WEEKS WITH 'Close out last week': the three stay where they were (tops "+[B.tw.top,B.rv.top,B.ss.top].map(Math.round).join(",")+" vs "+[A.tw.top,A.rv.top,A.ss.top].map(Math.round).join(",")+") and keep equal widths",Math.abs(B.tw.top-A.tw.top)<=1&&Math.abs(B.rv.top-A.rv.top)<=1&&Math.abs(B.ss.top-A.ss.top)<=1&&Math.abs(B.tw.width-B.rv.width)<=1&&Math.abs(B.rv.width-B.ss.width)<=1);
+            check(tag+" RS24k ...'Close out last week' has its own full-width row UNDER the three (top "+Math.round(B.co.top)+" >= "+Math.round(Math.max(B.tw.bottom,B.rv.bottom,B.ss.bottom))+", width "+Math.round(B.co.width)+" of "+Math.round(nav.width)+") and is at least 44 px tall ("+Math.round(B.co.height)+")",B.co.top>=Math.max(B.tw.bottom,B.rv.bottom,B.ss.bottom)-1&&B.co.width>=nav.width*0.97&&B.co.height>=44);
+            if(W>320) check(tag+" RS24l ...Sessions is still visible without scrolling, nothing scrolls sideways, and 'Close out last week' is on one line",B.ss.bottom<=w.innerHeight&&d.documentElement.scrollWidth<=w.innerWidth+1&&d.querySelector(".masthead").scrollWidth<=d.querySelector(".masthead").clientWidth+1&&oneLine(co)&&oneLine(ss));
+          } else {
+            check(tag+" RS24m ONE row: Sessions sits beside This week and Review (vertical centres "+[A.tw,A.rv,A.ss].map(function(r){ return Math.round(cy(r)); }).join(", ")+") and to the right of Review",Math.abs(cy(A.tw)-cy(A.ss))<=2&&Math.abs(cy(A.rv)-cy(A.ss))<=2&&A.ss.left>=A.rv.right-1);
+            check(tag+" RS24n ...and in line with the stepper too (previous-arrow centre "+Math.round(cy(A.pv))+" vs "+Math.round(cy(A.ss))+"): there is no second row at this width",Math.abs(cy(A.pv)-cy(A.ss))<=4);
+            co.hidden=false;
+            var C={tw:R("thisweek"),rv:R("reviewToggle"),ss:R("sessionsBtn"),co:R("closeoutBtn"),pv:R("prev")};
+            check(tag+" RS24o WEEKS WITH 'Close out last week': still one row ("+[C.pv,C.tw,C.co,C.rv,C.ss].map(function(r){ return Math.round(cy(r)); }).join(", ")+") and nothing scrolls sideways",[C.tw,C.co,C.rv,C.ss].every(function(r){ return Math.abs(cy(r)-cy(C.pv))<=4; })&&d.documentElement.scrollWidth<=w.innerWidth+1);
+          }
+          var tb=Array.prototype.slice.call(d.querySelectorAll(".tools button"));
+          check(tag+" RS24s the Your-data buttons keep their words inside their boxes (found at 360 px: seven buttons squeezed into one row, words overlapping): each is at least 110 px wide and its text fits",tb.length===7&&tb.every(function(b){ return b.getBoundingClientRect().width>=110&&b.scrollWidth<=b.clientWidth+1; }),tb.map(function(b){ return Math.round(b.getBoundingClientRect().width)+"/"+b.scrollWidth; }).join(" "));
+          var cs0=w.getComputedStyle(ss);
+          check(tag+" RS24p design constraints on Sessions: square corners, no shadow, 1 px rule border",cs0.borderTopLeftRadius==="0px"&&cs0.boxShadow==="none"&&cs0.borderTopWidth==="1px");
+          document.body.removeChild(el);
+        });
+      });
+      return chain;
+    }))
+    .then(scenario("RS24q",function(){
+      return freshSandbox(true).then(function(f){
+        var d=f.d,b=d.getElementById("sessionsBtn");
+        b.click();
+        check("RS24q the masthead Sessions button opens the Sessions sheet",d.getElementById("sessScrim").classList.contains("on"));
+        check("RS24r the Your-data tools no longer hold a Sessions button (7 buttons left: Connect Drive, Keep a file in sync, Export a copy, Export week, Open a copy, Show full 24h, Print)",d.querySelectorAll(".tools button").length===7&&!Array.prototype.some.call(d.querySelectorAll(".tools button"),function(x){ return /Sessions/.test(x.textContent); }),Array.prototype.map.call(d.querySelectorAll(".tools button"),function(x){ return x.textContent; }).join(" | "));
+      });
+    }))
+
+    /* ---- RS25: THE CARD'S NUMBERS MUST AGREE WITH EACH OTHER (owner's sanity check, 2026-10-25). Found by running the real export:
+       "33 of 33 days" beside "about 2 days a week" and "42 of 44 days" beside "about 3.9 nights a week". The count was ALL TIME and
+       its "of M" was the days the FIRST STEP happened; the rate is the LAST 56 DAYS. Fixed so that "N of M days" and "about R a week"
+       are the same window: N = full-package days in the rate's window, M = the window's length in days, R = N / M x 7 (to one decimal).
+       The weekday strip sums to N. The all-time numbers move into the fold-out. Expected values are counted from the PLANTED schedule,
+       not from app code. ---- */
+    .then(scenario("RS25",function(){
+      return freshSandbox(true).then(function(f){
+        /* A: the owner's example. 59 logged days, the package on every day except the first three: 56 full days; the window (the last
+           56 days up to the day after the last logged day) holds 55 of them. */
+        var en=noise(5,59); plant(en,5,360,MT,ALLDAYS);
+        var names=["Get ready","Bike","Muay Thai"];
+        dayList(59).slice(0,3).forEach(function(dd){ en[dd.date]=en[dd.date].filter(function(e){ return names.indexOf(e.label)<0; }); });
+        var h=setup(f,59,0,en);
+        openSheet(f);
+        var c=cards(f)[0],meta=c&&c.querySelector(".sugg-meta span"),m=meta&&meta.textContent.match(/^(\d+) of (\d+) days · about ([\d.]+) days a week/);
+        check("RS25 PRECONDITION: the planted package is the first card and its meta line parses",!!c&&!!m&&c.querySelector(".sugg-title").textContent==="Get ready",meta&&meta.textContent);
+        if(m){
+          var N=+m[1],M=+m[2],R=+m[3];
+          check("RS25a a 56-full-day habit with 55 of them inside the window reads '55 of 56 days' (N counted in the window, M the window's length)",N===55&&M===56,N+" of "+M);
+          check("RS25b ...and reads about 6.9 a week: between 6 and 7, as the owner expects",R>=6&&R<=7&&R===6.9,String(R));
+          check("RS25c N, M and R agree: N / M x 7 equals R to one decimal ("+(N/M*7).toFixed(2)+" vs "+R+")",Math.abs(N/M*7-R)<=0.05);
+          var wk=Array.prototype.map.call(c.querySelectorAll(".sugg-day .sugg-dn"),function(x){ return +x.textContent; });
+          check("RS25d the weekday strip adds up to N ("+wk.join("+")+")",wk.length===7&&wk.reduce(function(a,b){ return a+b; },0)===N);
+        }
+        h.setTestNow(null);
+      });
+    }))
+    .then(scenario("RS25e",function(){
+      return freshSandbox(true).then(function(f){
+        /* B: a habit that was daily for its first 33 days and is now rare (7 days in the last 56). 40 full days all time. */
+        var en=noise(7,88); plant(en,7,360,MT,ALLDAYS);
+        var names=["Get ready","Bike","Muay Thai"];
+        dayList(88).forEach(function(dd,i){ var keep=i<33||(i>=60&&i%4===0); if(!keep) en[dd.date]=en[dd.date].filter(function(e){ return names.indexOf(e.label)<0; }); });
+        var h=setup(f,88,0,en);
+        openSheet(f);
+        var c=Array.prototype.filter.call(cards(f),function(x){ return x.querySelector(".sugg-title").textContent==="Get ready"; })[0],meta=c&&c.querySelector(".sugg-meta span"),m=meta&&meta.textContent.match(/^(\d+) of (\d+) days · about ([\d.]+) days a week/);
+        check("RS25e PRECONDITION: the faded habit still has a card and its meta line parses",!!c&&!!m,meta&&meta.textContent);
+        if(m){
+          check("RS25f 40 full days all time but 7 in the window reads '7 of 56 days', NOT '40 of 40 days'",+m[1]===7&&+m[2]===56,m[0]);
+          check("RS25g ...and 'about 0.9 days a week' (7 / 56 x 7 = 0.875)",+m[3]===0.9,m[3]);
+          var det=c.querySelector(".sugg-more"),at=det&&det.querySelector(".sugg-alltime"),pk=h.suggestPackages(h.getState()).shown.filter(function(x){ return x.blocks[0].label==="Get ready"; })[0];
+          check("RS25h the all-time numbers are kept inside the closed fold-out: 'Whole sequence on 40 of the N days the first step happened', with 40 the planted full days and N the detector's own anchorCount ("+(pk&&pk.anchorCount)+")",!!at&&!!pk&&pk.count===40&&at.textContent.indexOf("Whole sequence on 40 of the "+pk.anchorCount+" days the first step happened")===0&&det.open===false,at&&at.textContent);
+        }
+        h.setTestNow(null);
+      });
+    }))
+    .then(scenario("RS25j",function(){
+      return freshSandbox(true).then(function(f){
+        /* C: a NEW habit. 60 logged days, the package on the last 30 only (days 30..59). The window is shorter than 56 days: it starts at the
+           habit's first day, 31 days up to the day after the last logged day, so M is 31, not 56. All 30 full days are in it. */
+        var en=noise(21,60); plant(en,21,360,MT,ALLDAYS);
+        var names=["Get ready","Bike","Muay Thai"];
+        dayList(60).slice(0,30).forEach(function(dd){ en[dd.date]=en[dd.date].filter(function(e){ return names.indexOf(e.label)<0; }); });
+        var h=setup(f,60,0,en);
+        openSheet(f);
+        var c=Array.prototype.filter.call(cards(f),function(x){ return x.querySelector(".sugg-title").textContent==="Get ready"; })[0],meta=c&&c.querySelector(".sugg-meta span"),m=meta&&meta.textContent.match(/^(\d+) of (\d+) days \u00b7 about ([\d.]+) days a week/);
+        check("RS25j PRECONDITION: the new habit has a card and its meta line parses",!!c&&!!m,meta&&meta.textContent);
+        if(m){
+          check("RS25j a habit only 31 days old reads '30 of 31 days' (M is the window's length, not a fixed 56)",+m[1]===30&&+m[2]===31,m[0]);
+          check("RS25k ...about 6.8 a week (30 / 31 x 7 = 6.77)",+m[3]===6.8,m[3]);
+          c.querySelector(".sugg-more").open=true;
+          var rows=Array.prototype.map.call(c.querySelectorAll(".sugg-freq .sugg-dur"),function(x){ return x.textContent; });
+          check("RS25l the fold-out rows use the same window: '30 of 31 days' for each step, and their weekly rate over 31 days (6.8)",rows.length===3&&rows.every(function(t){ return /^30 of 31 days \u00b7 about 6\.8 a week$/.test(t); }),J(rows));
+        }
+        h.setTestNow(null);
+      });
+    }))
+    .then(scenario("RS25i",function(){
+      /* a property over several logs: for EVERY card shown, N / M x 7 equals R, N <= M, the strip sums to N */
+      var seeds=[[60,1,ALLDAYS],[75,2,WEEKDAYS],[88,3,[0,2,4]],[100,4,ALLDAYS],[120,5,[1,3,5,6]]],chain=Promise.resolve(),seen=0,bad=[];
+      seeds.forEach(function(sd){
+        chain=chain.then(function(){ return freshSandbox(true); }).then(function(f){
+          var en=noise(sd[1]*11,sd[0]); plant(en,sd[1],360,MT,sd[2]); plant(en,sd[1]+50,720,[{cat:"seed-work",label:"Lunch",len:30}],ALLDAYS);
+          var h=setup(f,sd[0],0,en); openSheet(f);
+          Array.prototype.forEach.call(cards(f),function(c){
+            var mt=c.querySelector(".sugg-meta span").textContent,m=mt.match(/^(\d+) of (\d+) days · about ([\d.]+) (?:days|nights|day|night) a week/);
+            var wk=Array.prototype.map.call(c.querySelectorAll(".sugg-day .sugg-dn"),function(x){ return +x.textContent; }).reduce(function(a,b){ return a+b; },0);
+            seen++;
+            if(!m||+m[1]>+m[2]||Math.abs(+m[1]/+m[2]*7-+m[3])>0.06||wk!==+m[1]) bad.push(sd[0]+"d seed"+sd[1]+": "+mt+" strip "+wk);
+          });
+          h.setTestNow(null);
+        });
+      });
+      return chain.then(function(){
+        check("RS25i PRECONDITION: the property was checked on at least 5 cards",seen>=5,String(seen));
+        check("RS25i on every card of five generated logs, N <= M, N / M x 7 equals R to one decimal, and the weekday strip sums to N",bad.length===0,J(bad));
+      });
+    }))
+
+    /* ---- RS26: THE FOLD-OUT MUST NOT CARRY ITS OWN MATCHING (owner, 2026-10-25). Found by running the real export: "Breakfast" showed
+       8 of 56 days in the fold-out while the detector counted 16 full days in the same window (a package merged from two time
+       variants 25 minutes apart: the fold-out looked only around the median start). Now the fold-out reads the detector's own
+       per-step dates (stepDates). Expected numbers are counted from the PLANTED schedule with the 15-minute rule applied by hand. ---- */
+    .then(scenario("RS26",function(){
+      return freshSandbox(true).then(function(f){
+        /* exact fixture: 70 days, the package every day; 2 days with only the first step... see below */
+        var en=noise(9,70); plant(en,9,360,MT,ALLDAYS);
+        var dl=dayList(70),names=["Get ready","Bike","Muay Thai"];
+        function drop(i,labels){ en[dl[i].date]=en[dl[i].date].filter(function(e){ return labels.indexOf(e.label)<0; }); }
+        function shiftMT(i,by){ en[dl[i].date].forEach(function(e){ if(e.label==="Muay Thai"){ e.start+=by; e.end+=by; } }); }
+        /* in the window (days 15..69): day 60 has only Get ready, day 61 only Get ready + Bike; Muay Thai is 10 min late on days 40, 41, 42 (inside 15) and 25 min late on days 50, 51, 52 (outside 15) */
+        drop(60,["Bike","Muay Thai"]); drop(61,["Muay Thai"]);
+        [40,41,42].forEach(function(i){ shiftMT(i,10); }); [50,51,52].forEach(function(i){ shiftMT(i,25); });
+        /* days 30 and 31: the Bike was SKIPPED and Muay Thai still happened, 10 minutes late. The detector's chain stops at the skipped step, so only the fold-out's usual-time test (15-minute window) can count Muay Thai on these two days; a 5-minute window would not (mutant a09) */
+        drop(30,["Bike"]); drop(31,["Bike"]); shiftMT(30,10); shiftMT(31,10);
+        var h=setup(f,70,0,en),st=h.getState(),ref=isoOf(new Date(DAY0.getFullYear(),DAY0.getMonth(),DAY0.getDate()+70));
+        var raw=h.detectPackages(st.entries,st.categories,st.sessions,ref).packages.filter(function(p){ return p.cats[0]==="seed-admin"&&p.cats.length===3; })[0];
+        check("RS26 PRECONDITION: the detector finds the three-step package",!!raw,raw&&raw.id);
+        openSheet(f);
+        var c=Array.prototype.filter.call(cards(f),function(x){ return x.querySelector(".sugg-title").textContent==="Get ready"; })[0];
+        check("RS26 PRECONDITION: its card is on screen",!!c);
+        if(!raw||!c) return;
+        c.querySelector(".sugg-more").open=true;
+        var got=Array.prototype.map.call(c.querySelectorAll(".sugg-freq .sugg-dur"),function(x){ var m=x.textContent.match(/^(\d+) of (\d+) days/); return m?+m[1]:-1; });
+        var meta=c.querySelector(".sugg-meta span").textContent.match(/^(\d+) of (\d+) days/);
+        /* by hand: the window holds days 15..69 = 55 days, all logged. Get ready on all 55; Bike on all but day 60 and the two Bike-skipped days 30, 31 = 52; Muay Thai on 55 - day 60 - day 61 - the three 25-minute-late days = 50 (the three late-by-10 days with a Bike count, and so do days 30 and 31, where the Bike is missing and Muay Thai is 10 late). The full-package days are 55 - day 60 - day 61 - days 30, 31 - the three 25-late days = 48 */
+        check("RS26a the fold-out counts, counted by hand from the planted days, are [55, 52, 50]",J(got)===J([55,52,50]),J(got));
+        check("RS26b the card's 'N of M' is the detector's own full-day count in the window: 48 (Get ready, Bike and Muay Thai all matched, the Bike-skipped days are not full days)",!!meta&&+meta[1]===48,meta&&meta[0]);
+        check("RS26c every step's count is >= the full-day count N (a step cannot be seen on fewer days than the whole sequence)",!!meta&&got.every(function(n){ return n>=+meta[1]; }),J(got)+" N "+(meta&&meta[1]));
+        check("RS26d the detector exposes its per-step dates (stepDates): one list per block, the first as long as the days the first step was seen (anchorCount), the last containing every full day",Array.isArray(raw.stepDates)&&raw.stepDates.length===raw.blocks.length&&raw.stepDates[0].length===raw.anchorCount&&raw.dates.every(function(d){ return raw.stepDates[raw.stepDates.length-1].indexOf(d)>=0; }),raw.stepDates&&raw.stepDates.map(function(x){ return x.length; }).join(",")+" anchorCount "+raw.anchorCount);
+        var inWin=function(dates){ return dates.filter(function(dt){ var a=h.isoDaysBetween(dt,ref); return a>=0&&a<56; }).length; };
+        var dw=raw.stepDates?raw.stepDates.map(inWin):[];
+        check("RS26e every day the DETECTOR matched a step on (its stepDates inside the window: "+dw.join(", ")+") is counted by the fold-out: each fold-out count is >= the detector's own count for that step",dw.length===3&&got.every(function(n,k){ return n>=dw[k]; }),J(got)+" vs detector "+J(dw));
+        check("RS26e2 ...and the last step's detector count in the window is exactly the card's N (the full days are the last step's dates)",dw.length===3&&!!meta&&dw[2]===+meta[1],J(dw)+" N "+(meta&&meta[1]));
+        h.setTestNow(null);
+      });
+    }))
+    /* ---- H01: a LIVE EARLIER sandbox must not be able to write into a fresh sandbox's storage. Found by running (2026-10-26): RS01's diagnostic
+       showed 1 category and thresholds 2/2 in 3 of about 60 runs. Cause, proven with a spy on setItem: the first sandbox (#sandbox) is still alive
+       when later scenarios wipe the shared test storage, and a 250-400 ms timer in it (a category rename or colour pick, app.js persist() calls)
+       rewrites the key AFTER the wipe, so the next fresh sandbox loads that old one-category state. A fixture problem, not an app problem. ---- */
+    .then(scenario("H01",function(){
+      return freshSandbox(true).then(function(a){
+        var st=a.H.getState();
+        st.categories=[{id:"stale-only",name:"Stale",color:"#888888"}];
+        a.el.contentWindow.setTimeout(function(){ a.H.persist(); },30);  /* the same shape as the 250/400 ms timers in app.js */
+        return freshSandbox(true).then(function(b){
+          return new Promise(function(res){ setTimeout(res,700); }).then(function(){
+            var cats=b.H.getState().categories.map(function(c){ return c.id; });
+            var stored=null; try{ stored=JSON.parse(localStorage.getItem("hours-ledger-selftest-v2")); }catch(e){}
+            check("H01 a fresh sandbox starts with the default categories (8), not the state an earlier live sandbox wrote after the wipe",cats.length===8&&cats.indexOf("stale-only")<0,J(cats));
+            /* the NEXT sandbox, created after the stale timer has fired, must also be clean */
+            return freshSandbox(true).then(function(c){
+              check("H01b ...and the sandbox after that too, and the shared key holds no one-category state",c.H.getState().categories.length===8&&(!stored||stored.categories.length===8),c.H.getState().categories.length+" stored "+(stored?stored.categories.length:"none"));
+            });
+          });
+        });
+      });
+    }))
+    /* ---- RS27: thresholds on a log whose categories are (nearly) absent (owner, 2026-10-26). The detector builds the noise thresholds and the
+       candidate first blocks from the SAME set of known categories, so a log that is eligible by days but has no known category gets thresholds
+       of 2/2 AND nothing to apply them to: no suggestion can appear. Pinned so the two cannot drift apart. ---- */
+    .then(scenario("RS27",function(){
+      return freshSandbox(true).then(function(f){
+        var h=setup(f,60,5),st=h.getState();
+        var full=h.detectPackages(st.entries,st.categories,st.sessions,"2026-09-25");
+        check("RS27 PRECONDITION: with its 8 categories the same 60 days DO give a package and real thresholds",full.packages.length>=1&&full.thresholds.kAll>=6,J(full.thresholds)+" "+full.packages.length);
+        st.categories=[{id:"only-one",name:"Only one",color:"#888888"}]; h.persist();
+        var raw=h.detectPackages(st.entries,st.categories,st.sessions,"2026-09-25"),r=h.suggestPackages(st);
+        check("RS27a one unrelated category: the thresholds are the empty-log values (2/2), eligible by days, and NO package is detected",raw.thresholds.kAll===2&&raw.thresholds.kWd===2&&raw.thresholds.eligible===true&&raw.packages.length===0,J(raw.thresholds)+" "+raw.packages.length);
+        openSheet(f);
+        check("RS27b ...and the Sessions sheet shows no suggestion card",cards(f).length===0&&r.shown.length===0,cards(f).length+" "+r.shown.length);
+        st.categories=[]; h.persist();
+        var r2=h.suggestPackages(st),ok=true; try{ openSheet(f); h.render&&h.render(); }catch(e){ ok=false; }
+        check("RS27c no categories at all: no suggestion, no error",r2.shown.length===0&&ok&&cards(f).length===0,r2.shown.length+" "+ok);
+        h.setTestNow(null);
+      });
+    }))
+    /* ---- RS28: LOGS WITH NO REAL CATEGORY STRUCTURE (owner, 2026-10-26). 35, 60 and 120 logged days of 5 entries a day at random times,
+       (a) every entry uncategorised, (b) one category, (c) two categories; 3 seeds each. RAN before writing this (10 seeds a cell): no
+       package in any of the 90 logs. Thresholds do NOT collapse with one or two categories (they rise as entries concentrate: one category
+       10/5, 13/6, 19/8 at 35/60/120 days); with no category at all they are 2/2, but then no entry can be a first block, so nothing is
+       suggested. These rows are REGRESSION GUARDS (they passed on the code as it was: nothing needed fixing); the mutants s1-s3 show they can fail. ---- */
+    .then(scenario("RS28",function(){
+      var kinds=[["uncategorised",[null]],["one category",["seed-work"]],["two categories",["seed-work","seed-sleep"]]],sizes=[35,60,120],seeds=[1,2,3],chain=Promise.resolve();
+      var bad=[],cells=0,thr={};
+      kinds.forEach(function(k){ sizes.forEach(function(n){ seeds.forEach(function(sd){
+        chain=chain.then(function(){ return freshSandbox(true); }).then(function(f){
+          var r=rng(sd*131+n),en={};
+          dayList(n).forEach(function(dd){ var l=[]; for(var i=0;i<5;i++){ var st0=1+Math.floor(r()*1300); l.push(E(k[1][Math.floor(r()*k[1].length)],st0,st0+20+Math.floor(r()*60),"n"+Math.floor(r()*30))); } en[dd.date]=l; });
+          var h=setup(f,n,0,en),st=h.getState(),ref=isoOf(new Date(DAY0.getFullYear(),DAY0.getMonth(),DAY0.getDate()+n));
+          var raw=h.detectPackages(st.entries,st.categories,st.sessions,ref),sg=h.suggestPackages(st);
+          openSheet(f); cells++;
+          var key=k[0]+" "+n; thr[key]=thr[key]||[]; thr[key].push(raw.thresholds.kAll+"/"+raw.thresholds.kWd);
+          if(raw.packages.length||sg.shown.length||cards(f).length) bad.push(k[0]+" "+n+"d seed"+sd+": "+raw.packages.length+" packages, "+sg.shown.length+" shown, "+cards(f).length+" cards");
+          var e=raw.thresholds;
+          if(k[0]==="uncategorised"&&!(e.kAll===2&&e.kWd===2&&e.eligible)) bad.push("uncategorised "+n+"d thresholds "+J(e));
+          if(k[0]==="one category"&&!(e.kAll>=10&&e.kWd>=5)) bad.push("one category "+n+"d thresholds collapsed: "+J(e));
+          if(k[0]==="two categories"&&!(e.kAll>=7&&e.kWd>=5)) bad.push("two categories "+n+"d thresholds collapsed: "+J(e));
+          h.setTestNow(null);
+        });
+      }); }); });
+      return chain.then(function(){
+        check("RS28 PRECONDITION: 27 logs were generated (3 kinds x 3 sizes x 3 seeds)",cells===27,String(cells));
+        check("RS28a in all 27 logs: no package is detected, no suggestion is shown, no card is on screen",bad.filter(function(x){ return x.indexOf("thresholds")<0; }).length===0,J(bad.slice(0,4)));
+        check("RS28b thresholds: uncategorised exactly 2/2 (and still eligible by days); one category at least 10/5; two categories at least 7/5 - they do not collapse when entries share few categories",bad.filter(function(x){ return x.indexOf("thresholds")>=0; }).length===0,J(thr));
+      });
+    }))
+    .then(scenario("RS26f",function(){
+      return freshSandbox(true).then(function(f){
+        /* two time variants 25 minutes apart, merged by the detector into ONE package (weeks alternate 06:00 and 06:25, Mon-Fri, 84 days) */
+        var en=noise(13,84),r=rng(77);
+        /* the random noise must not put an entry of the package's own categories near the package (a coincidence would add a day to a hand count) */
+        Object.keys(en).forEach(function(k){ en[k]=en[k].filter(function(e){ return ["seed-admin","seed-training","seed-people"].indexOf(e.cat)<0; }); });
+        dayList(84).forEach(function(dd,i){
+          if(dd.wd>4) return;
+          var t=(Math.floor(i/7)%2===0?360:385)+Math.floor((r()*2-1)*3);
+          MT.forEach(function(b){ en[dd.date].push(E(b.cat,t,t+b.len,b.label)); t+=b.len; });
+        });
+        var h=setup(f,84,0,en),st=h.getState(),q=new Date(DAY0.getFullYear(),DAY0.getMonth(),DAY0.getDate()+84),ref=isoOf(q);
+        var raw=h.detectPackages(st.entries,st.categories,st.sessions,ref).packages.filter(function(p){ return p.cats[0]==="seed-admin"&&p.cats.length===3; })[0];
+        check("RS26f PRECONDITION: ONE package, merged from two variants (mergedFrom 2), with a card",!!raw&&raw.mergedFrom===2,raw&&String(raw.mergedFrom));
+        if(!raw) return;
+        openSheet(f);
+        var c=Array.prototype.filter.call(cards(f),function(x){ return x.querySelector(".sugg-title").textContent==="Get ready"; })[0];
+        if(!c){ check("RS26f PRECONDITION: its card is on screen",false); return; }
+        c.querySelector(".sugg-more").open=true;
+        var got=Array.prototype.map.call(c.querySelectorAll(".sugg-freq .sugg-dur"),function(x){ var m=x.textContent.match(/^(\d+) of (\d+) days/); return m?+m[1]:-1; });
+        /* by hand: every Mon-Fri in the window had all three steps, whichever variant */
+        var want=0; dayList(84).forEach(function(dd){ var a=Math.round((q-dd.dt)/864e5); if(dd.wd<=4&&a>=0&&a<56) want++; });
+        check("RS26g a package merged from two variants: every step is counted on EVERY weekday of the window ("+want+" each), not only on the variant near the median start",J(got)===J([want,want,want]),J(got));
+        h.setTestNow(null);
+      });
+    }))
+
     /* ---- RS11: nothing dead is left behind */
     .then(function(){
       return fetch("app.js?v="+Date.now()).then(function(r){ return r.text(); }).then(function(src){
@@ -5507,7 +5815,7 @@ function runSuggestionTests(){
         check("RS11 the old one-block detector is gone from app.js: none of its functions or constants remain",left.length===0,J(left));
       });
     })
-    .then(function(){ return results; });
+    .then(function(){ isolateSandboxes=false; return results; });
 }
 
 /* ---------------------------------------------------------------------

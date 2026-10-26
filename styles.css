@@ -42,6 +42,9 @@ button{cursor:pointer}
 .wordmark{font-size:clamp(26px,4.4vw,44px);font-weight:800;font-variation-settings:"wdth" 118;letter-spacing:-.02em;line-height:.9;text-transform:uppercase;margin:0;cursor:pointer}
 .wordmark span{display:block;font-size:.28em;font-weight:500;font-variation-settings:"wdth" 100;letter-spacing:.22em;color:var(--muted);margin-top:9px}
 .weeknav{display:flex;align-items:center;gap:8px;margin-left:auto}
+/* the four text buttons (This week, Close out last week, Review, Sessions): on a wide screen they are plain flex items of .weeknav,
+   one row; at phone widths (the 820 px mobile breakpoint, below) they become a second row of three equal buttons */
+.navbtns{display:contents}
 .weeknav input[type=date]{font-family:var(--mono);font-size:13px;padding:7px 9px;background:transparent;border:1px solid var(--rule);border-radius:0}
 .stepper{width:34px;height:34px;border:1px solid var(--ink);background:transparent;font-size:15px;line-height:1;display:grid;place-items:center}
 .stepper:hover{background:var(--ink);color:var(--paper)}
@@ -372,14 +375,21 @@ button{cursor:pointer}
      so the hour labels and the slots they're meant to line up with can
      never drift apart again */
   :root{--row:30px}
+  /* masthead, phone widths: row 1 = previous / date / next; row 2 = This week, Review, Sessions as three EQUAL buttons, each at least
+     44 px tall. "Close out last week" (only some weeks) takes its own full-width row UNDER them, so the three never move. */
+  .weeknav{width:100%;margin-left:0;flex-wrap:wrap}
+  .weeknav input[type=date]{flex:1;min-width:0}
+  .navbtns{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;width:100%}
+  .navbtns .ghost{min-height:44px;padding:8px 4px;white-space:nowrap}
+  #closeoutBtn{grid-column:1/-1;order:4}
   .field input[type=text],.field select,.field input[type=time],.field input[type=date]{font-size:16px}
   button,a{-webkit-tap-highlight-color:rgba(22,33,27,.12)}
 }
 @media(max-width:700px){
   .wordmark{font-size:30px}
-  .weeknav{width:100%;margin-left:0;flex-wrap:wrap}
-  .weeknav input[type=date]{flex:1;min-width:0}
-  .tools .ghost{min-width:0}
+  /* was .tools .ghost{min-width:0} (from the single-file days): it let seven buttons shrink into ONE row, their words overlapping and
+     the page scrolling sideways at 360 px (seen in a screenshot 2026-10-25). Keeping the 118 px minimum lets them wrap, two to a row. */
+  .tools .ghost{min-height:44px}
   /* Real-phone bug (reported 2026-09-03): .trio's grid centering, confirmed
      correct on laptop and in headless Chrome at several widths, went wrong
      on a real iPhone specifically once the left item wrapped to 3 lines —
@@ -406,6 +416,7 @@ button{cursor:pointer}
 .sugg-more summary::-webkit-details-marker{display:none}
 .sugg-more summary::after{content:"+"}
 .sugg-more[open] summary::after{content:"\2212"}
+.sugg-alltime{font-family:var(--mono);font-size:11px;color:var(--muted);padding:2px 0 6px;line-height:1.4}
 .sugg-freq{display:grid;grid-template-columns:8px minmax(0,1fr) auto;column-gap:10px;align-items:center;padding:2px 0;font-size:12px}
 /* saved session rows: same step list as a card, a rename-in-place name, small secondary controls under the Log button */
 .sess-name{display:flex;align-items:center;width:100%;min-height:44px;padding:0;border:0;background:none;font:inherit;font-weight:700;font-size:14px;text-align:left;cursor:text;overflow-wrap:anywhere}

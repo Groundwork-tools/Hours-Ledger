@@ -1123,17 +1123,25 @@ function isoDaysBetween(a,b){
   var p=a.split("-"),q=b.split("-");
   return Math.round((new Date(+q[0],+q[1]-1,+q[2])-new Date(+p[0],+p[1]-1,+p[2]))/86400000);
 }
-function recentRate(dates,asOf){
+/* is this date inside the rate window: the PKG_RATE_WINDOW_DAYS days up to and including asOf. ONE definition, used by the rate,
+   the card's "N of M days", the weekday strip and the per-step fold-out, so they cannot drift apart. */
+function inRateWindow(date,asOf){ var ago=isoDaysBetween(date,asOf); return ago>=0&&ago<PKG_RATE_WINDOW_DAYS; }
+/* the rate's own window: n = distinct full days inside it, days = its length (the shorter of 56 days and the time since the first
+   date, at least one week). rate = n / (days / 7). */
+function rateWindow(dates,asOf){
   var seen={},first=null,inWin=0;
   (dates||[]).forEach(function(d){
     if(seen[d]) return; seen[d]=1;
     if(first===null||d<first) first=d;
-    var ago=isoDaysBetween(d,asOf);
-    if(ago>=0&&ago<PKG_RATE_WINDOW_DAYS) inWin++;
+    if(inRateWindow(d,asOf)) inWin++;
   });
-  if(first===null) return 0;
+  if(first===null) return {n:0,days:0};
   var since=Math.max(1,isoDaysBetween(first,asOf)+1);
-  return inWin/Math.max(1,Math.min(PKG_RATE_WINDOW_DAYS,since)/7);
+  return {n:inWin,days:Math.max(7,Math.min(PKG_RATE_WINDOW_DAYS,since))};
+}
+function recentRate(dates,asOf){
+  var w=rateWindow(dates,asOf);
+  return w.days?w.n/(w.days/7):0;
 }
 function pkgSortEntries(a,b){
   return a.start-b.start||a.end-b.end||(a.label<b.label?-1:a.label>b.label?1:0)||(a.id<b.id?-1:a.id>b.id?1:0);
@@ -1159,7 +1167,7 @@ function pkgClusters(occ,minDates){
   }
   return out;
 }
-function pkgSummarise(cats,occ,catName,via,anchorCount,mergedFrom){
+function pkgSummarise(cats,occ,catName,via,anchorCount,mergedFrom,stepDates){
   var dates=Object.keys(occ).sort(),k=cats.length,blocks=[],wdc=[0,0,0,0,0,0,0];
   dates.forEach(function(d){ wdc[weekdayOfIso(d)]++; });
   var anchor=pkgMedian(dates.map(function(d){ return occ[d][0].start; }));
@@ -1172,7 +1180,7 @@ function pkgSummarise(cats,occ,catName,via,anchorCount,mergedFrom){
       duration:pkgMedian(dates.map(function(d){ return occ[d][b].end-occ[d][b].start; })),
       label:rep[best]});
   }
-  return {cats:cats.slice(),blocks:blocks,anchor:anchor,count:dates.length,anchorCount:anchorCount,dates:dates,weekdayCounts:wdc,via:via,occ:occ,mergedFrom:mergedFrom||1};
+  return {cats:cats.slice(),blocks:blocks,anchor:anchor,count:dates.length,anchorCount:anchorCount,dates:dates,weekdayCounts:wdc,via:via,occ:occ,mergedFrom:mergedFrom||1,stepDates:stepDates||[]};
 }
 function pkgCoveredBy(sessions,pkg){
   return Object.keys(sessions||{}).some(function(id){
@@ -1251,7 +1259,11 @@ function detectPackages(entriesByDate,categories,sessions,asOf){
       Object.keys(reach).forEach(function(d){
         if(reach[d].length>=L) occ[d]=reach[d].slice(0,L).map(function(ix){ return days[d][ix]; });
       });
-      pkgs.push(pkgSummarise(cats.slice(0,L),occ,catName,q.via,n0,1));
+      /* per-step dates: the dates on which the chain reached step k (the detector's own matching, partial chains included). The
+         card's fold-out reads these, so it has no matching of its own to drift. Nothing here changes what is found or ranked. */
+      var stepDates=[];
+      for(var sk=0;sk<L;sk++) stepDates.push(Object.keys(reach).filter(function(d){ return reach[d].length>sk; }).sort());
+      pkgs.push(pkgSummarise(cats.slice(0,L),occ,catName,q.via,n0,1,stepDates));
     });
   });
   /* merge qualified packages with the same category sequence whose first blocks are within 30 minutes (chained) */
@@ -1262,7 +1274,11 @@ function detectPackages(entriesByDate,categories,sessions,asOf){
     function flush(){
       var occ={},n0=0,vias={};
       grp.forEach(function(p){ Object.keys(p.occ).forEach(function(d){ if(!(d in occ)) occ[d]=p.occ[d]; }); n0+=p.anchorCount; vias[p.via]=1; });
-      merged.push(pkgSummarise(grp[0].cats,occ,catName,Object.keys(vias).length>1?"both":grp[0].via,n0,grp.length));
+      var sd=grp[0].cats.map(function(c,k){
+        var u={}; grp.forEach(function(p){ (p.stepDates[k]||[]).forEach(function(d){ u[d]=1; }); });
+        return Object.keys(u).sort();
+      });
+      merged.push(pkgSummarise(grp[0].cats,occ,catName,Object.keys(vias).length>1?"both":grp[0].via,n0,grp.length,sd));
     }
     for(var i=1;i<lst.length;i++){
       if(lst[i].anchor-grp[grp.length-1].anchor<=PKG_MERGE_MINUTES) grp.push(lst[i]);
@@ -1288,7 +1304,7 @@ function detectPackages(entriesByDate,categories,sessions,asOf){
   });
   out.packages=kept.filter(function(p){ return !pkgCoveredBy(sessions,p); }).map(function(p){
     return {id:p.id,cats:p.cats,blocks:p.blocks,anchor:p.anchor,count:p.count,anchorCount:p.anchorCount,dates:p.dates,
-      weekdayCounts:p.weekdayCounts,via:p.via,firstDate:p.firstDate,lastDate:p.lastDate,rate:p.rate,effort:p.effort,mergedFrom:p.mergedFrom};
+      weekdayCounts:p.weekdayCounts,via:p.via,firstDate:p.firstDate,lastDate:p.lastDate,rate:p.rate,effort:p.effort,mergedFrom:p.mergedFrom,stepDates:p.stepDates};
   });
   return out;
 }
@@ -5080,22 +5096,33 @@ function rateText(rate,nights){
 /* weekday counts over the SAME window as the rate (the last PKG_RATE_WINDOW_DAYS days up to the reference date) */
 function windowWeekdayCounts(dates,ref){
   var c=[0,0,0,0,0,0,0];
-  dates.forEach(function(d){ var ago=isoDaysBetween(d,ref); if(ago>=0&&ago<PKG_RATE_WINDOW_DAYS) c[weekdayOfIso(d)]++; });
+  dates.forEach(function(d){ if(inRateWindow(d,ref)) c[weekdayOfIso(d)]++; });
   return c;
 }
-/* per-step frequency, computed here from the log and NOT by the detector: for each of the last PKG_RATE_WINDOW_DAYS days,
-   does an entry of that step's category start within the cluster tolerance of the time that step would have that day? (midnight
-   halves folded, so a night is one entry on its evening; a step that begins after midnight is looked for on the next date) */
-function stepFrequencies(pkg,ref){
-  var days=foldMidnightHalves(state.entries||{}).days,out=pkg.blocks.map(function(){ return 0; });
-  for(var a=0;a<PKG_RATE_WINDOW_DAYS;a++){
-    var D=addDays(parseIso(ref),-a);
-    pkg.blocks.forEach(function(b,k){
-      var abs=pkg.anchor+b.offset,shift=Math.floor(abs/1440),want=abs-shift*1440,es=days[iso(addDays(D,shift))]||[];
-      if(es.some(function(e){ return e.cat===b.cat&&Math.abs(e.start-want)<=DETECT_TOLERANCE_MIN; })) out[k]++;
-    });
-  }
-  return out;
+/* per-step frequency, over the rate window. A step counts on a day if EITHER the detector's own chain reached it that day
+   (pkg.stepDates: the detector's matching, partial chains included, and every time variant of a merged package) OR an entry of the
+   step's category starts within PKG_MATCH_WINDOW_MINUTES of its usual time (anchor + offset), which still counts a step that
+   happened when an earlier step was skipped. The chain dates make the count at least the detector's full-day count for every step
+   (an earlier version used only the second test and showed 8 against the detector's 16 for a package merged from two time
+   variants on the real export). `days` is the midnight-folded log (computed once per render). */
+function stepFrequencies(pkg,ref,days){
+  days=days||foldMidnightHalves(state.entries||{}).days;
+  return pkg.blocks.map(function(b,k){
+    var seen={},abs=pkg.anchor+b.offset,shift=Math.floor(abs/1440),want=abs-shift*1440;
+    ((pkg.stepDates&&pkg.stepDates[k])||[]).forEach(function(d){ if(inRateWindow(d,ref)) seen[d]=1; });
+    for(var a=0;a<PKG_RATE_WINDOW_DAYS;a++){
+      var D=addDays(parseIso(ref),-a),key=iso(D);
+      if(seen[key]) continue;
+      var es=days[iso(addDays(D,shift))]||[];
+      if(es.some(function(e){ return e.cat===b.cat&&Math.abs(e.start-want)<=PKG_MATCH_WINDOW_MINUTES; })) seen[key]=1;
+    }
+    return Object.keys(seen).length;
+  });
+}
+/* everything a card says about how often, from ONE window: n full days of the days-long window (the rate's own), per-step counts */
+function cardFigures(pkg,ref,days){
+  var w=rateWindow(pkg.dates,ref);
+  return {n:w.n,days:w.days,steps:stepFrequencies(pkg,ref,days)};
 }
 function renderSuggestions(){
   var el=document.getElementById("sessSuggest"),r=suggestPackages(state);
@@ -5105,19 +5132,19 @@ function renderSuggestions(){
     return;
   }
   if(!suggestCurrent.length){ el.innerHTML=""; return; }
-  var WL=["M","T","W","T","F","S","S"],ref=iso(sessionNow()),weeks=PKG_RATE_WINDOW_DAYS/7;
+  var WL=["M","T","W","T","F","S","S"],ref=iso(sessionNow()),weeks=PKG_RATE_WINDOW_DAYS/7,foldedDays=foldMidnightHalves(state.entries||{}).days;
   el.innerHTML='<h3>Patterns in your log</h3><p class="hint">Proposals only. Nothing is logged.</p>'+
     suggestCurrent.map(function(x,i){
       var steps=packageSteps(x),title=steps[0].label||steps[0].catName,nights=steps.some(function(t){ return t.nextDay; });
-      var wk=windowWeekdayCounts(x.dates,ref),fq=stepFrequencies(x,ref);
+      var wk=windowWeekdayCounts(x.dates,ref),fg=cardFigures(x,ref,foldedDays),fq=fg.steps;
       return '<div class="sugg" data-i="'+i+'" data-id="'+escapeHtml(x.id)+'"><b class="sugg-title">'+escapeHtml(title)+'</b>'+
         '<div class="sugg-steps">'+stepsHtml(steps)+'</div>'+
-        '<div class="sugg-meta"><span>'+x.count+" of "+x.anchorCount+" days &middot; "+rateText(x.rate,nights)+'</span><span class="sugg-cap">Weekdays, last '+weeks+' weeks</span></div>'+
+        '<div class="sugg-meta"><span>'+fg.n+" of "+fg.days+" days &middot; "+rateText(x.rate,nights)+'</span><span class="sugg-cap">Weekdays, last '+weeks+' weeks</span></div>'+
         '<div class="sugg-week" role="img" aria-label="'+escapeHtml(weekdayEvidence(wk))+'">'+wk.map(function(c,k){
           return '<span class="sugg-day'+(c?"":" zero")+'"><span class="sugg-dl">'+WL[k]+'</span><span class="sugg-dn">'+c+'</span></span>';
         }).join("")+'</div>'+
-        '<details class="sugg-more"><summary>How often each step</summary>'+steps.map(function(t,k){
-          return '<div class="sugg-freq">'+dotHtml(t.cat)+'<span class="sugg-label">'+escapeHtml(t.label||t.catName)+'</span><span class="sugg-dur">'+fq[k]+" of "+PKG_RATE_WINDOW_DAYS+" days &middot; about "+(Math.round(fq[k]/weeks*10)/10)+" a week"+'</span></div>';
+        '<details class="sugg-more"><summary>How often each step</summary><div class="sugg-alltime">Whole sequence on '+x.count+" of the "+x.anchorCount+" days the first step happened (all time)</div>"+steps.map(function(t,k){
+          return '<div class="sugg-freq">'+dotHtml(t.cat)+'<span class="sugg-label">'+escapeHtml(t.label||t.catName)+'</span><span class="sugg-dur">'+fq[k]+" of "+fg.days+" days &middot; about "+(Math.round(fq[k]/(fg.days/7)*10)/10)+" a week"+'</span></div>';
         }).join("")+'</details>'+
         '<div class="sugg-btns"><button class="solid sugg-create">Create session</button><button class="ghost sugg-no">Not now</button></div></div>';
     }).join("");
@@ -5460,6 +5487,12 @@ if(TEST_MODE){
     getSuggestStats:function(){ return {hits:suggestStats.hits,misses:suggestStats.misses}; },
     resetSuggestCacheForTest:function(){ suggestCache=null; suggestStats.hits=0; suggestStats.misses=0; },
     packageSteps:packageSteps,
+    stepFrequencies:stepFrequencies,
+    cardFigures:cardFigures,
+    rateWindow:rateWindow,
+    windowWeekdayCounts:windowWeekdayCounts,
+    rateText:rateText,
+    isoDaysBetween:isoDaysBetween,
     dismissSuggestion:dismissSuggestion,
     getDismissedSuggestions:dismissedSuggestions,
     clearDismissedSuggestionsForTest:function(){ try{ localStorage.removeItem(SGKEY); }catch(e){} },

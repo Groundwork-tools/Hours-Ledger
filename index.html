@@ -34,9 +34,12 @@
       <button class="stepper" id="prev" aria-label="Previous week">&larr;</button>
       <input type="date" id="anchor" aria-label="Jump to week">
       <button class="stepper" id="next" aria-label="Next week">&rarr;</button>
-      <button class="ghost" id="thisweek">This week</button>
-      <button class="ghost" id="closeoutBtn">Close out last week</button>
-      <button class="ghost" id="reviewToggle">Review</button>
+      <div class="navbtns">
+        <button class="ghost" id="thisweek">This week</button>
+        <button class="ghost" id="closeoutBtn">Close out last week</button>
+        <button class="ghost" id="reviewToggle">Review</button>
+        <button class="ghost" id="sessionsBtn" title="Save logged time as a reusable session, or log one">Sessions</button>
+      </div>
     </div>
   </header>
 
@@ -116,7 +119,6 @@
           <button class="ghost" id="linkFile">Keep a file in sync</button>
           <button class="ghost" id="save">Export a copy</button>
           <button class="ghost" id="exportWeek" title="Download the week on screen as a data file">Export week</button>
-          <button class="ghost" id="sessionsBtn" title="Save logged time as a reusable session, or log one">Sessions</button>
           <button class="ghost" id="load">Open a copy</button>
           <button class="ghost" id="range">Show full 24h</button>
           <button class="ghost" id="print">Print</button>
