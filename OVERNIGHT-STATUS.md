@@ -583,3 +583,8 @@ Layout and text only; detection, thresholds, ranking, memo, behaviour unchanged.
 7. **Create session** on one card: the session appears at once, nothing is logged; Ctrl/Cmd+Z removes it. **Not now** hides a card.
 8. On a saved session press **Log today HH:MM-HH:MM**: entries appear, the sheet closes, the toast shows the times and Undo.
 Look at: anything that wraps badly or touches an edge, any number that does not agree with the card, any suggestion you do not recognise as a habit.
+
+## Sessions sheet: two labelled sections (2026-10-26) - committed on feature/sessions, NOT merged, NOT pushed, owner judges on a real screen
+- Built: headings "Your sessions (N)" / "Patterns in your log" (same mono uppercase label), 2 px ink divider with more space than between cards, empty-state line under each heading (including under 35 logged days and an empty ledger), save fold-out untouched.
+- Tests first: RS29 (+ RS02 changed on purpose) failed 7 of 619 rows on the old code, watched. RS17 changed (last card has no bottom rule). 23 mutants (u1-u24): all killed, base green.
+- Screenshots (RAN, built-in browser pane, read-only copy of your export, test storage): `sheet-390-top.jpg`, `sheet-390-divider.jpg`, `sheet-1000-divider.jpg` in the session scratchpad (outside the repo: they show your real entries). The 1000 px one was scaled to 72% to fit the pane. Not WebKit, not a phone.

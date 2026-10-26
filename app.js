@@ -5127,13 +5127,14 @@ function cardFigures(pkg,ref,days){
 function renderSuggestions(){
   var el=document.getElementById("sessSuggest"),r=suggestPackages(state);
   suggestCurrent=r.shown;
+  var HEAD='<h3 class="sess-sec-h" id="sessPatHead">Patterns in your log</h3>';
   if(!r.eligible){
-    el.innerHTML=r.n>0?'<h3>Patterns in your log</h3><p class="hint">Suggestions start once you have '+r.minDays+' logged days; you have '+r.n+'.</p>':"";
+    el.innerHTML=HEAD+'<p class="hint">Suggestions start once you have '+r.minDays+' logged days; you have '+r.n+'.</p>';
     return;
   }
-  if(!suggestCurrent.length){ el.innerHTML=""; return; }
+  if(!suggestCurrent.length){ el.innerHTML=HEAD+'<p class="hint">No patterns to suggest right now.</p>'; return; }
   var WL=["M","T","W","T","F","S","S"],ref=iso(sessionNow()),weeks=PKG_RATE_WINDOW_DAYS/7,foldedDays=foldMidnightHalves(state.entries||{}).days;
-  el.innerHTML='<h3>Patterns in your log</h3><p class="hint">Proposals only. Nothing is logged.</p>'+
+  el.innerHTML=HEAD+'<p class="hint">Proposals only. Nothing is logged.</p>'+
     suggestCurrent.map(function(x,i){
       var steps=packageSteps(x),title=steps[0].label||steps[0].catName,nights=steps.some(function(t){ return t.nextDay; });
       var wk=windowWeekdayCounts(x.dates,ref),fg=cardFigures(x,ref,foldedDays),fq=fg.steps;
@@ -5189,6 +5190,7 @@ function renderSessions(){
   var ids=Object.keys(state.sessions||{}).sort(function(a,b){
     return state.sessions[a].name.toLowerCase()<state.sessions[b].name.toLowerCase()?-1:1;
   });
+  document.getElementById("sessMineHead").textContent="Your sessions ("+ids.length+")";
   document.getElementById("sessList").innerHTML=ids.length?ids.map(function(id){
     var r=state.sessions[id],t=logTarget(id),o=sessOther[id],pend=sessLogPending&&sessLogPending.id===id?sessLogPending:null;
     return '<div class="sessrow" data-id="'+escapeHtml(id)+'">'+

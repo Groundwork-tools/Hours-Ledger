@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1687;
+var EXPECTED_MIN_ROWS=1713;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -4839,7 +4839,7 @@ function runSuggestionTests(){
         f.d.getElementById("sessClose").click();
         h.getState().entries={}; h.persist();
         openSheet(f);
-        check("RS02 an empty ledger shows nothing at all in the suggestions area",f.d.getElementById("sessSuggest").textContent.trim()==="");
+        check("RS02 an empty ledger shows only the heading and its 35-day note in the suggestions area (changed 2026-10-26 on purpose: it used to show nothing; the two sections are always labelled)",/^Patterns in your log\s*Suggestions start once you have 35 logged days; you have 0\.$/.test(f.d.getElementById("sessSuggest").textContent.trim().replace(/\s+/g," ")),f.d.getElementById("sessSuggest").textContent.trim());
         h.setTestNow(null);
       });
     }))
@@ -5272,7 +5272,7 @@ function runSuggestionTests(){
         var csx=function(el){ return f.el.contentWindow.getComputedStyle(el); },saveBtn=csx(d.getElementById("sessSaveGo"));
         check("RS17 'Create session' is the PRIMARY button: the same dark fill, text colour and font size as 'Save session' ("+(bs[0]&&csx(bs[0]).backgroundColor)+")",bs.length===2&&csx(bs[0]).backgroundColor===saveBtn.backgroundColor&&csx(bs[0]).color===saveBtn.color&&csx(bs[0]).fontSize===saveBtn.fontSize&&csx(bs[0]).backgroundColor!=="rgba(0, 0, 0, 0)");
         check("RS17 'Not now' is a plain SECONDARY button: transparent fill, ink text, a 1 px rule border",bs.length===2&&csx(bs[1]).backgroundColor==="rgba(0, 0, 0, 0)"&&csx(bs[1]).borderTopWidth==="1px"&&csx(bs[1]).backgroundColor!==csx(bs[0]).backgroundColor);
-        check("RS17 design constraints: square corners and no shadow on both buttons; Archivo for the title, Spline Sans Mono for times, durations and the weekday counts",bs.length===2&&bs.every(function(b){ return csx(b).borderTopLeftRadius==="0px"&&csx(b).boxShadow==="none"; })&&/Archivo/.test(csx(title).fontFamily)&&/Spline Sans Mono/.test(csx(c.querySelector(".sugg-time")).fontFamily)&&/Spline Sans Mono/.test(csx(c.querySelector(".sugg-dur")).fontFamily)&&/Spline Sans Mono/.test(csx(cells[0].querySelector(".sugg-dn")).fontFamily)&&csx(c).borderBottomWidth==="1px",csx(title).fontFamily.slice(0,30));
+        check("RS17 design constraints: square corners and no shadow on both buttons; Archivo for the title, Spline Sans Mono for times, durations and the weekday counts",bs.length===2&&bs.every(function(b){ return csx(b).borderTopLeftRadius==="0px"&&csx(b).boxShadow==="none"; })&&/Archivo/.test(csx(title).fontFamily)&&/Spline Sans Mono/.test(csx(c.querySelector(".sugg-time")).fontFamily)&&/Spline Sans Mono/.test(csx(c.querySelector(".sugg-dur")).fontFamily)&&/Spline Sans Mono/.test(csx(cells[0].querySelector(".sugg-dn")).fontFamily)&&csx(c).borderBottomWidth===(c.nextElementSibling?"1px":"0px"),csx(title).fontFamily.slice(0,30));  /* a card with another card after it has the thin 1 px rule; the LAST card has none (changed 2026-10-26: the section divider is the one line there; the 1 px between cards is pinned by RS29) */
         check("RS17 two buttons, 'Create session' and 'Not now' (short enough not to wrap), each at least 44 px tall (computed min-height)",bs.length===2&&bs[0].textContent==="Create session"&&bs[1].textContent==="Not now"&&Array.prototype.every.call(bs,function(b){ return parseFloat(f.el.contentWindow.getComputedStyle(b).minHeight)>=44; }),Array.prototype.map.call(bs,function(b){ return f.el.contentWindow.getComputedStyle(b).minHeight; }).join(","));
         h.setTestNow(null);
       });
@@ -5779,6 +5779,76 @@ function runSuggestionTests(){
         check("RS28a in all 27 logs: no package is detected, no suggestion is shown, no card is on screen",bad.filter(function(x){ return x.indexOf("thresholds")<0; }).length===0,J(bad.slice(0,4)));
         check("RS28b thresholds: uncategorised exactly 2/2 (and still eligible by days); one category at least 10/5; two categories at least 7/5 - they do not collapse when entries share few categories",bad.filter(function(x){ return x.indexOf("thresholds")>=0; }).length===0,J(thr));
       });
+    }))
+    /* ---- RS29: THE SESSIONS SHEET READS AS TWO LABELLED SECTIONS (owner, 2026-10-26). "Your sessions (N)" and "Patterns in your log": the same mono
+       uppercase label, a stronger rule and more space between them than between cards, an empty-state line under each heading, and the
+       "Save logged time as a session" fold-out must not look like a third section. Structure and computed style only: they cannot show
+       whether it LOOKS clear (the owner judges that on a real screen), nor WebKit, nor a phone. ---- */
+    .then(scenario("RS29",function(){
+      var INK="rgb(22, 33, 27)",RULE="rgb(194, 205, 193)",chain=Promise.resolve();
+      function vframe(W){
+        ["hours-ledger-selftest-v2","hours-ledger-device-id-TESTMODE","hours-ledger-selftest-undo-v1","hours-ledger-fakedrive-TESTMODE","hours-ledger-access-token-TESTMODE","hours-ledger-selftest-sessions-dismissed-v1","hours-ledger-selftest-sessions-dismissed-suggestions-v1"].forEach(function(k){ try{ localStorage.removeItem(k); }catch(e){} });
+        return new Promise(function(resolve){
+          var el=document.createElement("iframe");
+          el.style.cssText="display:block;position:fixed;left:-20000px;top:0;border:0;width:"+W+"px;height:900px";
+          el.addEventListener("load",function onl(){ el.removeEventListener("load",onl); setTimeout(function(){ resolve(el); },150); });
+          el.src="index.html?hltest=1&v="+Date.now();
+          document.body.appendChild(el);
+        });
+      }
+      function R(x){ return x?x.getBoundingClientRect():{left:0,right:0,top:0,bottom:0,width:0,height:0}; }
+      [390,1000].forEach(function(W){
+        chain=chain.then(function(){ return vframe(W); }).then(function(el){
+          var w=el.contentWindow,d=el.contentDocument,h=w.__HL_TEST__,st=h.getState(),tag="RS29 @"+W+"px";
+          var en29=noise(5,60); plant(en29,5,360,MT,WEEKDAYS); plant(en29,55,720,[{cat:"seed-work",label:"Lunch",len:30}],ALLDAYS); plant(en29,56,1000,[{cat:"seed-studies",label:"Reading",len:40}],ALLDAYS);
+          st.entries=en29; h.persist(); h.setTestNow(nowAfter(60));
+          d.getElementById("sessionsBtn").click();
+          if(d.querySelector(".sugg-create")) d.querySelector(".sugg-create").click(); /* one session is enough: a second tap inside 700 ms is ignored by design, and the clock is frozen in this runner so it cannot be waited out */
+          var n=Object.keys(h.getState().sessions||{}).length,cs=d.querySelectorAll(".sugg");
+          check(tag+" PRECONDITION: the page is "+W+" px wide, at least 1 saved session and at least 1 suggestion card are on screen",w.innerWidth===W&&n>=1&&cs.length>=1,"innerWidth "+w.innerWidth+" sessions "+n+" cards "+cs.length);
+          var heads=Array.prototype.filter.call(d.querySelectorAll("#sessScrim .sess-sec-h"),function(x){ return R(x).height>0; });
+          check(tag+" 29a exactly TWO section headings are visible, in this order: 'Your sessions ("+n+")' then 'Patterns in your log'",heads.length===2&&heads[0].textContent.trim()==="Your sessions ("+n+")"&&heads[1].textContent.trim()==="Patterns in your log",J(heads.map(function(x){ return x.textContent.trim(); })));
+          if(heads.length!==2){ document.body.removeChild(el); return; }
+          var row=d.querySelector("#sessList .sessrow"),rows=d.querySelectorAll("#sessList .sessrow"),card=d.querySelector("#sessSuggest .sugg"),box=d.getElementById("sessSaveBox");
+          check(tag+" 29b top to bottom: sessions heading, the saved sessions, patterns heading, the cards, the save fold-out (tops "+[heads[0],row,heads[1],card,box].map(function(x){ return Math.round(R(x).top); }).join(" < ")+")",R(heads[0]).top<R(row).top&&R(row).top<R(heads[1]).top&&R(heads[1]).top<R(card).top&&R(card).top<R(box).top);
+          var c0=w.getComputedStyle(heads[0]),c1=w.getComputedStyle(heads[1]);
+          var props=["fontFamily","fontSize","fontWeight","letterSpacing","textTransform","color"];
+          check(tag+" 29c both headings are the SAME label: Spline Sans Mono, uppercase, 10 px, letter-spaced, muted ("+props.map(function(p){ return c0[p]===c1[p]; }).join(",")+")",props.every(function(p){ return c0[p]===c1[p]; })&&/Mono/.test(c0.fontFamily)&&c0.textTransform==="uppercase"&&c0.fontSize==="10px"&&c0.letterSpacing!=="normal",c0.fontFamily+" "+c0.fontSize+" "+c0.textTransform+" "+c0.letterSpacing);
+          var sec=d.getElementById("sessSuggest"),cd=w.getComputedStyle(sec),cc=w.getComputedStyle(card),lastRow=rows[rows.length-1],lr=w.getComputedStyle(lastRow);
+          check(tag+" 29d the divider is a STRONGER rule than the one between cards: "+cd.borderTopWidth+" "+cd.borderTopStyle+" in ink or rule colour, against "+cc.borderBottomWidth+" between cards",parseFloat(cd.borderTopWidth)>=2&&parseFloat(cd.borderTopWidth)>parseFloat(cc.borderBottomWidth)&&cd.borderTopStyle==="solid"&&(cd.borderTopColor===INK||cd.borderTopColor===RULE),cd.borderTopWidth+" "+cd.borderTopColor);
+          var gap=R(sec).top-R(lastRow).bottom,pad=parseFloat(cc.paddingTop);
+          check(tag+" 29e MORE vertical space across the divider than between cards: "+Math.round(gap)+" px from the last saved session to the divider, against "+Math.round(pad)+" px of card padding",gap>=24&&gap>2*pad,Math.round(gap)+" vs "+pad);
+          check(tag+" 29f the divider is one line, not a double rule: the last saved session has no bottom border of its own ("+lr.borderBottomWidth+") and the last card none ("+w.getComputedStyle(d.querySelectorAll("#sessSuggest .sugg")[d.querySelectorAll("#sessSuggest .sugg").length-1]).borderBottomWidth+")",parseFloat(lr.borderBottomWidth)===0&&parseFloat(w.getComputedStyle(d.querySelectorAll("#sessSuggest .sugg")[d.querySelectorAll("#sessSuggest .sugg").length-1]).borderBottomWidth)===0);
+          var cds=d.querySelectorAll("#sessSuggest .sugg");
+          check(tag+" 29f2 BETWEEN cards the thin rule stays: "+cds.length+" cards, the first has a "+w.getComputedStyle(cds[0]).borderBottomWidth+" rule in the rule colour (thinner than the divider)",cds.length>=2&&w.getComputedStyle(cds[0]).borderBottomWidth==="1px"&&w.getComputedStyle(cds[0]).borderBottomColor===RULE,String(cds.length));
+          check(tag+" 29g design constraints on the divider: no shadow, no fill, square corners",cd.boxShadow==="none"&&(cd.backgroundColor==="rgba(0, 0, 0, 0)"||cd.backgroundColor==="transparent")&&cd.borderTopLeftRadius==="0px");
+          var sb=w.getComputedStyle(box),sm=w.getComputedStyle(box.querySelector("summary"));
+          check(tag+" 29h the save fold-out is NOT a third section: no heading element or section label inside it, it is not a section, no divider rule of its own (box border "+sb.borderTopWidth+", summary "+sm.borderTopWidth+")",!box.querySelector("h1,h2,h3,h4,.sess-sec-h")&&!box.classList.contains("sess-sec")&&parseFloat(sb.borderTopWidth)===0&&parseFloat(sm.borderTopWidth)===1&&d.querySelectorAll("#sessScrim .sess-sec").length===2&&box.parentNode===sec.parentNode&&(box.compareDocumentPosition(sec)&Node.DOCUMENT_POSITION_PRECEDING)>0);
+          check(tag+" 29i nothing scrolls sideways ("+d.documentElement.scrollWidth+" <= "+w.innerWidth+") and both headings sit inside the sheet",d.documentElement.scrollWidth<=w.innerWidth+1&&heads.every(function(x){ var r=R(x),sh=R(d.querySelector("#sessScrim .sheet")); return r.left>=sh.left-1&&r.right<=sh.right+1; }));
+          h.setTestNow(null); document.body.removeChild(el);
+        });
+      });
+      /* empty states */
+      chain=chain.then(function(){ return freshSandbox(true); }).then(function(f){
+        var d=f.d; openSheet(f);
+        var mine=d.getElementById("sessMine"),pat=d.getElementById("sessSuggest");
+        var mh=mine&&mine.querySelector(".sess-sec-h"),mn=mine&&mine.querySelector(".emptyhint"),ph=pat.querySelector(".sess-sec-h"),pn=pat.querySelector(".hint");
+        check("RS29j NO saved sessions: the heading reads 'Your sessions (0)' and ONE short line sits under it, inside its own section",!!mh&&mh.textContent.trim()==="Your sessions (0)"&&!!mn&&mn.textContent.trim().length>0&&mn.textContent.trim().length<=80&&(mh.compareDocumentPosition(mn)&Node.DOCUMENT_POSITION_FOLLOWING)>0,mh&&mh.textContent+" | "+(mn&&mn.textContent));
+        check("RS29k an EMPTY ledger: 'Patterns in your log' still has its heading, with the 35-day note under it ('you have 0')",!!ph&&ph.textContent.trim()==="Patterns in your log"&&!!pn&&/35 logged days/.test(pn.textContent)&&/you have 0/.test(pn.textContent)&&(ph.compareDocumentPosition(pn)&Node.DOCUMENT_POSITION_FOLLOWING)>0,pat.textContent.slice(0,120));
+      });
+      chain=chain.then(function(){ return freshSandbox(true); }).then(function(f){
+        var h=f.H; h.getState().entries=noise(4,20); h.persist(); h.setTestNow(nowAfter(20)); openSheet(f);
+        var pat=f.d.getElementById("sessSuggest"),ph=pat.querySelector(".sess-sec-h"),pn=pat.querySelector(".hint");
+        check("RS29l UNDER 35 logged days (20): the heading is there and the note under it says 35 logged days and 'you have 20'",!!ph&&ph.textContent.trim()==="Patterns in your log"&&!!pn&&/35 logged days/.test(pn.textContent)&&/you have 20/.test(pn.textContent),pat.textContent.slice(0,120));
+        h.setTestNow(null);
+      });
+      chain=chain.then(function(){ return freshSandbox(true); }).then(function(f){
+        var h=f.H,en30={}; dayList(60).forEach(function(dd){ var r30=rng(dd.date.length*7+dd.wd*131+parseInt(dd.date.slice(8),10)),l=[]; for(var i=0;i<5;i++){ var s0=1+Math.floor(r30()*1300); l.push(E(null,s0,s0+20+Math.floor(r30()*60),"n"+Math.floor(r30()*30))); } en30[dd.date]=l; }); h.getState().entries=en30; h.persist(); h.setTestNow(nowAfter(60)); openSheet(f);
+        var pat=f.d.getElementById("sessSuggest"),ph=pat.querySelector(".sess-sec-h"),pn=pat.querySelector(".hint");
+        check("RS29m ENOUGH days (60) but no pattern: the heading is there with a note under it, and no card",!!ph&&ph.textContent.trim()==="Patterns in your log"&&!!pn&&/no patterns/i.test(pn.textContent)&&f.d.querySelectorAll("#sessSuggest .sugg").length===0,pat.textContent.slice(0,120));
+        h.setTestNow(null);
+      });
+      return chain;
     }))
     .then(scenario("RS26f",function(){
       return freshSandbox(true).then(function(f){

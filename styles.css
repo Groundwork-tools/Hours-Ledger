@@ -286,7 +286,13 @@ button{cursor:pointer}
 .repeat button[aria-pressed=true]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
 .sheet-actions{display:flex;gap:8px;margin-top:20px;align-items:center}
 .sheet h3{font-family:var(--mono);font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);margin:22px 0 10px;font-weight:600}
-#sessList{margin-bottom:6px}
+/* the sheet reads as two labelled sections: Your sessions, then Patterns in your log, split by a 2 px ink rule and more space than between cards */
+.sheet .sess-sec-h{margin:0 0 10px}
+#sessMine{margin-top:20px}
+#sessList{margin-bottom:0}
+#sessList .sessrow:last-child{border-bottom:0}
+#sessSuggest{margin-top:32px;padding-top:20px;border-top:2px solid var(--ink)}
+#sessSuggest .sugg:last-child{border-bottom:0}
 /* a suggestion card is a plain block that stacks: title, one row per step, one meta line, the buttons. It was a flex row with
    non-shrinking buttons, which left the text a ~120 px column. */
 .sugg{display:block;padding:12px 0;border-bottom:1px solid var(--rule);min-width:0}

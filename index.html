@@ -239,7 +239,7 @@
 <div class="scrim" id="sessScrim">
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sessTitle">
     <h2 id="sessTitle">Sessions</h2>
-    <div id="sessList"></div>
+    <section class="sess-sec" id="sessMine" aria-labelledby="sessMineHead"><h3 class="sess-sec-h" id="sessMineHead">Your sessions</h3><div id="sessList"></div></section>
     <div id="sessSched" hidden>
       <h3 id="sessSchedTitle"></h3>
       <div class="field">
@@ -257,7 +257,7 @@
         <button class="ghost" id="sessSchedCancel">Cancel</button>
       </div>
     </div>
-    <div id="sessSuggest"></div>
+    <section class="sess-sec" id="sessSuggest" aria-labelledby="sessPatHead"></section>
     <details id="sessSaveBox">
       <summary>Save logged time as a session</summary>
     <div class="field">
