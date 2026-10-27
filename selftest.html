@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1743;
+var EXPECTED_MIN_ROWS=1768;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -3022,6 +3022,7 @@ function runAsyncTests(H,d){
     .then(function(r){ return runPackageTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runLogTodayTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runPresetTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runUndoKeyInFieldTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runAssetVersionTests().then(function(more){ return r.concat(more); }); });
 }
 
@@ -6894,6 +6895,79 @@ function runPresetTests(){
     check("PS-12 returns plain strings",run(m1,"W","Work").every(function(x){ return typeof x==="string"; }));
   }).catch(function(e){
     check("PS scenario threw before finishing",false,String(e&&e.message||e));
+  }).then(function(){ return results; });
+}
+
+/* Ctrl/Cmd+Z (and redo) inside a text field. The app's global shortcut must NOT run while the event target is an input,
+   textarea or contenteditable element: it would block the browser's own text undo (preventDefault) and roll back a real
+   entry while the person is typing a label. Everywhere else it works as before. Rows are tagged UK-xx.
+   What this proves: the handler's decision for an event whose TARGET is a field. It dispatches real KeyboardEvents
+   from elements in the sandbox document, so it does not need real focus (the iframe cannot hold any). It does not
+   prove what a browser's native text undo then does with the keypress; that is the browser's, checked by hand. */
+function runUndoKeyInFieldTests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  var D="2026-03-04";
+  return freshSandbox(true).then(function(f){
+    var h=f.H,d=f.d,w=f.el.contentWindow;
+    function fire(target,opts){
+      var ev=new w.KeyboardEvent("keydown",{key:opts.key||"z",ctrlKey:!!opts.ctrl,metaKey:!!opts.meta,shiftKey:!!opts.shift,bubbles:true,cancelable:true});
+      target.dispatchEvent(ev);
+      return ev;
+    }
+    function mk(tag,attrs){
+      var el=d.createElement(tag); Object.keys(attrs||{}).forEach(function(k){ el.setAttribute(k,attrs[k]); });
+      d.body.appendChild(el); return el;
+    }
+    function fresh(){                       /* one real entry with a snapshot under it: one undo step available */
+      h.snapshot("add entry"); h.putEntry(D,"Typed in a field",null,540,600,null);
+    }
+    function has(){ return h.entriesFor(D).some(function(e){ return e.label==="Typed in a field"; }); }
+    function reset(){ var s=h.getState(); s.entries={}; }
+
+    var field={
+      "input[type=text]":mk("input",{type:"text"}),
+      "input (no type)":mk("input",{}),
+      "textarea":mk("textarea",{}),
+      "contenteditable div":mk("div",{contenteditable:"true"})
+    };
+    Object.keys(field).forEach(function(name){
+      [["ctrl",{ctrl:true}],["meta",{meta:true}]].forEach(function(m){
+        reset(); fresh();
+        var ev=fire(field[name],m[1]);
+        check("UK-01 "+m[0]+"+Z inside "+name+": the entry is NOT undone",has(),"present="+has());
+        check("UK-01 "+m[0]+"+Z inside "+name+": the keypress is left to the browser (not preventDefault-ed)",ev.defaultPrevented===false,"defaultPrevented="+ev.defaultPrevented);
+      });
+    });
+    /* a field the person is typing in, below the real label input */
+    reset(); fresh();
+    var lab=d.getElementById("fLabel"), evL=fire(lab,{ctrl:true});
+    check("UK-02 Ctrl+Z in the entry sheet's own label field does not undo and is not prevented",has()&&evL.defaultPrevented===false,"present="+has()+" prevented="+evL.defaultPrevented);
+
+    /* redo shortcuts are the same hijack, in both spellings */
+    reset(); fresh(); h.undo();
+    check("UK-03 precondition: a real undo from the body removed the entry",!has());
+    var evY=fire(field["input[type=text]"],{key:"y",ctrl:true}), evSZ=fire(field["textarea"],{key:"z",ctrl:true,shift:true});
+    check("UK-03 Ctrl+Y and Ctrl+Shift+Z inside a field do not redo",!has(),"present="+has());
+    check("UK-03 ...and are not prevented",evY.defaultPrevented===false&&evSZ.defaultPrevented===false,"Y="+evY.defaultPrevented+" ShiftZ="+evSZ.defaultPrevented);
+
+    /* controls: everywhere else it works exactly as before */
+    reset(); fresh();
+    var evB=fire(d.body,{ctrl:true});
+    check("UK-04 control: Ctrl+Z on the page body still undoes",!has(),"present="+has());
+    check("UK-04 control: ...and is prevented",evB.defaultPrevented===true);
+    var evR=fire(d.body,{key:"y",ctrl:true});
+    check("UK-04 control: Ctrl+Y on the page body still redoes",has()&&evR.defaultPrevented===true,"present="+has());
+    reset(); fresh();
+    var btn=mk("button",{type:"button"}); var evBt=fire(btn,{meta:true});
+    check("UK-04 control: Cmd+Z with a BUTTON as target still undoes",!has()&&evBt.defaultPrevented===true,"present="+has());
+    reset(); fresh();
+    var ced=mk("div",{contenteditable:"false"}); fire(ced,{ctrl:true});
+    check("UK-05 control: contenteditable=false is not editable: Ctrl+Z still undoes",!has(),"present="+has());
+  }).catch(function(e){
+    check("UK scenario threw before finishing",false,String(e&&e.message||e));
   }).then(function(){ return results; });
 }
 

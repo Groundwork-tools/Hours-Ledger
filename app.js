@@ -2816,6 +2816,10 @@ document.getElementById("toastUndo").addEventListener("click",function(){
 });
 document.addEventListener("keydown",function(ev){
   var k=ev.key.toLowerCase();
+  /* In a text field Ctrl/Cmd+Z is the browser's own text undo. Running the app's undo there would block it
+     (preventDefault) and roll back a real entry while a label is being typed. Same field test as the Enter handler. */
+  var tg=ev.target,tgTag=tg&&tg.tagName;
+  if(tgTag==="INPUT"||tgTag==="TEXTAREA"||(tg&&tg.isContentEditable)) return;
   if((ev.ctrlKey||ev.metaKey)&&k==="z"&&!ev.shiftKey){ ev.preventDefault(); undo(); }
   else if((ev.ctrlKey||ev.metaKey)&&(k==="y"||(k==="z"&&ev.shiftKey))){ ev.preventDefault(); redo(); }
 });
