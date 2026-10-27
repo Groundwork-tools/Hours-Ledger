@@ -2995,18 +2995,29 @@ function findEntry(id){
   return null;
 }
 /* Label presets for the entry sheet (replaces "recents"). Derived on every call from the entries, never stored.
+   RECENCY WINDOW (decided 2026-10-27, reverses the first all-time ranking): only uses dated within the last
+   windowWeeks*7 days up to and including `today` count, so the chips follow current habits and a label not used in
+   the window simply disappears (no filling from all-time). `today` (an ISO date) and `windowWeeks` are parameters:
+   the function never reads the clock, and without a valid `today` it returns no chips.
    entriesByDate is state.entries (date -> list), not a flat list, because a midnight-crossing activity is two
    entries on two dates (putEntry: evening half ends 1440, the next date's half starts 0, same label and category,
    no link between them) and has to be counted once. An evening half and a morning half are treated as one use when
    they are on consecutive calendar dates, share the category and the normalized label, and total under 1440
-   minutes; each morning half pairs at most once. The use is dated by the evening half.
+   minutes; each morning half pairs at most once. The use is dated by the evening half, and it is that date that
+   is tested against the window (pairing is done over ALL dates first, so a morning half on the window's first day
+   whose evening half is outside the window is not counted as a use of its own).
    Labels are counted by normLabel() (trim, lower-case, whitespace collapsed); the shown text is the most common
    original casing, trimmed (a casing tie goes to the most recently used one). Empty labels and the category's own
-   name are left out. Ranked by count, ties by most recent use; at most PRESET_MAX. No category (null/empty) = no presets: it is the default selection of a fresh sheet and the
-   uncategorised Break entries would dominate (design decision 2026-10-27). */
-var PRESET_MAX=5;
-function presetsForCategory(entriesByDate,catId,categoryName){
-  if(!catId) return [];
+   name are left out. Ranked by in-window count, ties by most recent use. A label needs PRESET_MIN (2) or more in-window
+   uses to be shown at all (a count-1 chip is the old "recents" feature; a thin category shows nothing rather than
+   noise). Up to PRESET_BASE chips on that rule; positions PRESET_BASE+1..PRESET_HARD_MAX only when the label has
+   PRESET_EXTRA_MIN (3) or more in-window uses (decided 2026-10-27, changes "always up to 5"). No category
+   (null/empty) = no presets: it is the default selection of a fresh sheet and the uncategorised Break entries would
+   dominate (design decision 2026-10-27). */
+var PRESET_WINDOW_WEEKS=8, PRESET_MIN=2, PRESET_BASE=5, PRESET_EXTRA_MIN=3, PRESET_HARD_MAX=8;
+function presetsForCategory(entriesByDate,catId,categoryName,today,windowWeeks){
+  if(!catId||!isIsoDate(today)) return [];
+  var weeks=windowWeeks>0?windowWeeks:PRESET_WINDOW_WEEKS,first=iso(addDays(parseIso(today),-(weeks*7-1)));
   var want=catId,skip=normLabel(categoryName),dates=Object.keys(entriesByDate||{}).sort(),consumed={},tally={};
   dates.forEach(function(d){
     var list=entriesByDate[d]||[];
@@ -3030,6 +3041,7 @@ function presetsForCategory(entriesByDate,catId,categoryName){
   dates.forEach(function(d){
     (entriesByDate[d]||[]).forEach(function(e,i){
       if((e.cat||null)!==want||(consumed[d]&&consumed[d][i])) return;
+      if(d<first||d>today) return;
       var key=normLabel(e.label);
       if(!key||key===skip) return;
       var shown=String(e.label).trim(),when=d+" "+String(1e4+e.start),t=tally[key]||(tally[key]={n:0,last:"",forms:{}});
@@ -3048,7 +3060,8 @@ function presetsForCategory(entriesByDate,catId,categoryName){
     });
     return {label:best.shown,n:t.n,last:t.last};
   }).sort(function(a,b){ return b.n-a.n||(a.last<b.last?1:a.last>b.last?-1:0); })
-    .slice(0,PRESET_MAX).map(function(x){ return x.label; });
+    .filter(function(x,i){ return x.n>=PRESET_MIN&&(i<PRESET_BASE||x.n>=PRESET_EXTRA_MIN); })   /* sorted by count: the first failing one ends the list */
+    .slice(0,PRESET_HARD_MAX).map(function(x){ return x.label; });
 }
 
 function layout(list){
@@ -3605,7 +3618,7 @@ function paintChips(){
 /* the label presets always follow chosenCat: paintChips() is the one place the selection is drawn, so it calls this */
 function paintPresets(){
   var el=document.getElementById("fPresets"),c=catById(chosenCat);
-  var list=presetsForCategory(state.entries,chosenCat,c?c.name:"");
+  var list=presetsForCategory(state.entries,chosenCat,c?c.name:"",iso(new Date()),PRESET_WINDOW_WEEKS);
   el.innerHTML=list.map(function(l){
     return '<button type="button" data-label="'+escapeHtml(l)+'" title="'+escapeHtml(l)+'">'+escapeHtml(l)+"</button>";
   }).join("");

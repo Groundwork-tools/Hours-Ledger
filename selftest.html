@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1768;
+var EXPECTED_MIN_ROWS=1799;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -6835,9 +6835,10 @@ function runPresetTests(){
   function day(n){ return "2026-03-"+(n<10?"0":"")+n; }
   return freshSandbox(true).then(function(f){
     var h=f.H;
-    function run(m,cat,name){ return h.presetsForCategory(m,cat,name); }
+    var TODAY="2026-03-31";             /* the old fixtures are all in March; the 8-week window ending here covers them */
+    function run(m,cat,name,today,weeks){ return h.presetsForCategory(m,cat,name,today===undefined?TODAY:today,weeks===undefined?8:weeks); }
 
-    var m1=build([[day(1),"W","Lecture"],[day(2),"W","Lecture"],[day(3),"W","Lecture"],[day(4),"W","Email"],[day(5),"W","Email"],[day(6),"W","Reading"]]);
+    var m1=build([[day(1),"W","Lecture"],[day(2),"W","Lecture"],[day(3),"W","Lecture"],[day(7),"W","Lecture"],[day(4),"W","Email"],[day(5),"W","Email"],[day(8),"W","Email"],[day(6),"W","Reading"],[day(9),"W","Reading"]]);
     check("PS-01 ranked by times used, most first",J(run(m1,"W","Work"))===J(["Lecture","Email","Reading"]),J(run(m1,"W","Work")));
 
     var m2=build([[day(1),"W","lecture"],[day(2),"W","  LECTURE  "],[day(3),"W","Lecture"],[day(4),"W","Lecture"],[day(5),"W","Email"],[day(6),"W","Email"],[day(7),"W","Email"]]);
@@ -6848,28 +6849,28 @@ function runPresetTests(){
 
     var m3=build([[day(1),"W","Alpha"],[day(2),"W","Beta"],[day(9),"W","Gamma"],[day(3),"W","Alpha"],[day(4),"W","Beta"],[day(8),"W","Gamma"]]);
     check("PS-03 equal counts: the most recently used first (Gamma 9th, Beta 4th, Alpha 3rd)",J(run(m3,"W","Work"))===J(["Gamma","Beta","Alpha"]),J(run(m3,"W","Work")));
-    var m3b=build([[day(1),"W","Old"],[day(2),"W","Old"],[day(5),"W","New"]]);
+    var m3b=build([[day(1),"W","Old"],[day(2),"W","Old"],[day(3),"W","Old"],[day(5),"W","New"],[day(6),"W","New"]]);
     check("PS-03 a higher count beats recency",J(run(m3b,"W","Work"))===J(["Old","New"]),J(run(m3b,"W","Work")));
 
-    var sp=[];["a","b","c","d","e","f","g"].forEach(function(l,i){ sp.push([day(i+1),"W","L-"+l]); });
+    var sp=[];["a","b","c","d","e","f","g"].forEach(function(l,i){ sp.push([day(i+1),"W","L-"+l]); sp.push([day(i+10),"W","L-"+l]); });
     check("PS-04 capped at 5 (7 distinct labels)",run(build(sp),"W","Work").length===5,J(run(build(sp),"W","Work")));
     var sp2=sp.concat([[day(20),"W","L-g"],[day(21),"W","L-g"]]);
-    check("PS-04 the cap keeps the top 5 by rank (L-g, used 3 times, makes it and is first)",run(build(sp2),"W","Work").indexOf("L-g")===0,J(run(build(sp2),"W","Work")));
+    check("PS-04 the cap keeps the top 5 by rank (L-g, used 4 times, makes it and is first)",run(build(sp2),"W","Work").indexOf("L-g")===0,J(run(build(sp2),"W","Work")));
 
-    var m5=build([[day(1),"W","Work"],[day(2),"W","  work "],[day(3),"W","WORK"],[day(4),"W","Email"]]);
+    var m5=build([[day(1),"W","Work"],[day(2),"W","  work "],[day(3),"W","WORK"],[day(4),"W","Email"],[day(5),"W","Email"]]);
     check("PS-05 a label equal to the category name (any case/spacing) is left out",J(run(m5,"W","Work"))===J(["Email"]),J(run(m5,"W","Work")));
 
-    var m6=build([[day(1),"W",""],[day(2),"W","   "],[day(3),"W",undefined],[day(4),"W",null],[day(5),"W","Email"]]);
+    var m6=build([[day(1),"W",""],[day(2),"W","   "],[day(3),"W",undefined],[day(4),"W",null],[day(5),"W","Email"],[day(6),"W","Email"]]);
     check("PS-06 empty, whitespace-only, undefined and null labels are ignored",J(run(m6,"W","Work"))===J(["Email"]),J(run(m6,"W","Work")));
 
     /* DESIGN DECISION (2026-10-27): uncategorised shows NO presets. It is the default selection on a fresh sheet, so chips
        would appear every time, and the Break entries (uncategorised) would dominate them. */
-    var m7=build([[day(1),null,"Walk"],[day(2),null,"Walk"],[day(3),"W","Email"],[day(4),null,"Nap"],[day(5),null,"Break"],[day(6),null,"Break"],[day(7),null,"Break"]]);
+    var m7=build([[day(1),null,"Walk"],[day(2),null,"Walk"],[day(3),"W","Email"],[day(8),"W","Email"],[day(4),null,"Nap"],[day(5),null,"Break"],[day(6),null,"Break"],[day(7),null,"Break"]]);
     check("PS-07 uncategorised (null) gives NO presets, even with plenty of uncategorised entries",J(run(m7,null,""))==="[]",J(run(m7,null,"")));
     check("PS-07 ...also for undefined and empty-string category ids",J(run(m7,undefined,""))==="[]"&&J(run(m7,"","")) === "[]",J(run(m7,undefined,"")));
     check("PS-07 a categorised group still does not include uncategorised entries",J(run(m7,"W","Work"))===J(["Email"]),J(run(m7,"W","Work")));
 
-    var m8=build([[day(1),"A","Alpha"],[day(2),"B","Beta"],[day(3),"B","Beta"]]);
+    var m8=build([[day(1),"A","Alpha"],[day(4),"A","Alpha"],[day(2),"B","Beta"],[day(3),"B","Beta"]]);
     check("PS-08 only the selected category's entries count",J(run(m8,"A","A-name"))===J(["Alpha"]),J(run(m8,"A","A-name")));
 
     /* midnight: a night logged twice is 4 stored halves but 2 uses */
@@ -6877,15 +6878,19 @@ function runPresetTests(){
     m9b[day(1)]=[E("S",1320,1440,"Sleep")]; m9b[day(2)]=[E("S",0,405,"Sleep")]; m9b[day(3)]=[E("S",1380,1440,"Sleep")]; m9b[day(4)]=[E("S",0,420,"SLEEP")];
     check("PS-09 ranking uses the folded count: 3 Reading beats 2 nights of Sleep (a naive count says Sleep 4)",J(run(m9b,"S","Rest"))===J(["Reading","Sleep"]),J(run(m9b,"S","Rest")));
     var m9a={}; m9a[day(1)]=[E("S",1320,1440,"Sleep"),E("S",600,660,"Reading")]; m9a[day(2)]=[E("S",0,405,"Sleep")]; m9a[day(5)]=[E("S",600,660,"Reading")];
-    check("PS-09 one split night (2 stored halves) = ONE use, so it ranks below Reading's 2",J(run(m9a,"S","Rest"))===J(["Reading","Sleep"]),J(run(m9a,"S","Rest")));
+    /* CHANGED 2026-10-27 (min 2 uses): this row used to expect ["Reading","Sleep"] (Sleep 1 use, below Reading's 2). Under the minimum a single use shows
+       nothing; the row now pins the same fact more sharply: one night (2 stored halves) is ONE use, so it is hidden - a naive half-count of 2 would show it. */
+    check("PS-09 one split night (2 stored halves) = ONE use: hidden under the minimum of 2 (a naive count of 2 halves would show it)",J(run(m9a,"S","Rest"))===J(["Reading"]),J(run(m9a,"S","Rest")));
     var m2c=build([[day(1),"W","lecture"],[day(2),"W","Lecture"],[day(3),"W","lecture"]]);
     check("PS-02 casing: the most common original casing is shown ('lecture' 2 vs 'Lecture' 1)",J(run(m2c,"W","Work"))===J(["lecture"]),J(run(m2c,"W","Work")));
-    var m9c={}; m9c[day(1)]=[E("S",1320,1440,"Sleep")]; m9c[day(2)]=[E("S",0,405,"Nap")];
-    check("PS-09 halves with DIFFERENT labels are two activities, one use each",run(m9c,"S","Rest").length===2,J(run(m9c,"S","Rest")));
-    var m9d={}; m9d["2026-02-28"]=[E("S",1320,1440,"Sleep")]; m9d["2026-03-01"]=[E("S",0,405,"Sleep")]; m9d["2026-03-10"]=[E("S",600,660,"Nap")];
-    check("PS-09 a pair across a month end still folds (Sleep 1 use ties Nap 1; Nap is newer)",J(run(m9d,"S","Rest"))===J(["Nap","Sleep"]),J(run(m9d,"S","Rest")));
+    var m9c={}; m9c[day(1)]=[E("S",1320,1440,"Sleep")]; m9c[day(2)]=[E("S",0,405,"Nap")]; m9c[day(5)]=[E("S",1320,1440,"Sleep")]; m9c[day(6)]=[E("S",0,405,"Nap")];
+    check("PS-09 halves with DIFFERENT labels are two activities, one use each per night (Sleep 2, Nap 2: both shown)",run(m9c,"S","Rest").length===2,J(run(m9c,"S","Rest")));
+    var m9d={}; m9d["2026-02-28"]=[E("S",1320,1440,"Sleep")]; m9d["2026-03-01"]=[E("S",0,405,"Sleep")]; m9d["2026-03-10"]=[E("S",600,660,"Nap")]; m9d["2026-03-11"]=[E("S",600,660,"Nap")]; m9d["2026-03-04"]=[E("S",1320,1440,"Sleep")]; m9d["2026-03-05"]=[E("S",0,405,"Sleep")];
+    check("PS-09 a pair across a month end still folds (Sleep 2 nights ties Nap 2; Nap is newer)",J(run(m9d,"S","Rest"))===J(["Nap","Sleep"]),J(run(m9d,"S","Rest")));
     var m9g={}; m9g[day(1)]=[E("S",1320,1440,"Sleep")]; m9g[day(2)]=[E("S",0,405,"Sleep")];
-    check("PS-09 the folded pair is exactly one preset",J(run(m9g,"S","Rest"))===J(["Sleep"]),J(run(m9g,"S","Rest")));
+    check("PS-09 one folded night is ONE use: below the minimum, no preset",J(run(m9g,"S","Rest"))==="[]",J(run(m9g,"S","Rest")));
+    var m9h={}; m9h[day(1)]=[E("S",1320,1440,"Sleep")]; m9h[day(2)]=[E("S",0,405,"Sleep")]; m9h[day(5)]=[E("S",1320,1440,"Sleep")]; m9h[day(6)]=[E("S",0,405,"Sleep")];
+    check("PS-09 two folded nights (4 stored halves) are exactly one preset",J(run(m9h,"S","Rest"))===J(["Sleep"]),J(run(m9h,"S","Rest")));
 
     check("PS-10 a category with no qualifying entries gives an empty list",J(run(build([[day(1),"W","Work"],[day(2),"W",""]]),"W","Work"))==="[]");
     check("PS-10 an unknown category and an empty ledger give an empty list",J(run(m1,"nope","X"))==="[]"&&J(run({},"W","Work"))==="[]"&&J(run(undefined,"W","Work"))==="[]");
@@ -6893,6 +6898,84 @@ function runPresetTests(){
     var before=J(m1); run(m1,"W","Work");
     check("PS-11 the input entries are not changed",J(m1)===before);
     check("PS-12 returns plain strings",run(m1,"W","Work").every(function(x){ return typeof x==="string"; }));
+
+    /* ---- recency window (decided 2026-10-27, reverses the all-time ranking). presetsForCategory(entries, catId,
+       name, today, windowWeeks): only entries dated in [today-(windowWeeks*7-1), today] count (windowWeeks*7 days,
+       today included); a midnight pair is dated by its evening (start) day; slots 6-8 need 3+ uses in the window;
+       hard maximum 8; no filling from all-time; the function never reads the clock. ---- */
+    var T2="2026-06-30";                    /* window of 8 weeks = 2026-05-06 .. 2026-06-30 (56 days) */
+    function dJ(n){ return "2026-06-"+(n<10?"0":"")+n; }
+    check("PR-00 precondition: 8 weeks ending 2026-06-30 start on 2026-05-06 (so 2026-05-05 is one day outside)",h.iso(h.addDays(new Date(2026,5,30),-55))==="2026-05-06");
+    var mB2=build([["2026-05-06","W","Edge"],["2026-05-06","W","Edge"]]), mB3=build([["2026-05-05","W","Before"],["2026-05-05","W","Before"]]);
+    check("PR-01 first day alone -> shown; day before alone -> nothing",J(run(mB2,"W","Work",T2))===J(["Edge"])&&J(run(mB3,"W","Work",T2))==="[]",J(run(mB2,"W","Work",T2))+" / "+J(run(mB3,"W","Work",T2)));
+    var mT=build([[T2,"W","Today"],[T2,"W","Today"],["2026-07-01","W","Tomorrow"],["2026-07-01","W","Tomorrow"]]);
+    check("PR-01 today counts; the day after today does not",J(run(mT,"W","Work",T2))===J(["Today"]),J(run(mT,"W","Work",T2)));
+
+    var spOld=[]; for(var i1=0;i1<10;i1++) spOld.push(["2026-03-"+(i1<9?"0":"")+(i1+1),"W","Stale"]);
+    spOld.push([dJ(3),"W","Fresh"],[dJ(4),"W","Fresh"]);
+    check("PR-02 a stale label with a high all-time count (10 uses in March) drops out",J(run(build(spOld),"W","Work",T2))===J(["Fresh"]),J(run(build(spOld),"W","Work",T2)));
+
+    var spR=[]; for(var i2=0;i2<8;i2++) spR.push(["2026-03-"+(i2<9?"0":"")+(i2+1),"W","Veteran"]);
+    spR.push(["2026-05-10","W","Veteran"],["2026-05-11","W","Veteran"],[dJ(20),"W","Newcomer"],[dJ(21),"W","Newcomer"],[dJ(22),"W","Newcomer"]);
+    check("PR-03 a recently used label (3 in the window) outranks an older one with more total uses (10 total, 2 in the window)",J(run(build(spR),"W","Work",T2))===J(["Newcomer","Veteran"]),J(run(build(spR),"W","Work",T2)));
+
+    function many(counts){            /* counts: {label:n} -> a map with n in-window uses of each, spread over June */
+      var spec=[],k=0; Object.keys(counts).forEach(function(l){ for(var j=0;j<counts[l];j++){ spec.push([dJ(1+(k%28)),"W",l]); k++; } });
+      return build(spec);
+    }
+    var five={A:4,B:4,C:4,D:4,E:4};
+    var with3=Object.assign({},five,{F:3}), with2=Object.assign({},five,{F:2});
+    check("PR-04 a label with exactly 3 in-window uses earns slot 6",run(many(with3),"W","Work",T2).length===6&&run(many(with3),"W","Work",T2).indexOf("F")===5,J(run(many(with3),"W","Work",T2)));
+    check("PR-04 a label with 2 in-window uses does not (slot 6 stays empty)",run(many(with2),"W","Work",T2).length===5&&run(many(with2),"W","Work",T2).indexOf("F")<0,J(run(many(with2),"W","Work",T2)));
+    var ten={}; "ABCDEFGHIJ".split("").forEach(function(l){ ten[l]=3; });
+    check("PR-05 hard cap of 8 (ten labels with 3 uses each)",run(many(ten),"W","Work",T2).length===8,String(run(many(ten),"W","Work",T2).length));
+    var low={A:2,B:2,C:2,D:2,E:2,F:2,G:2};
+    check("PR-05 with only 2-use labels it stays at 5 (the extra slots need 3+)",run(many(low),"W","Work",T2).length===5,String(run(many(low),"W","Work",T2).length));
+    check("PR-06 an empty window gives no chips (entries exist, all older than the window)",J(run(build([["2026-03-02","W","Old"],["2026-04-01","W","Older"]]),"W","Work",T2))==="[]");
+
+    /* midnight pair across the window edge: dated by its start (evening) day */
+    var sA={}; sA["2026-05-05"]=[E("S",1320,1440,"Sleep")]; sA["2026-05-06"]=[E("S",0,405,"Sleep"),E("S",600,660,"Other")]; sA["2026-06-10"]=[E("S",600,660,"Other")]; sA["2026-06-15"]=[E("S",1320,1440,"Sleep")]; sA["2026-06-16"]=[E("S",0,405,"Sleep")];
+    check("PR-07 a pair whose evening half is the day BEFORE the window is dated outside it: its morning half on the first day is not counted as a use (Sleep has one night inside; counting the stray morning half would make 2 and show it)",J(run(sA,"S","Rest",T2))===J(["Other"]),J(run(sA,"S","Rest",T2)));
+    var sB={}; sB["2026-06-29"]=[E("S",1320,1440,"Sleep")]; sB["2026-06-30"]=[E("S",0,405,"Sleep")]; sB["2026-06-01"]=[E("S",600,660,"X")]; sB["2026-06-02"]=[E("S",600,660,"X")]; sB["2026-06-03"]=[E("S",600,660,"X")]; sB["2026-06-10"]=[E("S",1320,1440,"Sleep")]; sB["2026-06-11"]=[E("S",0,405,"Sleep")];
+    check("PR-07 two pairs inside the window count as 2 uses, not 4 (X 3 first; a naive half-count would put Sleep first)",J(run(sB,"S","Rest",T2))===J(["X","Sleep"]),J(run(sB,"S","Rest",T2)));
+    var sC={}; sC[T2]=[E("S",1320,1440,"Sleep")]; sC["2026-07-01"]=[E("S",0,405,"Sleep")]; sC["2026-06-01"]=[E("S",600,660,"X")]; sC["2026-06-02"]=[E("S",600,660,"X")]; sC["2026-06-03"]=[E("S",600,660,"X")]; sC["2026-06-10"]=[E("S",1320,1440,"Sleep")]; sC["2026-06-11"]=[E("S",0,405,"Sleep")];
+    check("PR-07 a pair starting on today whose morning half is tomorrow counts once, by its start day (with one earlier night Sleep is 2; if today were dropped it would be 1 and hidden)",J(run(sC,"S","Rest",T2))===J(["X","Sleep"]),J(run(sC,"S","Rest",T2)));
+    var sD={}; sD["2026-05-06"]=[E("S",1320,1440,"Sleep")]; sD["2026-05-07"]=[E("S",0,405,"Sleep")]; sD["2026-06-10"]=[E("S",1320,1440,"Sleep")]; sD["2026-06-11"]=[E("S",0,405,"Sleep")];
+    check("PR-07 a pair starting on the first day counts (once; with one later night Sleep is 2 and shown, without the first day it would be 1)",J(run(sD,"S","Rest",T2))===J(["Sleep"]),J(run(sD,"S","Rest",T2)));
+
+    /* today is a parameter, not the clock */
+    var mP=many({Tracked:3});
+    check("PR-08 same data, today moved 90 days on: nothing in the window any more",J(run(mP,"W","Work",T2))===J(["Tracked"])&&J(run(mP,"W","Work","2026-09-28"))==="[]",J(run(mP,"W","Work",T2))+" / "+J(run(mP,"W","Work","2026-09-28")));
+    var mQ=build([["2026-06-05","W","Early"],["2026-06-06","W","Early"],["2026-06-25","W","Late"],["2026-06-26","W","Late"]]);
+    check("PR-08 entries after 'today' are ignored (today = 2026-06-10 -> only Early)",J(run(mQ,"W","Work","2026-06-10"))===J(["Early"]),J(run(mQ,"W","Work","2026-06-10")));
+    check("PR-08 windowWeeks is a parameter: 1 week ending 2026-06-30 drops an entry from 2026-06-20",J(run(build([["2026-06-20","W","Old1"],["2026-06-21","W","Old1"],["2026-06-29","W","New1"],["2026-06-28","W","New1"]]),"W","Work",T2,1))===J(["New1"]),J(run(build([["2026-06-20","W","Old1"],["2026-06-21","W","Old1"],["2026-06-29","W","New1"],["2026-06-28","W","New1"]]),"W","Work",T2,1)));
+    check("PR-08 no 'today' given -> no chips (the function never falls back to the clock)",J(h.presetsForCategory(many({Tracked:3}),"W","Work"))==="[]"&&J(h.presetsForCategory(many({Tracked:3}),"W","Work","not a date",8))==="[]");
+
+    /* ---- minimum of 2 in-window uses for ANY chip (decided 2026-10-27; changes "always show up to 5"). Slots 1-5 need
+       2+ uses, slots 6-8 need 3+, hard maximum 8. A count-1 chip is the old "recents" feature. Rows are tagged PM-xx. ---- */
+    check("PM-01 a label with exactly 1 in-window use never shows (alone)",J(run(many({Once:1}),"W","Work",T2))==="[]",J(run(many({Once:1}),"W","Work",T2)));
+    check("PM-01 ...nor next to labels that do show: only the 2+ labels are listed, free slots stay empty",J(run(many({Twice:2,Once:1,Other:1}),"W","Work",T2))===J(["Twice"]),J(run(many({Twice:2,Once:1,Other:1}),"W","Work",T2)));
+    check("PM-02 exactly 2 uses shows, in a slot among 1-5 (two labels with 2 uses)",J(run(many({A:2,B:2}),"W","Work",T2).slice().sort())===J(["A","B"]),J(run(many({A:2,B:2}),"W","Work",T2)));
+    check("PM-02 exactly 2 uses shows even as the fifth chip",run(many({A:4,B:4,C:4,D:4,E:2}),"W","Work",T2).indexOf("E")===4,J(run(many({A:4,B:4,C:4,D:4,E:2}),"W","Work",T2)));
+    check("PM-03 exactly 2 uses does not earn slot 6 (five labels with 2 uses + one more with 2 -> 5 chips)",run(many({A:2,B:2,C:2,D:2,E:2,F:2}),"W","Work",T2).length===5,String(run(many({A:2,B:2,C:2,D:2,E:2,F:2}),"W","Work",T2).length));
+    check("PM-04 exactly 3 uses does earn slot 6 (five labels with 4 uses + one with 3 -> 6 chips, the 3-use one is sixth)",run(many({A:4,B:4,C:4,D:4,E:4,F:3}),"W","Work",T2).length===6&&run(many({A:4,B:4,C:4,D:4,E:4,F:3}),"W","Work",T2)[5]==="F",J(run(many({A:4,B:4,C:4,D:4,E:4,F:3}),"W","Work",T2)));
+    check("PM-05 a category whose labels are all single-use shows nothing",J(run(many({A:1,B:1,C:1,D:1,E:1,F:1,G:1,H:1}),"W","Work",T2))==="[]",J(run(many({A:1,B:1,C:1,D:1,E:1,F:1,G:1,H:1}),"W","Work",T2)));
+    check("PM-06 the minimum applies in slots 1-5 when slots 6+ are also in play (six 3-use labels and a 1-use one -> 6 chips, no 1-use one)",run(many({A:3,B:3,C:3,D:3,E:3,F:3,G:1}),"W","Work",T2).length===6&&run(many({A:3,B:3,C:3,D:3,E:3,F:3,G:1}),"W","Work",T2).indexOf("G")<0,J(run(many({A:3,B:3,C:3,D:3,E:3,F:3,G:1}),"W","Work",T2)));
+    check("PM-07 hard maximum of 8 still holds (ten labels with 5 uses)",run(many({A:5,B:5,C:5,D:5,E:5,F:5,G:5,H:5,I:5,J:5}),"W","Work",T2).length===8);
+
+    /* PM-08: tapping a chip fills the FULL stored label. On phones the chip is cut to about half the row with an ellipsis
+       (CSS only), so the chip's visible text is not the label; the handler must read the stored label, never the shown text.
+       The sandbox is hidden, so this checks the DOM/handler, not what is painted (that is checked in a real browser pane). */
+    var d8=f.d, LONG="Get ready for Muay Thai and pack the bag with everything needed for tonight's long evening session";
+    d8.getElementById("addBtn").click();
+    var chip8=d8.querySelector("#fChips button"), cat8=chip8.dataset.cat, today8=h.iso(new Date());
+    h.putEntry(today8,LONG,cat8,480,540,null); h.putEntry(today8,LONG,cat8,600,660,null);
+    chip8.click();
+    var pb=d8.querySelectorAll("#fPresets button");
+    check("PM-08 the long label shows as a chip (2 uses today)",pb.length===1&&pb[0].dataset.label===LONG,pb.length?pb[0].dataset.label:"no chip");
+    if(pb.length){ pb[0].click(); }
+    check("PM-08 clicking the chip fills the FULL stored label, not a cut-off one",d8.getElementById("fLabel").value===LONG,d8.getElementById("fLabel").value);
+    check("PM-08 the chip's title attribute also carries the full label (long-press / hover shows it)",pb.length===1&&pb[0].getAttribute("title")===LONG);
   }).catch(function(e){
     check("PS scenario threw before finishing",false,String(e&&e.message||e));
   }).then(function(){ return results; });
