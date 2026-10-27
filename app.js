@@ -274,6 +274,11 @@ function migrateFromOldKey(){
    anything actually needs it (a migration or a merge), not at every page load -
    so a browser that never touches sync never gets even this one extra key. */
 var DEVICE_KEY=TEST_MODE?"hours-ledger-device-id-TESTMODE":"hours-ledger-device-id";
+/* sessions: the prompts this device's owner dismissed ("sessionId|date"). Device-local on purpose, never
+   part of state and never synced (see CLAUDE.md, Sessions design decisions). Tiny and capped (rule 10). */
+var SDKEY=TEST_MODE?"hours-ledger-selftest-sessions-dismissed-v1":"hours-ledger-sessions-dismissed-v1";
+/* the same for suggestions the owner said "Not now" to ("category@start"); device-local, capped, never synced */
+var SGKEY=TEST_MODE?"hours-ledger-selftest-sessions-dismissed-suggestions-v1":"hours-ledger-sessions-dismissed-suggestions-v1";
 function getDeviceId(){
   var id=readStore(DEVICE_KEY);
   if(!id){ id=uid()+uid(); writeStore(DEVICE_KEY,id); }
@@ -364,6 +369,16 @@ function migrateSyncFields(s){
   Object.keys(s.dayHighlights).forEach(function(date){
     var h=s.dayHighlights[date];
     if(!h.updatedAt){ h.updatedAt=stamp; h.updatedBy=dev; }
+  });
+
+  /* sessions: inline stamp + real tombstones, same shape as the day highlights. One written on a
+     connected device is already stamped at edit time; this stamps the ones made before the device
+     ever synced. */
+  migrateSessions(s);
+  if(!s.deletedSessions) s.deletedSessions={};
+  Object.keys(s.sessions).forEach(function(id){
+    var r=s.sessions[id];
+    if(!r.updatedAt){ r.updatedAt=stamp; r.updatedBy=dev; }
   });
 
   return s;
@@ -660,6 +675,843 @@ function logSupersededHighlights(localFlat,remoteFlat,mergedFlat,deviceId){
   });
 }
 
+/* ---------------- sessions (backlog 31) ----------------
+   A session is a named, ordered set of blocks stored as OFFSETS from a start time, so the
+   same session can be applied at any start time on any date (past or future):
+     state.sessions[id] = {id, name, blocks:[{offset,duration,label,cat}], schedule, updatedAt?, updatedBy?}
+   offset/duration are whole minutes; cat is a category id or null. Applying a session creates
+   ORDINARY entries - no link back to the session, no planned/confirmed state, no new entry field.
+   Both keys are new and optional: a ledger without them reads as "no sessions" (migrateSessions
+   runs on load, import and undo/redo), `hours-ledger-v2` and every existing field are unchanged
+   (hard rule 1), and an older build that re-saves the state keeps the unknown keys.
+
+   Sync (hard rule 7). The sync unit is the WHOLE session (decision, approved): a session is edited
+   as a unit, and per-block records would let two devices produce an interleaved session nobody
+   wrote. Last write wins on the whole record; the text that lost goes to console.log
+   (logSupersededSessions - same precedent as the day highlights). Ids are random (uid()), like
+   entries and categories: nothing is seeded, so there are no fixed ids, and there is deliberately
+   NO name-based dedup - nothing references a session id (entries carry no back-link), so a
+   duplicate cannot silently reassign anything, and the user can simply delete it.
+   Stamped at EDIT time, but only once the device has sync fields (state.deletedEntries exists,
+   the removeEntry gate); a never-connected device stores no stamps and no tombstone container,
+   and migrateSyncFields stamps its sessions at first connect.
+   Tombstones: removeSession writes one only for a session that exists on this device (a tombstone
+   for an id this device never saw could delete another device's record); setSession removes the
+   id's tombstone, and flattenSessions resolves an id found in both containers to ONE record.
+   mergeRecords compares content with === (sameContent), so an array or object field from two
+   separately built states would NEVER read as equal. blocks and schedule are therefore flattened to
+   canonical JSON TEXT (cleanBlocks writes a fixed key order and a fixed block order): equal blocks
+   are then equal strings and take case 2 ("same content") instead of a pointless last-write-wins.
+   Category ids inside blocks are remapped wherever entries' are: dedupeCategoriesByName and
+   doDeleteCategory with a target - otherwise a block orphans on a dead id. */
+var SESSION_NAME_MAX=60, SESSION_MAX_BLOCKS=40, SESSION_MAX_OFFSET=2879, SESSION_MAX_DURATION=1439;
+var SESSION_FIELDS=["name","blocks","schedule","defaultStart","deleted","deletedAt"];
+/* defaultStart: the session's typical start, minutes from midnight (an integer 0..1439) or null = unknown. Optional and
+   additive (CLAUDE.md, "Log today"): a missing value reads as unknown; nothing is migrated or rewritten. */
+function validStart(x){ return Number.isInteger(x)&&x>=0&&x<=1439; }
+function isMapObj(x){ return !!x&&typeof x==="object"&&!Array.isArray(x); }
+function cleanBlock(b){
+  if(!isMapObj(b)) return null;
+  if(!Number.isInteger(b.offset)||b.offset<0||b.offset>SESSION_MAX_OFFSET) return null;
+  if(!Number.isInteger(b.duration)||b.duration<1||b.duration>SESSION_MAX_DURATION) return null;
+  return {offset:b.offset,duration:b.duration,label:typeof b.label==="string"?b.label:"",cat:typeof b.cat==="string"&&b.cat?b.cat:null};
+}
+/* valid blocks only, in the canonical order (by offset; ties keep their given order) - the order is
+   part of the content sync compares, so two devices must always write the same one */
+function cleanBlocks(arr){
+  if(!Array.isArray(arr)) return [];
+  return arr.map(cleanBlock).filter(Boolean)
+    .map(function(b,i){ return {b:b,i:i}; })
+    .sort(function(x,y){ return x.b.offset-y.b.offset||x.i-y.i; })
+    .map(function(x){ return x.b; });
+}
+function normalizeSessionName(raw){
+  var t=String(raw==null?"":raw).replace(/\s+/g," ").trim();
+  var cps=Array.from(t);
+  if(cps.length>SESSION_NAME_MAX) t=cps.slice(0,SESSION_NAME_MAX).join("").trim();
+  return t;
+}
+/* schedule = {weekdays:[0..6, Mon=0, sorted, unique], start:minutes 0..1439, since:"YYYY-MM-DD"} or null.
+   Anything else is null (the session itself stays, just unscheduled). Fixed key order: it is part of the
+   canonical text sync compares. */
+function cleanSchedule(x){
+  if(!isMapObj(x)||!Array.isArray(x.weekdays)||!x.weekdays.length) return null;
+  if(!x.weekdays.every(function(d){ return Number.isInteger(d)&&d>=0&&d<=6; })) return null;
+  if(!Number.isInteger(x.start)||x.start<0||x.start>=1440||!isIsoDate(x.since)) return null;
+  var wd=x.weekdays.filter(function(d,i,a){ return a.indexOf(d)===i; }).sort(function(a,b){ return a-b; });
+  return {weekdays:wd,start:x.start,since:x.since};
+}
+function migrateSessions(s){
+  if(!isMapObj(s.sessions)) s.sessions={};
+  Object.keys(s.sessions).forEach(function(id){
+    var r=s.sessions[id];
+    var blocks=isMapObj(r)?cleanBlocks(r.blocks):[];
+    if(!isMapObj(r)||typeof r.name!=="string"||!r.name.trim()||!blocks.length){
+      console.log("[session] dropped a malformed stored session "+id+": "+JSON.stringify(r));
+      delete s.sessions[id];
+      return;
+    }
+    r.id=id; r.blocks=blocks; r.schedule=cleanSchedule(r.schedule);
+    if("defaultStart" in r&&r.defaultStart!==null&&!validStart(r.defaultStart)) console.log("[session] dropped an invalid defaultStart on "+id+": "+JSON.stringify(r.defaultStart));
+    r.defaultStart=validStart(r.defaultStart)?r.defaultStart:null;
+  });
+  if(s.deletedSessions!==undefined){
+    if(!isMapObj(s.deletedSessions)) s.deletedSessions={};
+    Object.keys(s.deletedSessions).forEach(function(id){
+      if(!isMapObj(s.deletedSessions[id])) delete s.deletedSessions[id];
+    });
+  }
+  return s;
+}
+/* create or replace one session (the edit primitive). Returns the stored record, or null when the
+   name or blocks are unusable - nothing is stored then. The CALLER takes the snapshot. */
+function setSession(id,name,blocks,schedule,defaultStart){
+  var nm=normalizeSessionName(name),bl=cleanBlocks(blocks);
+  if(!nm||!bl.length||bl.length>SESSION_MAX_BLOCKS) return null;
+  if(!state.sessions) state.sessions={};
+  /* defaultStart: undefined = keep what the session has (a rename or a schedule change must not drop it), null = clear, a number = set */
+  var prev=state.sessions[id],ds=defaultStart===undefined?(prev&&validStart(prev.defaultStart)?prev.defaultStart:null):(validStart(defaultStart)?defaultStart:null);
+  var rec={id:id,name:nm,blocks:bl,schedule:cleanSchedule(schedule),defaultStart:ds};
+  if(state.deletedEntries){ rec.updatedAt=nowIso(); rec.updatedBy=getDeviceId(); }
+  state.sessions[id]=rec;
+  /* a live record and its own tombstone must never coexist - see flattenSessions */
+  if(state.deletedSessions) delete state.deletedSessions[id];
+  return rec;
+}
+function removeSession(id){
+  if(!state.sessions||!state.sessions[id]) return false;
+  delete state.sessions[id];
+  if(state.deletedEntries){
+    if(!state.deletedSessions) state.deletedSessions={};
+    var now=nowIso();
+    state.deletedSessions[id]={updatedAt:now,updatedBy:getDeviceId(),deletedAt:now};
+  }
+  return true;
+}
+function sessionTombstoneWins(r,t){
+  return !!(r.updatedAt&&t.updatedAt&&Date.parse(t.updatedAt)>Date.parse(r.updatedAt));
+}
+function flattenSessions(s){
+  var liveMap=s.sessions||{},deadMap=s.deletedSessions||{},out=[];
+  Object.keys(liveMap).forEach(function(id){
+    var r=liveMap[id],t=deadMap[id];
+    if(t&&sessionTombstoneWins(r,t)) return;
+    out.push({id:id,name:r.name,blocks:JSON.stringify(cleanBlocks(r.blocks)),schedule:JSON.stringify(cleanSchedule(r.schedule)),defaultStart:validStart(r.defaultStart)?r.defaultStart:null,
+      updatedAt:r.updatedAt,updatedBy:r.updatedBy,deleted:false,deletedAt:null});
+  });
+  Object.keys(deadMap).forEach(function(id){
+    var r=liveMap[id],t=deadMap[id];
+    if(r&&!sessionTombstoneWins(r,t)) return;
+    out.push({id:id,name:null,blocks:null,schedule:null,defaultStart:null,updatedAt:t.updatedAt,updatedBy:t.updatedBy,deleted:true,deletedAt:t.deletedAt});
+  });
+  return out;
+}
+function unflattenSessions(flat){
+  var sessions={},deleted={};
+  flat.forEach(function(r){
+    if(r.deleted){
+      deleted[r.id]={updatedAt:r.updatedAt,updatedBy:r.updatedBy,deletedAt:r.deletedAt};
+      return;
+    }
+    var blocks=null,schedule=null;
+    try{ blocks=cleanBlocks(JSON.parse(r.blocks)); schedule=cleanSchedule(JSON.parse(r.schedule)); }catch(e){ blocks=null; }
+    if(typeof r.name!=="string"||!blocks||!blocks.length){
+      /* can't be shown or applied. It stays on Drive (toPush is built from the merged flat list, not
+         from this); only the local copy is skipped. */
+      console.log("[session] ignored a synced session "+r.id+" that can't be read: "+JSON.stringify(r));
+      return;
+    }
+    sessions[r.id]={id:r.id,name:r.name,blocks:blocks,schedule:schedule,defaultStart:validStart(r.defaultStart)?r.defaultStart:null,updatedAt:r.updatedAt,updatedBy:r.updatedBy};
+  });
+  return {sessions:sessions,deletedSessions:deleted};
+}
+/* last-write-wins decides which version of a session survives a same-id conflict (no UI notice,
+   same precedent as the day highlights); the version that LOST goes to the console so it stays
+   recoverable. Not logged: my own stale echo coming back (mergeRecords case 3), and a loser whose
+   content equals the winner's. */
+function logSupersededSessions(localFlat,remoteFlat,mergedFlat,deviceId){
+  var win={},remoteById={};
+  mergedFlat.forEach(function(r){ win[r.id]=r; });
+  remoteFlat.forEach(function(r){ remoteById[r.id]=r; });
+  localFlat.forEach(function(L){
+    var R=remoteById[L.id],W=win[L.id];
+    if(!R||!W) return;
+    [{rec:L,remote:false},{rec:R,remote:true}].forEach(function(x){
+      var X=x.rec;
+      if(X===W||X.deleted) return;
+      if(x.remote&&X.updatedBy===deviceId) return;
+      if(!W.deleted&&sameContent(W,X,SESSION_FIELDS)) return;
+      console.log("[session] superseded (last write wins) on "+X.id+": \""+X.name+"\" "+X.blocks+" (written "+X.updatedAt+" by "+X.updatedBy+", "+(x.remote?"from Drive":"on this device")+")");
+    });
+  });
+}
+/* rewrite block category ids in flat session records (dedupeCategoriesByName). A record that changes
+   is restamped from this device: the remap is a real edit, and without a fresh stamp another device's
+   copy with the old ids could win the next merge. */
+function remapSessionCategories(sessionsFlat,idRemap,deviceId){
+  return sessionsFlat.map(function(r){
+    if(r.deleted||typeof r.blocks!=="string") return r;
+    var bl; try{ bl=JSON.parse(r.blocks); }catch(e){ return r; }
+    if(!Array.isArray(bl)) return r;
+    var changed=false;
+    bl=bl.map(function(b){
+      if(b&&b.cat&&idRemap[b.cat]){ changed=true; return Object.assign({},b,{cat:idRemap[b.cat]}); }
+      return b;
+    });
+    if(!changed) return r;
+    return Object.assign({},r,{blocks:JSON.stringify(cleanBlocks(bl)),updatedAt:nowIso(),updatedBy:deviceId});
+  });
+}
+/* category delete WITH a target moves blocks the way it moves entries; without a target both are left
+   alone (a dangling id reads as "No category", see doDeleteCategory). A session that changes is
+   restamped, once the device has sync fields. */
+function reassignCategorySessions(fromCatId,toCatId){
+  Object.keys(state.sessions||{}).forEach(function(id){
+    var r=state.sessions[id];
+    if(!r.blocks.some(function(b){ return b.cat===fromCatId; })) return;
+    r.blocks=r.blocks.map(function(b){ return b.cat===fromCatId?Object.assign({},b,{cat:toCatId||null}):b; });
+    if(state.deletedEntries){ r.updatedAt=nowIso(); r.updatedBy=getDeviceId(); }
+  });
+}
+
+
+/* ---- schedule and the "Did this happen?" prompt (stage 2) ----
+   A prompt for one occurrence (session, date) exists only when ALL hold: the schedule names that weekday;
+   the date is not before schedule.since; the date is today or yesterday (SESSION_PROMPT_LOOKBACK_DAYS);
+   the window (start .. start + the session's length) is OVER - strictly, now > end; NO entry overlaps the
+   window at all (whoever logged anything there has spoken for that time; asking again would be inferring);
+   and this device has not dismissed it. It is DERIVED from the entries every time it is asked, so there is
+   no "done" flag to sync or to get stuck: logging by hand, applying ahead, or another device's apply
+   arriving by sync all make it disappear on their own. Two devices that both press Yes before syncing
+   leave two sets of entries, visibly double-booked and undoable - documented, not prevented. */
+var SESSION_PROMPT_LOOKBACK_DAYS=2, SESSION_DISMISSED_MAX=50;
+var testNow=null;
+function sessionNow(){ return (TEST_MODE&&testNow)||new Date(); }
+function sessionWindow(sess,dateStr){
+  var sc=sess.schedule;
+  if(!sc||dateStr<sc.since) return null;
+  if(sc.weekdays.indexOf((parseIso(dateStr).getDay()+6)%7)<0) return null;
+  return {start:sc.start,end:sc.start+sessionSpan(sess)};
+}
+function sessionWindowCovered(st,dateStr,w){
+  for(var k=0;k*1440<w.end;k++){
+    var date=iso(addDays(parseIso(dateStr),k)),lo=Math.max(w.start-k*1440,0),hi=Math.min(w.end-k*1440,1440);
+    if(lo>=hi) continue;
+    if((st.entries[date]||[]).some(function(e){ return e.start<hi&&e.end>lo; })) return true;
+  }
+  return false;
+}
+function dismissedPrompts(){
+  try{ var a=JSON.parse(readStore(SDKEY)||"[]"); return Array.isArray(a)?a.filter(function(x){ return typeof x==="string"; }):[]; }catch(e){ return []; }
+}
+function dismissSessionPrompt(id,dateStr){
+  var key=id+"|"+dateStr,list=dismissedPrompts().filter(function(x){ return x!==key; });
+  list.push(key);
+  writeStore(SDKEY,JSON.stringify(list.slice(-SESSION_DISMISSED_MAX)));
+}
+function pendingSessionPromptsFor(st,nowArg){
+  var now=nowArg||sessionNow(),out=[],dismissed=dismissedPrompts();
+  var today=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+  Object.keys(st.sessions||{}).forEach(function(id){
+    var sess=st.sessions[id];
+    if(!sess.schedule) return;
+    for(var k=0;k<SESSION_PROMPT_LOOKBACK_DAYS;k++){
+      var dateStr=iso(addDays(today,-k)),w=sessionWindow(sess,dateStr);
+      if(!w) continue;
+      var d=parseIso(dateStr);
+      if(!(now.getTime()>new Date(d.getFullYear(),d.getMonth(),d.getDate(),0,w.end,0,0).getTime())) continue;
+      if(dismissed.indexOf(id+"|"+dateStr)>=0||sessionWindowCovered(st,dateStr,w)) continue;
+      out.push({id:id,date:dateStr,name:sess.name,start:w.start,end:w.end});
+    }
+  });
+  return out.sort(function(a,b){ return a.date<b.date?-1:a.date>b.date?1:a.start-b.start; });
+}
+function pendingSessionPrompts(){ return pendingSessionPromptsFor(state); }
+/* declare (weekdays, start) or remove (weekdays === null) a schedule: an undoable edit of the session.
+   since = today: an occurrence on the day it was declared counts. Returns false (no snapshot) when nothing
+   valid would change. */
+function setSessionSchedule(id,weekdays,start){
+  var r=state.sessions&&state.sessions[id];
+  if(!r) return false;
+  var sched=null;
+  if(weekdays!==null){
+    sched=cleanSchedule({weekdays:weekdays,start:start,since:iso(sessionNow())});
+    if(!sched) return false;
+  }else if(r.schedule===null) return false;
+  snapshot((sched?"schedule":"unschedule")+' session "'+r.name+'"');
+  setSession(id,r.name,r.blocks,sched);
+  persist();
+  return true;
+}
+
+/* ---------------- detection constants and small helpers (stage 3 redesign) ----------------
+   Detection PROPOSES creating a session - nothing else. The detector is detectPackages() below (noise filter,
+   midnight fold, packages, ranking); suggestPackages() further down applies this device's dismissals and keeps
+   the top SUGGEST_TOP. The old single-block detector with its fixed 12-date minimum was removed in R4: a fixed
+   minimum is wrong as the log grows (measured: chance alone clears 12 in 75% of scrambled logs at 150 days).
+   DETECT_TOLERANCE_MIN is the width of a start-time cluster (15 min, inclusive): the real Muay Thai block's
+   start spread was 10 minutes, one habit, the weakest number in here. */
+var DETECT_TOLERANCE_MIN=15, SUGGEST_TOP=3;
+function weekdayOfIso(d){ var q=d.split("-"); return (new Date(+q[0],+q[1]-1,+q[2]).getDay()+6)%7; }
+function normLabel(l){ return String(l==null?"":l).replace(/\s+/g," ").trim().toLowerCase(); }
+
+/* ---------------- noise filter (stage 3 redesign, R1) ----------------
+   Is a cluster of dates a real habit, or the kind of coincidence a log of this size throws up by chance?
+   Two tests, each held to NOISE_ALPHA = 2.5% so that the chance that EITHER fires on pure noise is at most 5%
+   (measured 0.7% - 2.8% from 35 to 250 logged days, OVERNIGHT-STATUS.md): the any-weekday test (a first-block
+   cluster reaches kAll distinct dates) and the weekday-specific test (it reaches kWd dates on ONE weekday - this
+   is what finds a once-a-week habit after about 6 weeks instead of 12).
+   How the thresholds are worked out, from the user's OWN log (so they adapt to its length and its shape):
+   for a category, an entry lands in a fixed 16-minute window (NOISE_WINDOW_MINUTES = the 15-minute tolerance,
+   inclusive) with probability 1-(1-16/1440)^m on a day with m entries of it, if the day's times were scrambled.
+   Summed over days that is the expected number of distinct dates a window collects (lambda); the chance that some
+   category/window collects k or more is about  1 - exp(-c0 * (1440/16) * sum of Poisson tails)  - the 90 windows
+   of a day, times a fitted constant c0 for the freedom of a sliding window. kAll / kWd is the smallest k that
+   brings it to 2.5%. For the weekday test lambda is kept per (weekday, category) from the real weekday mix of the
+   log, so a log that only has Monday-Friday entries is not treated as if it were spread over seven days.
+   c0 is FITTED: NOISE_C0_ALL = 4.0 and NOISE_C0_WD = 3.25 were fitted to an independent time-scramble simulation
+   of the one real log this was built on (subsets from 14 days, a bootstrap above 88 days) and checked on
+   synthetic logs of four densities; the weekday constant's viable range was 3.0 - 3.5, this is its middle.
+   NOT claimed: any other real person's log (a second one is a human gate before merging); real days beyond 88;
+   logs under 35 days (nothing is shown there at all - the smallest log in which a once-a-week habit logged every
+   single week could even clear the weekday test).
+   NO BUMP ABOVE 150 LOGGED DAYS (decision 2026-10-24). An earlier version added 1 to kWd above 150 days as a conservative
+   patch, from a time when the weekday family looked one short at 200/250 days; the per-weekday form with its own constant
+   measured fine without it (combined rate 1.9% at 200 days, 2.4% at 250), so it was dropped. **THRESHOLDS ABOVE 150 LOGGED
+   DAYS REST ON RESAMPLED DAYS (the simulation can only resample the 88 real days) AND ARE UNVALIDATED until a real log of
+   150+ days exists.** Hold-out evidence (2026-10-24): constants fitted on sizes up to 150 only still gave a combined rate of
+   4.0% at 200 and 4.5% at 250 days; the shipped constants on 36 independently generated logs of six densities (35-250 days)
+   gave at most 3.0%. The fitting itself used ALL sizes, so those two hold-outs are the evidence, not the fit. */
+var NOISE_ALPHA=0.025, NOISE_C0_ALL=4.0, NOISE_C0_WD=3.25, NOISE_MIN_LOGGED_DAYS=35;
+var NOISE_WINDOW_MINUTES=DETECT_TOLERANCE_MIN+1;
+function poissonTailAtLeast(lambda,k){
+  if(!(lambda>0)) return 0;
+  var t=0,term=Math.exp(-lambda);
+  for(var i=0;i<k;i++){ t+=term; term*=lambda/(i+1); }
+  return Math.max(0,1-t);
+}
+function noiseSmallestK(lams,c0){
+  var perWindow=1440/NOISE_WINDOW_MINUTES;
+  for(var k=2;k<400;k++){
+    var s=0;
+    for(var i=0;i<lams.length;i++) s+=poissonTailAtLeast(lams[i],k);
+    if(1-Math.exp(-c0*perWindow*s)<=NOISE_ALPHA) return k;
+  }
+  return 400;
+}
+function noiseThresholds(entriesByDate,categories){
+  var known={},lamAll={},lamWd={},n=0;
+  (categories||[]).forEach(function(c){ known[c.id]=true; });
+  var chance=NOISE_WINDOW_MINUTES/1440;
+  Object.keys(entriesByDate||{}).forEach(function(date){
+    var es=entriesByDate[date]||[];
+    if(!es.length) return;
+    n++;
+    var w=weekdayOfIso(date),cnt={};
+    es.forEach(function(e){
+      if(e&&typeof e.cat==="string"&&known[e.cat]&&e.start>0) cnt[e.cat]=(cnt[e.cat]||0)+1;
+    });
+    Object.keys(cnt).forEach(function(c){
+      var p=1-Math.pow(1-chance,cnt[c]);
+      lamAll[c]=(lamAll[c]||0)+p;
+      lamWd[w+"|"+c]=(lamWd[w+"|"+c]||0)+p;
+    });
+  });
+  var kAll=noiseSmallestK(Object.keys(lamAll).map(function(k){ return lamAll[k]; }),NOISE_C0_ALL);
+  var kWd=noiseSmallestK(Object.keys(lamWd).map(function(k){ return lamWd[k]; }),NOISE_C0_WD);
+  return {n:n,kAll:kAll,kWd:kWd,eligible:n>=NOISE_MIN_LOGGED_DAYS};
+}
+/* does a cluster of dates clear the filter? either test is enough; they are separate tests, their counts are
+   never added together */
+function clusterQualifies(dates,th){
+  var byWd=[0,0,0,0,0,0,0],seen={},n=0;
+  (dates||[]).forEach(function(d){ if(!seen[d]){ seen[d]=1; n++; byWd[weekdayOfIso(d)]++; } });
+  var maxWd=Math.max.apply(null,byWd),viaAll=n>=th.kAll,viaWd=maxWd>=th.kWd;
+  return {ok:viaAll||viaWd,via:(viaAll&&viaWd)?"both":viaAll?"all":viaWd?"weekday":null,n:n,maxWd:maxWd};
+}
+
+/* ---------------- midnight fold (stage 3 redesign, R2) ----------------
+   putEntry splits an entry that crosses midnight into two entries on two dates (one ends at 24:00, the other starts
+   at 00:00, same label and category). For detection "Sleep" has to mean the whole night, so the pair is put back
+   together as ONE logical entry on the EVENING date: start = the evening start, end = 1440 + the morning end.
+   Rules (R2 tests): same category (a real one - uncategorised halves are never folded) AND same normalized label
+   (trimmed, lower-case, whitespace collapsed); the next CALENDAR day (real date arithmetic, so month, year and leap-day
+   ends work); the total at most 1439 minutes; each morning half is used at most once, the one with the smallest end
+   winning among several; evening halves are taken in start order so the result does not depend on entry order.
+   A half with no partner stays an ordinary entry, except an evening half on the log's LAST day, which is flagged
+   `open` (the night is not over yet; detection leaves it out). A night whose label or category was edited on one half
+   therefore does not fold - conservative on purpose: two different activities are never merged.
+   Pure: the input is never changed; the returned entries are copies. Measured on the one real log: all 61 evening
+   halves had a same-category same-label partner. */
+function foldMidnightHalves(entriesByDate){
+  var dates=Object.keys(entriesByDate||{}).filter(function(d){ return (entriesByDate[d]||[]).length; }).sort();
+  var copy={},consumed={},stats={folded:0,unmatched:0,open:0},maxDate=dates[dates.length-1];
+  dates.forEach(function(d){ copy[d]=entriesByDate[d].map(function(e){ return Object.assign({},e); }); });
+  dates.forEach(function(d){
+    var order=copy[d].map(function(e,i){ return i; }).sort(function(x,y){
+      var a=copy[d][x],b=copy[d][y];
+      return a.start-b.start||a.end-b.end||(a.label<b.label?-1:a.label>b.label?1:0)||x-y;
+    });
+    order.forEach(function(ai){
+      var a=copy[d][ai];
+      if(consumed[d]&&consumed[d][ai]) return;
+      if(!(a.end===1440&&typeof a.cat==="string"&&a.cat)) return;
+      var nd=iso(addDays(parseIso(d),1)),cand=copy[nd],best=-1;
+      if(cand){
+        for(var bi=0;bi<cand.length;bi++){
+          var b=cand[bi];
+          if(consumed[nd]&&consumed[nd][bi]) continue;
+          if(b.start!==0||b.cat!==a.cat||normLabel(b.label)!==normLabel(a.label)) continue;
+          if(1440+b.end-a.start>1439) continue;
+          if(best<0||b.end<cand[best].end) best=bi;
+        }
+      }
+      if(best>=0){
+        a.end=1440+cand[best].end; a.folded=true;
+        (consumed[nd]=consumed[nd]||{})[best]=true;
+        stats.folded++;
+      }else if(d===maxDate&&!cand){ a.open=true; stats.open++; }
+      else stats.unmatched++;
+    });
+  });
+  var days={};
+  dates.forEach(function(d){ days[d]=copy[d].filter(function(e,i){ return !(consumed[d]&&consumed[d][i]); }); });
+  return {days:days,stats:stats};
+}
+
+/* ---------------- packages (stage 3 redesign, R3) ----------------
+   detectPackages() finds habits as PACKAGES - a sequence of blocks such as get ready > bike > Muay Thai - ranks them by
+   the effort they would save, and proposes creating a session from one. PURE: it reads what it is handed and returns a
+   list; it never logs an entry, writes state, snapshots or touches storage.
+   1. Below NOISE_MIN_LOGGED_DAYS (35) logged days it returns nothing.
+   2. Midnight halves are folded (foldMidnightHalves); an open last night is left out.
+   3. Per category the densest 15-minute windows of start times are cut out one by one (one occurrence per date, its
+      earliest start); a window is a candidate first block only if its dates clear the noise filter (clusterQualifies).
+   4. A candidate grows into a package. A first pass takes the majority next category while it follows at least
+      PKG_RETENTION of the first block's days (adjacent entries, gap at most 30 minutes; a folded night is always the
+      last entry of its date, so a chain ends there by itself);
+      a second pass matches each later block by CATEGORY and an OFFSET WINDOW (+/- 15 minutes from the first block's
+      start) so a short interposed entry does not break a day, and a day is "full" only if every block matched. A block
+      is kept while the days matching up to it are at least PKG_RETENTION of the first block's days.
+      PKG_RETENTION = 0.5 is LABEL-CALIBRATED, not derived from the noise null: the lowest retention of any package
+      labelled "yes" was 57-62%.
+   5. Qualified packages with the same category sequence whose first blocks are within PKG_MERGE_MINUTES (30 = two
+      adjacent windows) merge into one suggestion with the median offsets and durations of the union. Eligibility is
+      judged per window BEFORE merging: the noise null is calibrated for a 16-minute window, so a merged 31-minute window
+      must not be tested with it.
+   6. Ranked by entries saved per week = recentRate x blocks. recentRate counts full days in the last
+      PKG_RATE_WINDOW_DAYS (56) days divided by the shorter of that window and the time since the package first
+      appeared (at least one week). 56 is a DESIGN CONSTANT, not derived (the top of the real ranking was stable across
+      84-, 56- and 28-day windows; 28 was noisy). A habit that stops falls; one that resumes rises again. Nothing is
+      hidden by the rate: eligibility is the noise filter's job alone (decision D1: a habit dormant for months fades as
+      the log grows - a chance filter, not a hide rule).
+   7. A package whose FIRST block has the same category within PKG_ABSORB_MINUTES (30) of a block of a higher-ranked
+      package is absorbed into it. A package that merely PREPENDS a block to a higher-ranked one is not absorbed
+      (that is why "Fix hair > Journal", labelled no, is still suggested: nothing separates it from "Girlfriend >
+      Prep for bed > Sleep"; the owner dismisses it with Not now).
+   8. What an existing live session already covers is dropped last (so it still absorbs what it contains). */
+var PKG_RETENTION=0.5, PKG_RATE_WINDOW_DAYS=56, PKG_GAP_MINUTES=30, PKG_MAX_BLOCKS=6;
+/* PKG_MATCH_WINDOW_MINUTES: how far from where it is expected (the end of the previous matched block plus the usual gap) a
+   later block may start and still count. 15 is a DESIGN CONSTANT, NOT DERIVED from any null or measurement: it was chosen to
+   tolerate a short interposed entry (the 5-minute Journal on three Muay Thai days) and ordinary day-to-day wobble, and it is
+   kept equal to the cluster tolerance only for simplicity (that one was read off a single habit's 10-minute spread). Tests pin
+   it from both sides: a block 40 minutes late does not count (R3-03c), a 5-minute interposed entry does (R3-02). */
+var PKG_MATCH_WINDOW_MINUTES=15;
+var PKG_MERGE_MINUTES=2*DETECT_TOLERANCE_MIN, PKG_ABSORB_MINUTES=2*DETECT_TOLERANCE_MIN;
+function pkgMedian(a){ var t=a.slice().sort(function(x,y){ return x-y; }); return t[(t.length-1)>>1]; }
+function isoDaysBetween(a,b){
+  var p=a.split("-"),q=b.split("-");
+  return Math.round((new Date(+q[0],+q[1]-1,+q[2])-new Date(+p[0],+p[1]-1,+p[2]))/86400000);
+}
+/* is this date inside the rate window: the PKG_RATE_WINDOW_DAYS days up to and including asOf. ONE definition, used by the rate,
+   the card's "N of M days", the weekday strip and the per-step fold-out, so they cannot drift apart. */
+function inRateWindow(date,asOf){ var ago=isoDaysBetween(date,asOf); return ago>=0&&ago<PKG_RATE_WINDOW_DAYS; }
+/* the rate's own window: n = distinct full days inside it, days = its length (the shorter of 56 days and the time since the first
+   date, at least one week). rate = n / (days / 7). */
+function rateWindow(dates,asOf){
+  var seen={},first=null,inWin=0;
+  (dates||[]).forEach(function(d){
+    if(seen[d]) return; seen[d]=1;
+    if(first===null||d<first) first=d;
+    if(inRateWindow(d,asOf)) inWin++;
+  });
+  if(first===null) return {n:0,days:0};
+  var since=Math.max(1,isoDaysBetween(first,asOf)+1);
+  return {n:inWin,days:Math.max(7,Math.min(PKG_RATE_WINDOW_DAYS,since))};
+}
+function recentRate(dates,asOf){
+  var w=rateWindow(dates,asOf);
+  return w.days?w.n/(w.days/7):0;
+}
+function pkgSortEntries(a,b){
+  return a.start-b.start||a.end-b.end||(a.label<b.label?-1:a.label>b.label?1:0)||(a.id<b.id?-1:a.id>b.id?1:0);
+}
+/* densest 15-minute windows of one category's occurrences: [{occ:[...all in the window], first:[one per date]}] */
+function pkgClusters(occ,minDates){
+  var out=[];
+  occ=occ.slice().sort(function(a,b){ return a.start-b.start||(a.date<b.date?-1:a.date>b.date?1:0)||a.idx-b.idx; });
+  while(occ.length>=minDates){
+    var cnt={},dist=0,j=0,bestD=0,bestI=-1,bestJ=-1,i;
+    for(i=0;i<occ.length;i++){
+      while(j<occ.length&&occ[j].start-occ[i].start<=DETECT_TOLERANCE_MIN){
+        if(!cnt[occ[j].date]){ cnt[occ[j].date]=0; dist++; }
+        cnt[occ[j].date]++; j++;
+      }
+      if(dist>bestD){ bestD=dist; bestI=i; bestJ=j; }
+      cnt[occ[i].date]--; if(!cnt[occ[i].date]) dist--;
+    }
+    if(bestD<minDates) break;
+    var cl=occ.splice(bestI,bestJ-bestI),seen={},first=[];
+    cl.forEach(function(o){ if(!seen[o.date]){ seen[o.date]=1; first.push(o); } });
+    out.push({occ:cl,first:first});
+  }
+  return out;
+}
+function pkgSummarise(cats,occ,catName,via,anchorCount,mergedFrom,stepDates){
+  var dates=Object.keys(occ).sort(),k=cats.length,blocks=[],wdc=[0,0,0,0,0,0,0];
+  dates.forEach(function(d){ wdc[weekdayOfIso(d)]++; });
+  var anchor=pkgMedian(dates.map(function(d){ return occ[d][0].start; }));
+  for(var b=0;b<k;b++){
+    var tally={},rep={},first=true;
+    dates.forEach(function(d){ var l=normLabel(occ[d][b].label); tally[l]=(tally[l]||0)+1; if(!(l in rep)) rep[l]=occ[d][b].label; });
+    var best=Object.keys(tally).sort(function(x,y){ return tally[y]-tally[x]||(x<y?-1:x>y?1:0); })[0];
+    blocks.push({cat:cats[b],catName:catName[cats[b]],
+      offset:pkgMedian(dates.map(function(d){ return occ[d][b].start-occ[d][0].start; })),
+      duration:pkgMedian(dates.map(function(d){ return occ[d][b].end-occ[d][b].start; })),
+      label:rep[best]});
+  }
+  return {cats:cats.slice(),blocks:blocks,anchor:anchor,count:dates.length,anchorCount:anchorCount,dates:dates,weekdayCounts:wdc,via:via,occ:occ,mergedFrom:mergedFrom||1,stepDates:stepDates||[]};
+}
+function pkgCoveredBy(sessions,pkg){
+  return Object.keys(sessions||{}).some(function(id){
+    var sx=sessions[id];
+    if(!sx||!Array.isArray(sx.blocks)) return false;
+    return sx.blocks.some(function(b){
+      if(b.cat!==pkg.blocks[0].cat) return false;
+      if(sx.schedule&&Number.isInteger(sx.schedule.start)) return Math.abs(sx.schedule.start+b.offset-pkg.anchor)<=PKG_ABSORB_MINUTES;
+      return normLabel(b.label)===normLabel(pkg.blocks[0].label);
+    });
+  });
+}
+function detectPackages(entriesByDate,categories,sessions,asOf){
+  var th=noiseThresholds(entriesByDate,categories),out={n:th.n,thresholds:th,packages:[]};
+  if(!th.eligible) return out;
+  var known={},catName={},days={},folded=foldMidnightHalves(entriesByDate).days;
+  (categories||[]).forEach(function(c){ known[c.id]=true; catName[c.id]=c.name; });
+  var dateList=Object.keys(folded).sort();
+  dateList.forEach(function(d){ days[d]=folded[d].filter(function(e){ return !e.open; }).sort(pkgSortEntries); });
+  asOf=asOf||dateList[dateList.length-1];
+  var byCat={};
+  dateList.forEach(function(d){
+    days[d].forEach(function(e,i){
+      if(typeof e.cat==="string"&&known[e.cat]&&e.start>0&&e.end>e.start) (byCat[e.cat]=byCat[e.cat]||[]).push({date:d,idx:i,start:e.start});
+    });
+  });
+  var minExtract=Math.min(th.kAll,th.kWd),pkgs=[];
+  Object.keys(byCat).sort().forEach(function(cat){
+    pkgClusters(byCat[cat],minExtract).forEach(function(cl){
+      var dates=cl.first.map(function(o){ return o.date; }).sort(),q=clusterQualifies(dates,th);
+      if(!q.ok) return;
+      /* first pass: the majority next category while it follows >= PKG_RETENTION of the first block's days */
+      var n0=cl.first.length,cur={},ents={},cats=[cat];
+      cl.first.forEach(function(o){ cur[o.date]=o.idx; ents[o.date]=[o.idx]; });
+      while(cats.length<PKG_MAX_BLOCKS){
+        var grp={};
+        Object.keys(cur).forEach(function(d){
+          var es=days[d],i=cur[d],nx=es[i+1];
+          if(nx&&known[nx.cat]&&nx.start-es[i].end<=PKG_GAP_MINUTES) (grp[nx.cat]=grp[nx.cat]||{})[d]=i+1;
+        });
+        var bestCat=null,bestN=0;
+        Object.keys(grp).sort().forEach(function(c){ var m=Object.keys(grp[c]).length; if(m>bestN){ bestN=m; bestCat=c; } });
+        if(bestCat===null||bestN/n0<PKG_RETENTION) break;
+        cats.push(bestCat); cur=grp[bestCat];
+        Object.keys(cur).forEach(function(d){ ents[d].push(cur[d]); });
+      }
+      /* the usual gap between the end of one block and the start of the next, from the days the first pass followed */
+      var gaps=[0];
+      for(var k=1;k<cats.length;k++){
+        gaps.push(pkgMedian(Object.keys(cur).map(function(d){ return days[d][ents[d][k]].start-days[d][ents[d][k-1]].end; })));
+      }
+      /* second pass: each later block is matched by CATEGORY and a window of +/-15 minutes around (end of the previous
+         matched block + the usual gap). Matching against the previous block's END, not the first block's start, lets a
+         block whose length varies (School ends when the Walk starts) keep the chain; and an interposed entry shorter than
+         the window does not break it. Found by running the first version (offset from the first block) on the real log:
+         School > Walk and Girlfriend > Prep for bed > Sleep did not form. */
+      var reach={};
+      cl.first.forEach(function(o){
+        var es=days[o.date],prev=o.idx,ent=[o.idx];
+        for(var k2=1;k2<cats.length;k2++){
+          var hit=-1,want=es[prev].end+gaps[k2];
+          for(var j=prev+1;j<es.length;j++){
+            if(es[j].cat===cats[k2]&&Math.abs(es[j].start-want)<=PKG_MATCH_WINDOW_MINUTES){ hit=j; break; }
+          }
+          if(hit<0) break;
+          ent.push(hit); prev=hit;
+        }
+        reach[o.date]=ent;
+      });
+      var L=1;
+      for(var l=cats.length;l>=2;l--){
+        var m=0; Object.keys(reach).forEach(function(d){ if(reach[d].length>=l) m++; });
+        if(m/n0>=PKG_RETENTION){ L=l; break; }
+      }
+      var occ={};
+      Object.keys(reach).forEach(function(d){
+        if(reach[d].length>=L) occ[d]=reach[d].slice(0,L).map(function(ix){ return days[d][ix]; });
+      });
+      /* per-step dates: the dates on which the chain reached step k (the detector's own matching, partial chains included). The
+         card's fold-out reads these, so it has no matching of its own to drift. Nothing here changes what is found or ranked. */
+      var stepDates=[];
+      for(var sk=0;sk<L;sk++) stepDates.push(Object.keys(reach).filter(function(d){ return reach[d].length>sk; }).sort());
+      pkgs.push(pkgSummarise(cats.slice(0,L),occ,catName,q.via,n0,1,stepDates));
+    });
+  });
+  /* merge qualified packages with the same category sequence whose first blocks are within 30 minutes (chained) */
+  var groups={},merged=[];
+  pkgs.forEach(function(p){ (groups[p.cats.join(",")]=groups[p.cats.join(",")]||[]).push(p); });
+  Object.keys(groups).sort().forEach(function(key){
+    var lst=groups[key].sort(function(a,b){ return a.anchor-b.anchor; }),grp=[lst[0]];
+    function flush(){
+      var occ={},n0=0,vias={};
+      grp.forEach(function(p){ Object.keys(p.occ).forEach(function(d){ if(!(d in occ)) occ[d]=p.occ[d]; }); n0+=p.anchorCount; vias[p.via]=1; });
+      var sd=grp[0].cats.map(function(c,k){
+        var u={}; grp.forEach(function(p){ (p.stepDates[k]||[]).forEach(function(d){ u[d]=1; }); });
+        return Object.keys(u).sort();
+      });
+      merged.push(pkgSummarise(grp[0].cats,occ,catName,Object.keys(vias).length>1?"both":grp[0].via,n0,grp.length,sd));
+    }
+    for(var i=1;i<lst.length;i++){
+      if(lst[i].anchor-grp[grp.length-1].anchor<=PKG_MERGE_MINUTES) grp.push(lst[i]);
+      else{ flush(); grp=[lst[i]]; }
+    }
+    flush();
+  });
+  merged.forEach(function(p){
+    p.rate=recentRate(p.dates,asOf);
+    p.effort=p.rate*p.blocks.length;
+    p.firstDate=p.dates[0]; p.lastDate=p.dates[p.dates.length-1];
+    p.id=p.cats.join(">")+"@"+p.anchor;
+  });
+  merged.sort(function(a,b){
+    return b.effort-a.effort||b.count-a.count||a.anchor-b.anchor||(a.id<b.id?-1:a.id>b.id?1:0);
+  });
+  var kept=[];
+  merged.forEach(function(p){
+    var absorbed=kept.some(function(q){
+      return q.blocks.some(function(b){ return b.cat===p.blocks[0].cat&&Math.abs(q.anchor+b.offset-p.anchor)<=PKG_ABSORB_MINUTES; });
+    });
+    if(!absorbed) kept.push(p);
+  });
+  out.packages=kept.filter(function(p){ return !pkgCoveredBy(sessions,p); }).map(function(p){
+    return {id:p.id,cats:p.cats,blocks:p.blocks,anchor:p.anchor,count:p.count,anchorCount:p.anchorCount,dates:p.dates,
+      weekdayCounts:p.weekdayCounts,via:p.via,firstDate:p.firstDate,lastDate:p.lastDate,rate:p.rate,effort:p.effort,mergedFrom:p.mergedFrom,stepDates:p.stepDates};
+  });
+  return out;
+}
+
+/* ---- suggestions: what the Sessions sheet offers (R4) ----
+   suggestPackages() runs the pure detector on the ledger as of TODAY (so "recent" means the last 56 days up to now),
+   drops what this device has dismissed and keeps the top SUGGEST_TOP. A dismissal is device-local (SGKEY, capped),
+   never synced, and is remembered as "category sequence @ anchor minute"; it hides a package with the same sequence
+   whose anchor is within PKG_ABSORB_MINUTES (30), because the anchor moves a little as data grows. Old keys of the
+   form "cat@start" (the one-block detector) still match one-block packages of that category. */
+function dismissedSuggestions(){
+  try{ var a=JSON.parse(readStore(SGKEY)||"[]"); return Array.isArray(a)?a.filter(function(x){ return typeof x==="string"; }):[]; }catch(e){ return []; }
+}
+function dismissSuggestion(pkg){
+  if(!pkg||!Array.isArray(pkg.cats)||!pkg.cats.length||!pkg.cats.every(function(c){ return typeof c==="string"; })||!Number.isInteger(pkg.anchor)) return;
+  var key=pkg.cats.join(">")+"@"+pkg.anchor,list=dismissedSuggestions().filter(function(x){ return x!==key; });
+  list.push(key);
+  writeStore(SGKEY,JSON.stringify(list.slice(-SESSION_DISMISSED_MAX)));
+}
+function suggestionDismissed(pkg,list){
+  var seq=pkg.cats.join(">");
+  return list.some(function(k){
+    var at=k.lastIndexOf("@");
+    return k.slice(0,at)===seq&&Math.abs(+k.slice(at+1)-pkg.anchor)<=PKG_ABSORB_MINUTES;
+  });
+}
+/* suggestPackages is MEMOIZED on the content that decides its answer: the reference date, this device's dismissals (the raw
+   stored text), the categories (id and name), the sessions, and every entry (date, id, start, end, category, label). The
+   key is an exact string, not a hash, so two different inputs can never share a cache entry; building it is one linear pass
+   over the entries (a few ms at 20,000 entries) against 20-700 ms for the detection it saves. One entry is kept (the sheet
+   asks for the same thing again and again: every render() while it is open); it is memory only, never stored. The state is
+   mutated in place all over the app, so object identity cannot serve as a version - that is why the key is the content. */
+var suggestCache=null, suggestStats={hits:0,misses:0};
+function suggestionKey(st,asOf,dismissedRaw){
+  var parts=[asOf,dismissedRaw],ents=st.entries||{};
+  Object.keys(ents).sort().forEach(function(d){
+    var l=ents[d];
+    if(!l||!l.length) return;
+    parts.push(d);
+    for(var i=0;i<l.length;i++){ var e=l[i]; parts.push(e.id+"|"+e.start+"|"+e.end+"|"+e.cat+"|"+e.label); }
+  });
+  (st.categories||[]).forEach(function(c){ parts.push("c"+c.id+"|"+c.name); });
+  parts.push(JSON.stringify(st.sessions||{}));
+  return parts.join("\n");
+}
+function suggestPackages(st,asOf){
+  var ref=asOf||iso(sessionNow()),raw=readStore(SGKEY)||"[]",key=suggestionKey(st,ref,raw);
+  if(suggestCache&&suggestCache.key===key){
+    suggestStats.hits++;
+    var c=suggestCache.value;
+    return {n:c.n,eligible:c.eligible,minDays:c.minDays,found:c.found,shown:c.shown.slice()};
+  }
+  suggestStats.misses++;
+  var res=detectPackages(st.entries,st.categories,st.sessions,ref),dismissed=dismissedSuggestions();
+  var value={n:res.n,eligible:res.thresholds.eligible,minDays:NOISE_MIN_LOGGED_DAYS,found:res.packages.length,
+    shown:res.packages.filter(function(x){ return !suggestionDismissed(x,dismissed); }).slice(0,SUGGEST_TOP)};
+  suggestCache={key:key,value:value};
+  return {n:value.n,eligible:value.eligible,minDays:value.minDays,found:value.found,shown:value.shown.slice()};
+}
+/* the exact clock times a package would log, from its anchor and offsets (an end past 24:00 wraps to the next day's clock) */
+function stepsFor(blocks,anchor){
+  return blocks.map(function(b){
+    var st=anchor+b.offset,e=st+b.duration;
+    return {start:st%1440,end:e%1440,label:b.label,catName:b.catName,cat:b.cat,duration:b.duration,nextDay:e>1440};
+  });
+}
+function packageSteps(pkg){ return stepsFor(pkg.blocks,pkg.anchor); }
+function packageName(pkg){ return normalizeSessionName(pkg.blocks[0].label||pkg.blocks[0].catName||""); }
+/* accept = create ONE session from the whole package: every block with its offset, duration, label and category,
+   NO schedule. It logs nothing. One snapshot = one undo step. Any malformed block makes it create nothing. */
+function createSessionFromPackage(pkg,name){
+  if(!pkg||!Array.isArray(pkg.blocks)||!pkg.blocks.length||pkg.blocks.length>SESSION_MAX_BLOCKS) return null;
+  var raw=pkg.blocks.map(function(b){
+    return {offset:b.offset,duration:Number.isInteger(b.duration)?Math.min(b.duration,SESSION_MAX_DURATION):b.duration,label:b.label,cat:b.cat};
+  });
+  var bl=cleanBlocks(raw);
+  if(bl.length!==raw.length) return null;
+  var nm=normalizeSessionName(name);
+  if(!nm) return null;
+  snapshot('create session "'+nm+'" from a suggestion');
+  var id=uid();
+  setSession(id,nm,bl,null,validStart(pkg.anchor)?pkg.anchor:null);
+  persist();
+  return id;
+}
+
+/* ---- Log today: which start a session uses, and the start-time edit ---- */
+function roundedNowStart(){
+  var n=sessionNow(),m=Math.round((n.getHours()*60+n.getMinutes())/5)*5;
+  return m>1435?1435:m;
+}
+/* precedence: a declared schedule's start, then defaultStart, then (today) the current clock time rounded to 5 minutes,
+   (any other day) the start of the displayed day (settings.startHour). Clock minutes throughout, as the whole app. */
+function sessionStartFor(sess,dateStr){
+  if(sess.schedule&&validStart(sess.schedule.start)) return {start:sess.schedule.start,source:"schedule"};
+  if(validStart(sess.defaultStart)) return {start:sess.defaultStart,source:"default"};
+  if(dateStr===iso(sessionNow())) return {start:roundedNowStart(),source:"now"};
+  var sh=state.settings&&Number.isInteger(state.settings.startHour)?state.settings.startHour:6;
+  return {start:Math.min(1435,Math.max(0,sh*60)),source:"startHour"};
+}
+/* the start-time edit: one snapshot, one forward edit. minutes null clears (back to unknown). Returns whether anything changed. */
+function setSessionStart(id,minutes){
+  var r=state.sessions&&state.sessions[id];
+  if(!r) return false;
+  if(minutes!==null&&!validStart(minutes)) return false;
+  if((validStart(r.defaultStart)?r.defaultStart:null)===minutes) return false;
+  snapshot('start time of session "'+r.name+'"');
+  setSession(id,r.name,r.blocks,r.schedule,minutes);
+  persist();
+  return true;
+}
+
+/* ---- save as session / apply ---- */
+function isIsoDate(s){
+  if(typeof s!=="string"||!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  return iso(parseIso(s))===s;
+}
+function validMinute(m){ return Number.isInteger(m)&&m>=0&&m<=1440; }
+/* the blocks for the logged entries of ONE date that overlap [from,to): clipped to the range, offsets
+   measured from the first block's (clipped) start. [] when nothing overlaps. */
+function sessionBlocksFromRange(dateStr,from,to){
+  var list=(state.entries[dateStr]||[]).filter(function(e){ return e.start<to&&e.end>from; })
+    .map(function(e){ return {s:Math.max(e.start,from),e:Math.min(e.end,to),label:e.label,cat:e.cat}; })
+    .sort(function(a,b){ return a.s-b.s||a.e-b.e; });
+  if(!list.length) return [];
+  var origin=list[0].s;
+  return list.map(function(g){ return {offset:g.s-origin,duration:g.e-g.s,label:g.label||"",cat:g.cat||null}; });
+}
+/* where the first saved block starts (the clipped start of the earliest overlapping entry): the session's typical start */
+function sessionRangeOrigin(dateStr,from,to){
+  var best=null;
+  (state.entries[dateStr]||[]).forEach(function(e){
+    if(!(e.start<to&&e.end>from)) return;
+    var s0=Math.max(e.start,from);
+    if(best===null||s0<best) best=s0;
+  });
+  return validStart(best)?best:null;
+}
+function saveSessionFromRange(dateStr,from,to,name){
+  if(!isIsoDate(dateStr)||!validMinute(from)||!validMinute(to)||from>=to) return null;
+  var nm=normalizeSessionName(name),blocks=sessionBlocksFromRange(dateStr,from,to);
+  if(!nm||!blocks.length||blocks.length>SESSION_MAX_BLOCKS) return null;
+  snapshot('save session "'+nm+'"');
+  var id=uid();
+  setSession(id,nm,blocks,null,sessionRangeOrigin(dateStr,from,to));
+  persist();
+  return id;
+}
+function deleteSession(id){
+  var r=state.sessions&&state.sessions[id];
+  if(!r) return false;
+  snapshot('delete session "'+r.name+'"');
+  removeSession(id);
+  persist();
+  return true;
+}
+/* the entries applying a session would create: one per block, already split at midnight exactly like
+   putEntry does (a block past 24:00 moves to the next date; one that straddles it becomes two). Pure -
+   changes nothing. A block category that is no longer a live category becomes uncategorised. */
+function sessionSegments(sess,dateStr,startMin){
+  var out=[];
+  sess.blocks.forEach(function(b){
+    var abs=startMin+b.offset,shift=Math.floor(abs/1440),s=abs-shift*1440,e=s+b.duration;
+    var date=iso(addDays(parseIso(dateStr),shift));
+    var cat=(b.cat&&catById(b.cat))?b.cat:null;
+    if(e<=1440) out.push({date:date,label:b.label,cat:cat,start:s,end:e});
+    else{
+      out.push({date:date,label:b.label,cat:cat,start:s,end:1440});
+      out.push({date:iso(addDays(parseIso(dateStr),shift+1)),label:b.label,cat:cat,start:0,end:e-1440});
+    }
+  });
+  return out;
+}
+/* how much of what is ALREADY logged a session would sit on top of: the number of distinct existing
+   entries it overlaps, and the minutes in the union of the overlapped stretches */
+function sessionOverlap(sess,dateStr,startMin){
+  var segs=sessionSegments(sess,dateStr,startMin),ids={},byDate={};
+  segs.forEach(function(g){
+    (state.entries[g.date]||[]).forEach(function(e){
+      var s=Math.max(e.start,g.start),en=Math.min(e.end,g.end);
+      if(s<en){ ids[e.id]=1; (byDate[g.date]=byDate[g.date]||[]).push([s,en]); }
+    });
+  });
+  var minutes=0;
+  Object.keys(byDate).forEach(function(date){
+    var iv=byDate[date].sort(function(a,b){ return a[0]-b[0]; }),curS=null,curE=null;
+    iv.forEach(function(x){
+      if(curE===null||x[0]>curE){ if(curE!==null) minutes+=curE-curS; curS=x[0]; curE=x[1]; }
+      else curE=Math.max(curE,x[1]);
+    });
+    if(curE!==null) minutes+=curE-curS;
+  });
+  return {entries:Object.keys(ids).length,minutes:minutes};
+}
+/* apply = one snapshot, then ordinary entries. Overlap with what is already logged is allowed (the
+   app has always allowed it and shows it as double-booked); the sheet previews it first. Returns the
+   number of entries created, or null when nothing was applied. */
+function applySession(id,dateStr,startMin){
+  var sess=state.sessions&&state.sessions[id];
+  if(!sess||!isIsoDate(dateStr)||!Number.isInteger(startMin)||startMin<0||startMin>=1440) return null;
+  var segs=sessionSegments(sess,dateStr,startMin);
+  snapshot('apply session "'+sess.name+'"');
+  segs.forEach(function(g){ push(g.date,g.label,g.cat,g.start,g.end); });
+  persist();
+  return segs.length;
+}
+
 /* the merge itself - compares records, never files. Ported from Money Ledger's
    mergeRecords (see SYNC-LESSONS.md) with the same six-case shape; only the
    caller-supplied contentFields whitelist changes per record type. */
@@ -751,7 +1603,7 @@ function collapseVerdictCollisions(verdictsFlat,deviceId){
     });
   });
 }
-function dedupeCategoriesByName(catsFlat,entriesFlat,verdictsFlat,deviceId){
+function dedupeCategoriesByName(catsFlat,entriesFlat,verdictsFlat,deviceId,sessionsFlat){
   var groups={};
   catsFlat.filter(function(r){ return !r.deleted; }).forEach(function(r){
     var key=normalizeName(r.name);
@@ -774,7 +1626,7 @@ function dedupeCategoriesByName(catsFlat,entriesFlat,verdictsFlat,deviceId){
     });
     mergeLog.push({name:winner.name,survivorId:winner.id,mergedIds:losers.map(function(l){ return l.id; }),entriesReassigned:reassignedCount});
   });
-  if(!mergeLog.length) return {categories:catsFlat,entries:entriesFlat,verdicts:verdictsFlat};
+  if(!mergeLog.length) return {categories:catsFlat,entries:entriesFlat,verdicts:verdictsFlat,sessions:sessionsFlat};
 
   mergeLog.forEach(function(g){
     console.log('Hours Ledger sync: merged duplicate category "'+g.name+'" - kept '+g.survivorId+
@@ -795,7 +1647,8 @@ function dedupeCategoriesByName(catsFlat,entriesFlat,verdictsFlat,deviceId){
     return Object.assign({},v,{catId:newCatId,id:v.weekIso+"|"+newCatId});
   });
   var newVerdicts=collapseVerdictCollisions(remappedVerdicts,deviceId);
-  return {categories:newCats,entries:newEntries,verdicts:newVerdicts};
+  var newSessions=sessionsFlat?remapSessionCategories(sessionsFlat,idRemap,deviceId):sessionsFlat;
+  return {categories:newCats,entries:newEntries,verdicts:newVerdicts,sessions:newSessions};
 }
 
 /* the whole engine in one call: migrate, merge all four collections by id
@@ -809,8 +1662,8 @@ function dedupeCategoriesByName(catsFlat,entriesFlat,verdictsFlat,deviceId){
    remoteFile is null for a genuine first-ever sync (nothing to merge
    against, every local record trivially survives via case 1); its shape
    otherwise is {categories:[...flat...], entries:[...flat...],
-   verdicts:[...flat...], closeouts:[...flat...], dayHighlights:[...flat...]}
-   (dayHighlights absent in a file an older device wrote - read as []), tombstones inline via
+   verdicts:[...flat...], closeouts:[...flat...], dayHighlights:[...flat...], sessions:[...flat...]}
+   (dayHighlights/sessions absent in a file an older device wrote - read as []), tombstones inline via
    deleted:true. */
 function syncEngine(localStateIn,remoteFile,deviceId){
   /* migrateSyncFields mutates in place - clone first so a failure anywhere
@@ -821,7 +1674,7 @@ function syncEngine(localStateIn,remoteFile,deviceId){
      as a side effect no matter what happens after. */
   var localState=JSON.parse(JSON.stringify(localStateIn));
   migrateSyncFields(localState);
-  var remote=remoteFile||{categories:[],entries:[],verdicts:[],closeouts:[],dayHighlights:[]};
+  var remote=remoteFile||{categories:[],entries:[],verdicts:[],closeouts:[],dayHighlights:[],sessions:[]};
 
   var localCatsFlat=flattenCategories(localState);
   var mergedCatsFlat=mergeRecords(localCatsFlat,remote.categories,CATEGORY_FIELDS,deviceId);
@@ -843,10 +1696,18 @@ function syncEngine(localStateIn,remoteFile,deviceId){
   var mergedHighlightsFlat=mergeRecords(localHighlightsFlat,remoteHighlightsFlat,DAYHIGHLIGHT_FIELDS,deviceId);
   logSupersededHighlights(localHighlightsFlat,remoteHighlightsFlat,mergedHighlightsFlat,deviceId);
 
-  var deduped=dedupeCategoriesByName(mergedCatsFlat,mergedEntriesFlat,mergedVerdictsFlat,deviceId);
+  var localSessionsFlat=flattenSessions(localState);
+  /* a record written before defaultStart existed has no such key: read it as null (unknown), or it would differ from the
+     same session on this device (null) and be decided as a conflict for nothing */
+  var remoteSessionsFlat=(remote.sessions||[]).map(function(r){ return Object.assign({},r,{defaultStart:validStart(r.defaultStart)?r.defaultStart:null}); });
+  var mergedSessionsFlat=mergeRecords(localSessionsFlat,remoteSessionsFlat,SESSION_FIELDS,deviceId);
+  logSupersededSessions(localSessionsFlat,remoteSessionsFlat,mergedSessionsFlat,deviceId);
+
+  var deduped=dedupeCategoriesByName(mergedCatsFlat,mergedEntriesFlat,mergedVerdictsFlat,deviceId,mergedSessionsFlat);
   mergedCatsFlat=deduped.categories;
   mergedEntriesFlat=deduped.entries;
   mergedVerdictsFlat=deduped.verdicts;
+  mergedSessionsFlat=deduped.sessions;
   var sweepResult=sweepCompressVerdicts(mergedVerdictsFlat,deviceId);
   mergedVerdictsFlat=sweepResult.records;
 
@@ -855,6 +1716,7 @@ function syncEngine(localStateIn,remoteFile,deviceId){
   var verdictsResult=unflattenVerdicts(mergedVerdictsFlat);
   var closeoutsResult=unflattenCloseouts(mergedCloseoutsFlat);
   var highlightsResult=unflattenDayHighlights(mergedHighlightsFlat);
+  var sessionsResult=unflattenSessions(mergedSessionsFlat);
 
   return {
     newLocalState:Object.assign({},localState,{
@@ -862,9 +1724,10 @@ function syncEngine(localStateIn,remoteFile,deviceId){
       entries:entriesResult.entries,deletedEntries:entriesResult.deletedEntries,
       weeklyVerdicts:verdictsResult.weeklyVerdicts,verdictMeta:verdictsResult.verdictMeta,deletedVerdicts:verdictsResult.deletedVerdicts,
       weekCloseouts:closeoutsResult.weekCloseouts,
-      dayHighlights:highlightsResult.dayHighlights,deletedDayHighlights:highlightsResult.deletedDayHighlights
+      dayHighlights:highlightsResult.dayHighlights,deletedDayHighlights:highlightsResult.deletedDayHighlights,
+      sessions:sessionsResult.sessions,deletedSessions:sessionsResult.deletedSessions
     }),
-    toPush:{categories:mergedCatsFlat,entries:mergedEntriesFlat,verdicts:mergedVerdictsFlat,closeouts:mergedCloseoutsFlat,dayHighlights:mergedHighlightsFlat},
+    toPush:{categories:mergedCatsFlat,entries:mergedEntriesFlat,verdicts:mergedVerdictsFlat,closeouts:mergedCloseoutsFlat,dayHighlights:mergedHighlightsFlat,sessions:mergedSessionsFlat},
     /* surfaced separately from newLocalState/toPush - this is the ONE thing
        this otherwise-pure engine hands back specifically so its caller can
        tell the user something happened, not data the caller needs to apply.
@@ -1234,6 +2097,7 @@ if(!state.settings) state.settings={startHour:6,endHour:24};
 if(!state.entries) state.entries={};
 if(!state.weekCloseouts) state.weekCloseouts={};
 migrateDayHighlights(state);
+migrateSessions(state);
 migrateVerdicts(state);
 migrateVerdictScale(state);
 migrateVerdictTombstoneCollisions(state);
@@ -1465,7 +2329,7 @@ function connectDrive(){
          succeeds, so both branches mention it if it happened. */
       var sweptNote=(syncResult.sweptCompress&&syncResult.sweptCompress.length)?
         " "+describeCompressSweep(syncResult.sweptCompress):"";
-      driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts,dayHighlights:syncResult.toPush.dayHighlights}).then(function(){
+      driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts,dayHighlights:syncResult.toPush.dayHighlights,sessions:syncResult.toPush.sessions}).then(function(){
         setStatus(syncedStatusText());
         document.getElementById("connectDrive").textContent="Drive: synced";
         showToast("Connected — your weeks are syncing."+sweptNote,false);
@@ -1571,7 +2435,7 @@ function runDriveSync(manual){
          surfaced outside DevTools. state is already reassigned above, so
          catById resolves against the just-merged categories. */
       if(syncResult.sweptCompress&&syncResult.sweptCompress.length) showToast(describeCompressSweep(syncResult.sweptCompress),false);
-      return driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts,dayHighlights:syncResult.toPush.dayHighlights}).then(function(){
+      return driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts,dayHighlights:syncResult.toPush.dayHighlights,sessions:syncResult.toPush.sessions}).then(function(){
         driveSyncInFlight=false;
         setStatus(syncedStatusText());
         document.getElementById("connectDrive").disabled=false;
@@ -1812,6 +2676,35 @@ function undoDayHighlightsAsForwardEdits(snap,cur){
   });
   return {live:live,dead:dead};
 }
+/* Undo/redo of sessions is a FORWARD edit once the device syncs, like the day highlights (and for the
+   same reason): restoring a snapshot would bring back the OLD stamp, so an undone create would be
+   absent locally rather than tombstoned (a ghost on the next sync) and an undone edit would lose
+   last-write-wins forever against a device that already holds the newer one. Per id: same content as
+   now -> keep the current record untouched (no restamp); different -> write the snapshot's content
+   (or a tombstone if the snapshot had none) with a fresh stamp from this device - unless the current
+   record (or its tombstone) was last written by ANOTHER device: it is theirs, and an undo of something
+   unrelated must not roll it back. Only runs once the device has sync fields. */
+function sessionSig(r){ return r?JSON.stringify([r.name,r.blocks,r.schedule||null,validStart(r.defaultStart)?r.defaultStart:null]):null; }
+function undoSessionsAsForwardEdits(snap,cur){
+  var dev=getDeviceId(),now=nowIso();
+  var snapLive=snap.sessions||{},curLive=cur.sessions||{},curDead=cur.deletedSessions||{};
+  var live=Object.assign({},curLive),dead=Object.assign({},curDead),ids={};
+  [snapLive,curLive,curDead].forEach(function(m){ Object.keys(m).forEach(function(id){ ids[id]=true; }); });
+  Object.keys(ids).forEach(function(id){
+    var c=curLive[id],sn=snapLive[id];
+    if(sessionSig(c)===sessionSig(sn)) return;
+    var owner=c||curDead[id];
+    if(owner&&owner.updatedBy&&owner.updatedBy!==dev) return;
+    if(sn){
+      live[id]=Object.assign({},sn,{updatedAt:now,updatedBy:dev});
+      delete dead[id];
+    }else{
+      delete live[id];
+      dead[id]={updatedAt:now,updatedBy:dev,deletedAt:now};
+    }
+  });
+  return {live:live,dead:dead};
+}
 function carrySyncContainers(prev,snap){
   if(!prev) return;
   if(prev.deletedCategories&&!snap.deletedCategories){
@@ -1838,6 +2731,12 @@ function applyState(json){
   if(prev&&("driveConnected" in prev)) state.driveConnected=prev.driveConnected;
   else delete state.driveConnected;
   carrySyncContainers(prev,state);
+  /* a snapshot taken before sessions existed has no sessions key: sessions are not part of what it can
+     undo, so the current ones stay (otherwise undoing across the release would silently drop them) */
+  if(prev&&prev.sessions&&!("sessions" in state)){
+    state.sessions=prev.sessions;
+    if(prev.deletedSessions) state.deletedSessions=prev.deletedSessions;
+  }
   if(prev&&prev.deletedEntries){
     var fwd=undoEntriesAsForwardEdits(state,prev);
     state.entries=fwd.entries;
@@ -1845,11 +2744,15 @@ function applyState(json){
     var hl=undoDayHighlightsAsForwardEdits(state,prev);
     state.dayHighlights=hl.live;
     state.deletedDayHighlights=hl.dead;
+    var ss=undoSessionsAsForwardEdits(state,prev);
+    state.sessions=ss.live;
+    state.deletedSessions=ss.dead;
   }
   if(!state.settings) state.settings={startHour:6,endHour:24};
   if(!state.entries) state.entries={};
   if(!state.weekCloseouts) state.weekCloseouts={};
   migrateDayHighlights(state);
+  migrateSessions(state);
   migrateVerdicts(state);
   migrateVerdictScale(state);
   migrateVerdictTombstoneCollisions(state);
@@ -2332,7 +3235,7 @@ function weekHighlights(ws){
 var WEEK_EXPORT_SCHEMA=1;
 var WEEKDAY_FULL=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
 var WEEK_EXPORT_DEFINITIONS={
-  logged:"loggedMinutes is the union of all entries' time: a minute covered by two or more entries is counted once.",
+  logged:"loggedMinutes is the union of all entries' time: a minute covered by two or more entries is counted once. Entries created from a saved session (the 'Yes, log' button or Apply) are ordinary entries, are not marked in this file, and carry the session's stored times, so they may differ from what actually happened; the file cannot tell them from entries logged by hand.",
   categoryTotals:"Each categoryTotals minutes value is a plain sum of entry durations, so the rows together can exceed loggedMinutes. The excess is the overlap, summary.doubleBookedMinutes: sumOfEntryMinutes - loggedMinutes.",
   doubleBookedMinutes:"In summary and per day: sum of entry durations minus the union, including overlap inside one category. Per category: minutes of that category's time also covered by an entry of another category or an uncategorised entry (as the app's on-screen 'overlaps' line); overlap between two entries of the same category is not counted there. Per-category values are not additive: they do not sum to the week's doubleBookedMinutes (a minute shared by two categories appears in both rows but once in the week figure, and same-category overlap appears in no row).",
   unlogged:"unloggedMinutes is 10080 minus loggedMinutes, over all 24 hours of all 7 days. The app's visible hours range is a display setting and does not change anything in this file.",
@@ -2534,7 +3437,7 @@ function reassignCategoryEntries(fromCatId,toCatId){
 function doDeleteCategory(c,reassignToId){
   var n=countCategoryEntries(c.id);
   snapshot('delete category "'+c.name+'"');
-  if(reassignToId) reassignCategoryEntries(c.id,reassignToId);
+  if(reassignToId){ reassignCategoryEntries(c.id,reassignToId); reassignCategorySessions(c.id,reassignToId); }
   if(state.deletedCategories) state.deletedCategories[c.id]={id:c.id,updatedAt:nowIso(),updatedBy:getDeviceId(),deletedAt:nowIso()};
   state.categories=state.categories.filter(function(x){ return x.id!==c.id; });
   persist(); render();
@@ -2557,7 +3460,7 @@ function openCategoryDeleteChooser(row,c,n){
   panel.hidden=false;
 }
 
-function render(){ renderGrid(); renderTotals(); renderCats(); refreshHint(); updateCloseoutAvailability(); }
+function render(){ renderGrid(); renderTotals(); renderCats(); refreshHint(); updateCloseoutAvailability(); renderSessionsIfOpen(); renderSessionBanner(); }
 /* Drive-sync bug (reported from a real laptop, 2026-08-21): a spectrum-box
    drag calls persist() on a pause in movement, which arms
    scheduleDriveSync's 2s debounce same as any other edit - correct,
@@ -3060,6 +3963,7 @@ document.addEventListener("keydown",function(ev){
   if(tag==="INPUT"||tag==="TEXTAREA"||tag==="SELECT"||tag==="BUTTON"||tag==="A"||ev.target.isContentEditable) return;
   if(document.getElementById("closeoutScrim").classList.contains("on")) return;
   if(document.getElementById("dayScrim").classList.contains("on")) return;
+  if(document.getElementById("sessScrim").classList.contains("on")) return;
   if(introEl.classList.contains("on")) return;
   if(!document.getElementById("reviewSection").hidden) return;
   if(cats.querySelector(".picker:not([hidden])")||cats.querySelector(".catdelete:not([hidden])")) return;
@@ -4010,6 +4914,7 @@ function importBackupJson(jsonText){
   if(!state.settings) state.settings={startHour:6,endHour:24};
   if(!state.weekCloseouts) state.weekCloseouts={};
   migrateDayHighlights(state);
+  migrateSessions(state);
   migrateVerdicts(state);
   migrateVerdictScale(state);
   migrateVerdictTombstoneCollisions(state);
@@ -4154,6 +5059,396 @@ if(state.driveConnected){
    blockers actually key their "was this a real user gesture" check on. */
 if(!TEST_MODE&&state.driveConnected) loadGisScript(function(){});
 
+/* ---------------- Sessions sheet ----------------
+   One sheet: the suggestions (Create session saves at once), the saved sessions (Log today, Other day, Start time,
+   rename, delete), and a folded form that saves logged time as a session. Every change takes a snapshot (hard
+   rule 5) and offers Undo in the toast. The old manual Apply panel is gone: Log today is the only way to log a
+   session. Nothing in here is sent anywhere. */
+var sessScrimEl=document.getElementById("sessScrim");
+function sessionSpan(r){ return r.blocks.reduce(function(m,b){ return Math.max(m,b.offset+b.duration); },0); }
+var suggestCurrent=[], lastSuggestCreateAt=0;
+function weekdayEvidence(wdc){
+  return wdc.map(function(c,i){ return {c:c,i:i}; }).filter(function(x){ return x.c>0; })
+    .sort(function(a,b){ return b.c-a.c||a.i-b.i; }).map(function(x){ return DAYNAMES[x.i]+" \u00d7"+x.c; }).join(", ");
+}
+/* a category's colour as a square dot before a step; grey for no category or a deleted one. The colour is never the only
+   signal: the category text stays (shown when it differs from the label). The colour comes from the user's own category
+   record and is only used if it is a plain hex colour. */
+function catColor(catId){ var c=catId&&catById(catId); return (c&&typeof c.color==="string"&&/^#[0-9a-fA-F]{3,8}$/.test(c.color))?c.color:null; }
+function catNameOf(catId){ var c=catId&&catById(catId); return c?c.name:"No category"; }
+function dotHtml(catId){ return '<span class="sugg-dot" style="background:'+(catColor(catId)||"var(--none)")+'"></span>'; }
+function stepsHtml(steps){
+  return steps.map(function(t){
+    var name=t.label||t.catName,cat=normLabel(name)!==normLabel(t.catName)?'<span class="sugg-cat">'+escapeHtml(t.catName)+'</span>':"";
+    return '<div class="sugg-step">'+dotHtml(t.cat)+'<span class="sugg-time"><span class="sugg-range">'+toHM(t.start)+"–"+toHM(t.end)+'</span>'+(t.nextDay?'<span class="sugg-next">(next day)</span>':"")+'</span>'+
+      '<span class="sugg-label">'+escapeHtml(name)+cat+'</span><span class="sugg-dur">'+dur(t.duration)+'</span></div>';
+  }).join("");
+}
+function sessionSteps(sess,start){
+  return stepsFor(sess.blocks.map(function(b){ return {offset:b.offset,duration:b.duration,label:b.label,cat:b.cat,catName:catNameOf(b.cat)}; }),start);
+}
+/* how often the PATTERN repeats: the ranking's own number (full-package days in the last 56 days, per week), worded as
+   nights when the package runs past midnight and as days otherwise */
+function rateText(rate,nights){
+  var r=Math.round(rate*10)/10,t=Number.isInteger(r)?String(r):r.toFixed(1);
+  return "about "+t+" "+(nights?(r===1?"night":"nights"):(r===1?"day":"days"))+" a week";
+}
+/* weekday counts over the SAME window as the rate (the last PKG_RATE_WINDOW_DAYS days up to the reference date) */
+function windowWeekdayCounts(dates,ref){
+  var c=[0,0,0,0,0,0,0];
+  dates.forEach(function(d){ if(inRateWindow(d,ref)) c[weekdayOfIso(d)]++; });
+  return c;
+}
+/* per-step frequency, over the rate window. A step counts on a day if EITHER the detector's own chain reached it that day
+   (pkg.stepDates: the detector's matching, partial chains included, and every time variant of a merged package) OR an entry of the
+   step's category starts within PKG_MATCH_WINDOW_MINUTES of its usual time (anchor + offset), which still counts a step that
+   happened when an earlier step was skipped. The chain dates make the count at least the detector's full-day count for every step
+   (an earlier version used only the second test and showed 8 against the detector's 16 for a package merged from two time
+   variants on the real export). `days` is the midnight-folded log (computed once per render). */
+function stepFrequencies(pkg,ref,days){
+  days=days||foldMidnightHalves(state.entries||{}).days;
+  return pkg.blocks.map(function(b,k){
+    var seen={},abs=pkg.anchor+b.offset,shift=Math.floor(abs/1440),want=abs-shift*1440;
+    ((pkg.stepDates&&pkg.stepDates[k])||[]).forEach(function(d){ if(inRateWindow(d,ref)) seen[d]=1; });
+    for(var a=0;a<PKG_RATE_WINDOW_DAYS;a++){
+      var D=addDays(parseIso(ref),-a),key=iso(D);
+      if(seen[key]) continue;
+      var es=days[iso(addDays(D,shift))]||[];
+      if(es.some(function(e){ return e.cat===b.cat&&Math.abs(e.start-want)<=PKG_MATCH_WINDOW_MINUTES; })) seen[key]=1;
+    }
+    return Object.keys(seen).length;
+  });
+}
+/* everything a card says about how often, from ONE window: n full days of the days-long window (the rate's own), per-step counts */
+function cardFigures(pkg,ref,days){
+  var w=rateWindow(pkg.dates,ref);
+  return {n:w.n,days:w.days,steps:stepFrequencies(pkg,ref,days)};
+}
+function renderSuggestions(){
+  var el=document.getElementById("sessSuggest"),r=suggestPackages(state);
+  suggestCurrent=r.shown;
+  var HEAD='<h3 class="sess-sec-h" id="sessPatHead">Patterns in your log</h3>';
+  if(!r.eligible){
+    el.innerHTML=HEAD+'<p class="hint">Suggestions start once you have '+r.minDays+' logged days; you have '+r.n+'.</p>';
+    return;
+  }
+  if(!suggestCurrent.length){ el.innerHTML=HEAD+'<p class="hint">No patterns to suggest right now.</p>'; return; }
+  var WL=["M","T","W","T","F","S","S"],ref=iso(sessionNow()),weeks=PKG_RATE_WINDOW_DAYS/7,foldedDays=foldMidnightHalves(state.entries||{}).days;
+  el.innerHTML=HEAD+'<p class="hint">Proposals only. Nothing is logged.</p>'+
+    suggestCurrent.map(function(x,i){
+      var steps=packageSteps(x),title=steps[0].label||steps[0].catName,nights=steps.some(function(t){ return t.nextDay; });
+      var wk=windowWeekdayCounts(x.dates,ref),fg=cardFigures(x,ref,foldedDays),fq=fg.steps;
+      return '<div class="sugg" data-i="'+i+'" data-id="'+escapeHtml(x.id)+'"><b class="sugg-title">'+escapeHtml(title)+'</b>'+
+        '<div class="sugg-steps">'+stepsHtml(steps)+'</div>'+
+        '<div class="sugg-meta"><span>'+fg.n+" of "+fg.days+" days &middot; "+rateText(x.rate,nights)+'</span><span class="sugg-cap">Weekdays, last '+weeks+' weeks</span></div>'+
+        '<div class="sugg-week" role="img" aria-label="'+escapeHtml(weekdayEvidence(wk))+'">'+wk.map(function(c,k){
+          return '<span class="sugg-day'+(c?"":" zero")+'"><span class="sugg-dl">'+WL[k]+'</span><span class="sugg-dn">'+c+'</span></span>';
+        }).join("")+'</div>'+
+        '<details class="sugg-more"><summary>How often each step</summary><div class="sugg-alltime">Whole sequence on '+x.count+" of the "+x.anchorCount+" days the first step happened (all time)</div>"+steps.map(function(t,k){
+          return '<div class="sugg-freq">'+dotHtml(t.cat)+'<span class="sugg-label">'+escapeHtml(t.label||t.catName)+'</span><span class="sugg-dur">'+fq[k]+" of "+fg.days+" days &middot; about "+(Math.round(fq[k]/(fg.days/7)*10)/10)+" a week"+'</span></div>';
+        }).join("")+'</details>'+
+        '<div class="sugg-btns"><button class="solid sugg-create">Create session</button><button class="ghost sugg-no">Not now</button></div></div>';
+    }).join("");
+}
+
+/* ---- Log today (saved sessions only; detection never logs) ----
+   Each saved session has a full-width dark button "Log today HH:MM-HH:MM" that shows the exact times it will log. The date is
+   today; "Other day" opens a date field (default tomorrow) and the button then reads "Log Tue 27 Oct HH:MM-HH:MM". A tap logs
+   exactly the date and start the button showed (data attributes), never a recomputation - except that a button that says today
+   after midnight refuses, refreshes and asks for another tap. After a log the sheet CLOSES (the toast with Undo stays); it stays
+   open on Cancel, on errors and while the overlap prompt shows. State here is per-session and in memory only. */
+var sessOther={}, sessStartEditId=null, sessLogPending=null, sessRenameId=null, sessDeleteArm=null, sessDeleteTimer=null;
+var SESS_DELETE_ARM_MS=4000;
+var TRASH_SVG='<svg class="sess-trash" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.6 9.5h6.8L12 4M6.8 6.5v4.5M9.2 6.5v4.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="square"/></svg>';
+function delBtnHtml(armed){
+  return armed?'<button class="sess-del armed" aria-label="Confirm delete">Delete?</button>':'<button class="sess-del" aria-label="Delete session" title="Delete session">'+TRASH_SVG+'</button>';
+}
+function logTarget(id){
+  var r=state.sessions[id],today=iso(sessionNow()),o=sessOther[id];
+  var date=(o&&o.open&&isIsoDate(o.date))?o.date:today,sf=sessionStartFor(r,date),st=sf.start,end=(st+sessionSpan(r))%1440;
+  return {date:date,start:st,source:sf.source,isToday:date===today,label:"Log "+(date===today?"today":dayLabel(date))+" "+toHM(st)+"–"+toHM(end)};
+}
+function sessMetaHtml(r,t){
+  var src=t.source==="now"?" (now)":t.source==="startHour"?" (day start)":"";
+  return r.blocks.length+(r.blocks.length===1?" block":" blocks")+" &middot; "+dur(sessionSpan(r))+
+    (r.schedule?" &middot; "+r.schedule.weekdays.map(function(d){ return DAYNAMES[d]; }).join(", ")+" "+toHM(r.schedule.start):" &middot; starts "+toHM(t.start)+src);
+}
+function refreshLogButtons(){
+  var list=document.getElementById("sessList");
+  if(!list) return;
+  Array.prototype.forEach.call(list.querySelectorAll(".sessrow"),function(row){
+    var id=row.dataset.id,btn=row.querySelector(".sess-log"),r=state.sessions[id];
+    if(!btn||!r) return;
+    var t=logTarget(id);
+    btn.dataset.date=t.date; btn.dataset.start=String(t.start); btn.dataset.today=t.isToday?"1":"0"; btn.textContent=t.label;
+    var st=row.querySelector(".sugg-steps"); if(st) st.innerHTML=stepsHtml(sessionSteps(r,t.start));
+    var mt=row.querySelector(".sess-meta"); if(mt) mt.innerHTML=sessMetaHtml(r,t);
+  });
+}
+function renderSessions(){
+  renderSuggestions();
+  var ids=Object.keys(state.sessions||{}).sort(function(a,b){
+    return state.sessions[a].name.toLowerCase()<state.sessions[b].name.toLowerCase()?-1:1;
+  });
+  document.getElementById("sessMineHead").textContent="Your sessions ("+ids.length+")";
+  document.getElementById("sessList").innerHTML=ids.length?ids.map(function(id){
+    var r=state.sessions[id],t=logTarget(id),o=sessOther[id],pend=sessLogPending&&sessLogPending.id===id?sessLogPending:null;
+    return '<div class="sessrow" data-id="'+escapeHtml(id)+'">'+
+      (sessRenameId===id?'<input type="text" class="sess-rename-in" maxlength="'+SESSION_NAME_MAX+'" value="'+escapeHtml(r.name)+'" aria-label="Session name">':'<button class="sess-name" title="Click to rename">'+escapeHtml(r.name)+'</button>')+
+      '<span class="sess-meta">'+sessMetaHtml(r,t)+'</span>'+
+      '<div class="sugg-steps">'+stepsHtml(sessionSteps(r,t.start))+'</div>'+
+      '<button class="solid sess-log" data-date="'+t.date+'" data-start="'+t.start+'" data-today="'+(t.isToday?"1":"0")+'">'+escapeHtml(t.label)+'</button>'+
+      (pend?'<div class="sess-confirm"><span>Overlaps '+pend.entries+(pend.entries===1?" entry":" entries")+", "+pend.minutes+' min.</span><button class="solid sess-confirm-go">Log anyway</button><button class="ghost sess-confirm-no">Cancel</button></div>':"")+
+      (o&&o.open?'<div class="sess-other"><label>Day <input type="date" class="sess-od-date" value="'+escapeHtml(o.date||"")+'"></label><button class="ghost sess-od-today">Today</button></div>':"")+
+      (sessStartEditId===id?'<div class="sess-startedit"><label>Start time <input type="time" class="sess-start-in" value="'+(validStart(r.defaultStart)?toHM(r.defaultStart):"")+'"></label><button class="solid sess-start-save">Save</button><button class="ghost sess-start-cancel">Cancel</button></div>':"")+
+      '<div class="sess-small"><button class="ghost sess-od">Other day</button>'+(r.schedule?"":'<button class="ghost sess-start">Start time</button>')+'<button class="ghost sess-sched">Schedule&hellip;</button>'+delBtnHtml(sessDeleteArm===id)+'</div></div>';
+  }).join(""):'<p class="emptyhint">No sessions yet. Log a stretch of time, then save it below.</p>';
+}
+function disarmDelete(){
+  clearTimeout(sessDeleteTimer); sessDeleteTimer=null; sessDeleteArm=null;
+  Array.prototype.forEach.call(document.querySelectorAll("#sessList .sess-del.armed"),function(b){ b.outerHTML=delBtnHtml(false); });
+}
+/* render() calls this on every redraw (a sync landing, an undo): the list is read-only, so redrawing
+   it can never replace something being typed - the forms live outside #sessList */
+function renderSessionsIfOpen(){
+  if(sessScrimEl&&sessScrimEl.classList.contains("on")) renderSessions();
+}
+var sessSchedId=null;
+function closeSessSched(){ sessSchedId=null; document.getElementById("sessSched").hidden=true; }
+function openSessions(){
+  hideToast();
+  closeSessSched();
+  var dateEl=document.getElementById("sessSaveDate");
+  if(!dateEl.value) dateEl.value=iso(new Date());
+  renderSessions();
+  /* the save-logged-time form is folded away while there are suggestions to look at, open when there are none */
+  document.getElementById("sessSaveBox").open=(suggestCurrent.length===0);
+  sessScrimEl.querySelector(".sheet").scrollTop=0;
+  sessScrimEl.classList.add("on");
+  lockBodyScroll();
+}
+function closeSessions(){
+  if(!sessScrimEl.classList.contains("on")) return;
+  sessScrimEl.classList.remove("on");
+  closeSessSched();
+  sessLogPending=null; sessStartEditId=null; sessRenameId=null; disarmDelete();
+  unlockBodyScroll();
+}
+wireOutsideClose(sessScrimEl,closeSessions);
+wireScrimTouchBlock(sessScrimEl);
+document.getElementById("sessionsBtn").addEventListener("click",openSessions);
+document.getElementById("sessClose").addEventListener("click",closeSessions);
+document.addEventListener("keydown",function(ev){
+  if(ev.key==="Escape"&&sessScrimEl.classList.contains("on")) closeSessions();
+});
+document.getElementById("sessList").addEventListener("click",function(ev){
+  var row=ev.target.closest&&ev.target.closest(".sessrow");
+  if(!row) return;
+  var id=row.dataset.id,r=state.sessions[id];
+  if(!r) return;
+  if(ev.target.closest(".sess-log")){
+    var btn=ev.target.closest(".sess-log"),lDate=btn.dataset.date,lStart=+btn.dataset.start;
+    if(!isIsoDate(lDate)||!validStart(lStart)) return;
+    /* a button that says "today" is only trusted while it IS today: after midnight, refresh it and ask for another tap */
+    if(btn.dataset.today==="1"&&lDate!==iso(sessionNow())){ refreshLogButtons(); showToast("The day changed - check the times and tap again.",false); return; }
+    var ov=sessionOverlap(r,lDate,lStart);
+    if(ov.entries>0){ sessLogPending={id:id,date:lDate,start:lStart,entries:ov.entries,minutes:ov.minutes}; renderSessions(); return; }
+    logSession(id,lDate,lStart);
+  }else if(ev.target.closest(".sess-confirm-go")){
+    var p=sessLogPending;
+    if(!p||p.id!==id) return;
+    sessLogPending=null;                /* taken out BEFORE logging: a second tap finds nothing to log */
+    logSession(p.id,p.date,p.start);
+  }else if(ev.target.closest(".sess-confirm-no")){
+    sessLogPending=null; renderSessions();
+  }else if(ev.target.closest(".sess-od")){
+    var cur=sessOther[id];
+    if(cur&&cur.open) sessOther[id]={open:false,date:null};
+    else sessOther[id]={open:true,date:iso(addDays(parseIso(iso(sessionNow())),1))};
+    sessLogPending=null; renderSessions();
+  }else if(ev.target.closest(".sess-od-today")){
+    sessOther[id]={open:false,date:null}; sessLogPending=null; renderSessions();
+  }else if(ev.target.closest(".sess-start-save")){
+    if(sessStartEditId!==id) return;
+    var inp=row.querySelector(".sess-start-in"),v=inp?inp.value:"";
+    sessStartEditId=null;               /* taken out first: a second tap on the same button does nothing */
+    var mins=v?fromHM(v):null,changed=setSessionStart(id,mins);
+    sessLogPending=null; renderSessions();
+    if(changed) showToast(mins===null?'Start time of "'+r.name+'" cleared':'Start time of "'+r.name+'" is now '+toHM(mins),true);
+  }else if(ev.target.closest(".sess-start-cancel")){
+    sessStartEditId=null; renderSessions();
+  }else if(ev.target.closest(".sess-start")){
+    sessStartEditId=id; sessLogPending=null; renderSessions();
+  }else if(ev.target.closest(".sess-name")){
+    sessRenameId=id; sessLogPending=null; renderSessions();
+    var ri=document.querySelector('#sessList .sessrow[data-id="'+id+'"] .sess-rename-in');
+    if(ri){ ri.focus(); ri.select(); }
+  }else if(ev.target.closest(".sess-sched")){
+    sessSchedId=id;
+    document.getElementById("sessSchedTitle").textContent='Schedule "'+r.name+'"';
+    for(var i=0;i<7;i++) document.getElementById("sessSchedDay"+i).checked=!!(r.schedule&&r.schedule.weekdays.indexOf(i)>=0);
+    document.getElementById("sessSchedTime").value=r.schedule?toHM(r.schedule.start):"";
+    document.getElementById("sessSchedRemove").hidden=!r.schedule;
+    document.getElementById("sessSched").hidden=false;
+  }else if(ev.target.closest(".sess-del")){
+    if(sessDeleteArm!==id){
+      /* first tap: arm. The button turns into "Delete?" and resets by itself after a few seconds (a timer, so it cannot stay
+         armed: hard rule 9) or on any tap elsewhere */
+      clearTimeout(sessDeleteTimer); sessDeleteArm=id; sessLogPending=null;
+      sessDeleteTimer=setTimeout(function(){ if(sessDeleteArm===id) disarmDelete(); },SESS_DELETE_ARM_MS);
+      renderSessions();
+      return;
+    }
+    var name=r.name;
+    disarmDelete();                     /* taken out BEFORE deleting: a second tap finds nothing armed */
+    if(sessSchedId===id) closeSessSched();
+    deleteSession(id);
+    renderSessions();
+    showToast('Deleted session "'+name+'"',true);
+  }
+});
+document.getElementById("sessList").addEventListener("input",function(ev){
+  var inp=ev.target.closest&&ev.target.closest(".sess-od-date"),row=inp&&inp.closest(".sessrow");
+  if(!row) return;
+  var id=row.dataset.id;
+  if(!state.sessions[id]||!sessOther[id]) return;
+  if(isIsoDate(inp.value)){ sessOther[id].date=inp.value; sessLogPending=null; refreshLogButtons(); }
+});
+function logSession(id,date,start){
+  var sess=state.sessions[id];
+  if(!sess) return;
+  var end=(start+sessionSpan(sess))%1440,n=applySession(id,date,start);
+  if(n===null){ renderSessions(); showToast("Could not log that session.",false); return; }
+  sessOther[id]={open:false,date:null};
+  render();
+  if(localSaveFailed){ renderSessions(); showToast("Not saved on this device \u2014 storage is full",false); return; }   /* an error keeps the sheet open */
+  closeSessions();                       /* a successful log closes the sheet; the toast with Undo stays */
+  showToast('Logged "'+sess.name+'" \u2014 '+(date===iso(sessionNow())?"today":dayLabel(date))+" "+toHM(start)+"\u2013"+toHM(end)+" ("+n+(n===1?" entry":" entries")+") \u2014 adjust the entries if it ran differently",true);
+}
+/* inline rename: one snapshot, a fresh stamp, defaultStart and the schedule kept (setSession carries defaultStart when it is
+   not passed; the schedule is passed on). Enter or leaving the field saves, Escape cancels, an empty name reverts. */
+function renameSession(id,raw){
+  var r=state.sessions&&state.sessions[id],nm=normalizeSessionName(raw);
+  if(!r||!nm||nm===r.name) return false;
+  snapshot('rename session "'+r.name+'"');
+  setSession(id,nm,r.blocks,r.schedule);
+  persist();
+  return true;
+}
+function commitRename(id,input){
+  if(sessRenameId!==id) return;          /* taken out first: Enter followed by the blur it causes saves once */
+  sessRenameId=null;
+  var old=state.sessions[id]&&state.sessions[id].name,changed=renameSession(id,input.value);
+  renderSessions();
+  if(changed) showToast('Renamed "'+old+'" to "'+state.sessions[id].name+'"',true);
+}
+document.getElementById("sessList").addEventListener("keydown",function(ev){
+  var inp=ev.target.closest&&ev.target.closest(".sess-rename-in"),row=inp&&inp.closest(".sessrow");
+  if(!row) return;
+  if(ev.key==="Enter"){ ev.preventDefault(); commitRename(row.dataset.id,inp); }
+  else if(ev.key==="Escape"){ ev.preventDefault(); ev.stopPropagation(); sessRenameId=null; renderSessions(); }
+});
+document.getElementById("sessList").addEventListener("focusout",function(ev){
+  var inp=ev.target.closest&&ev.target.closest(".sess-rename-in"),row=inp&&inp.closest(".sessrow");
+  if(row) commitRename(row.dataset.id,inp);
+});
+/* a tap anywhere else puts an armed delete button back, without rebuilding the row (a rebuild on pointerdown would swallow the click) */
+document.addEventListener("pointerdown",function(ev){
+  if(sessDeleteArm&&!(ev.target.closest&&ev.target.closest(".sess-del"))) disarmDelete();
+},true);
+if(!TEST_MODE){
+  setInterval(refreshLogButtons,60000);
+  document.addEventListener("visibilitychange",function(){ if(!document.hidden) refreshLogButtons(); });
+}
+document.getElementById("sessSuggest").addEventListener("click",function(ev){
+  var card=ev.target.closest&&ev.target.closest(".sugg");
+  if(!card) return;
+  var x=suggestCurrent.filter(function(p){ return p.id===card.dataset.id; })[0];
+  if(!x) return;
+  if(ev.target.closest(".sugg-no")){ dismissSuggestion(x); renderSessions(); return; }
+  if(!ev.target.closest(".sugg-create")) return;
+  /* Create session saves at once (no confirm step). The first tap re-renders the list, so the card under the finger changes: a
+     second tap within the next 700 ms is ignored (a timestamp, not a flag: it cannot stay set, hard rule 9). */
+  if(Date.now()-lastSuggestCreateAt<700) return;
+  lastSuggestCreateAt=Date.now();
+  var nm=packageName(x),id=createSessionFromPackage(x,nm);
+  renderSessions();
+  if(!id){ showToast("Could not create that session.",false); return; }
+  if(localSaveFailed){ showToast("Not saved on this device \u2014 storage is full",false); return; }
+  showToast('Created session "'+nm+'" \u2014 nothing was logged',true);
+});
+document.getElementById("sessSchedCancel").addEventListener("click",closeSessSched);
+document.getElementById("sessSchedGo").addEventListener("click",function(){
+  var id=sessSchedId,r=id&&state.sessions[id];
+  if(!r) return;
+  var days=[];
+  for(var i=0;i<7;i++) if(document.getElementById("sessSchedDay"+i).checked) days.push(i);
+  var t=document.getElementById("sessSchedTime").value;
+  if(!days.length||!t) return;
+  if(!setSessionSchedule(id,days,fromHM(t))) return;
+  closeSessSched();
+  renderSessions();
+  renderSessionBanner();
+  showToast('Scheduled "'+r.name+'" — after the window ends you\'ll be asked if it happened, only if nothing is logged there',true);
+});
+document.getElementById("sessSchedRemove").addEventListener("click",function(){
+  var id=sessSchedId,r=id&&state.sessions[id];
+  if(!r||!setSessionSchedule(id,null,null)) return;
+  closeSessSched();
+  renderSessions();
+  renderSessionBanner();
+  showToast('Removed the schedule from "'+r.name+'"',true);
+});
+
+/* the "Did this happen?" banner. Yes logs the session at its scheduled start on that date (ordinary
+   entries, one snapshot) and tells the person to adjust it: the default path is edit, never trust. The
+   handler re-derives the prompt before acting, so a second click on a row that has already been logged
+   (or dismissed, or synced away) finds nothing and does nothing. */
+function renderSessionBanner(){
+  var el=document.getElementById("sessBanner");
+  if(!el) return;
+  var list=pendingSessionPromptsFor(state);
+  if(!list.length){ el.hidden=true; el.innerHTML=""; return; }
+  el.innerHTML=list.map(function(p){
+    return '<div class="sessprompt" data-id="'+escapeHtml(p.id)+'" data-date="'+p.date+'"><span>Did &ldquo;'+escapeHtml(p.name)+'&rdquo; happen on '+
+      dayLabel(p.date)+", "+toHM(p.start)+"&ndash;"+toHM(p.end%1440)+'?</span>'+
+      '<span class="sessprompt-btns"><button class="ghost sessprompt-yes">Yes, log '+toHM(p.start)+"&ndash;"+toHM(p.end%1440)+'</button><button class="ghost sessprompt-no">No</button></span></div>';
+  }).join("");
+  el.hidden=false;
+}
+document.getElementById("sessBanner").addEventListener("click",function(ev){
+  var row=ev.target.closest&&ev.target.closest(".sessprompt");
+  if(!row) return;
+  var id=row.dataset.id,date=row.dataset.date;
+  if(!pendingSessionPrompts().some(function(p){ return p.id===id&&p.date===date; })) return;
+  if(ev.target.closest(".sessprompt-no")){ dismissSessionPrompt(id,date); renderSessionBanner(); return; }
+  if(!ev.target.closest(".sessprompt-yes")) return;
+  var sess=state.sessions[id],name=sess.name,span=toHM(sess.schedule.start)+"\u2013"+toHM((sess.schedule.start+sessionSpan(sess))%1440);
+  var n=applySession(id,date,sess.schedule.start);
+  render();
+  if(n===null){ showToast("Could not log that session.",false); return; }
+  if(localSaveFailed){ showToast("Not saved on this device — storage is full",false); return; }
+  showToast('Logged "'+name+'" for '+dayLabel(date)+", "+span+" ("+n+(n===1?" entry":" entries")+") — these are the session's stored times; adjust them if it ran differently",true);
+});
+if(!TEST_MODE){
+  setInterval(renderSessionBanner,60000);
+  document.addEventListener("visibilitychange",function(){ if(!document.hidden) renderSessionBanner(); });
+  window.addEventListener("focus",renderSessionBanner);
+}
+
+document.getElementById("sessSaveGo").addEventListener("click",function(){
+  var date=document.getElementById("sessSaveDate").value,from=document.getElementById("sessSaveFrom").value,
+      to=document.getElementById("sessSaveTo").value,nameEl=document.getElementById("sessSaveName");
+  if(!date||!from||!to||!nameEl.value.trim()){ showToast("Pick a day, a start and end time, and give the session a name.",false); return; }
+  var name=normalizeSessionName(nameEl.value);
+  var id=saveSessionFromRange(date,fromHM(from),fromHM(to),nameEl.value);
+  if(!id){ showToast("Nothing is logged between those times on that day, so there is nothing to save.",false); return; }
+  nameEl.value="";
+  renderSessions();
+  if(localSaveFailed){ showToast("Not saved on this device — storage is full",false); return; }
+  showToast('Saved session "'+name+'"',true);
+});
+
 /* only present when opened as index.html?hltest=1 — see selftest.html.
    Exposes real functions so tests exercise actual app logic instead of a
    copy of it; storage is already isolated above via TEST_MODE. */
@@ -4182,6 +5477,54 @@ if(TEST_MODE){
     setDayHighlight:setDayHighlight,
     saveDayHighlight:saveDayHighlight,
     getDayHighlightMax:function(){ return DAY_HIGHLIGHT_MAX; },
+    migrateSessions:migrateSessions,
+    noiseThresholds:noiseThresholds,
+    foldMidnightHalves:foldMidnightHalves,
+    detectPackages:detectPackages,
+    recentRate:recentRate,
+    getPackageConstants:function(){ return {retention:PKG_RETENTION,rateWindowDays:PKG_RATE_WINDOW_DAYS,mergeMinutes:PKG_MERGE_MINUTES,absorbMinutes:PKG_ABSORB_MINUTES,tolerance:DETECT_TOLERANCE_MIN,gapMinutes:PKG_GAP_MINUTES,maxBlocks:PKG_MAX_BLOCKS,matchWindow:PKG_MATCH_WINDOW_MINUTES}; },
+    clusterQualifies:clusterQualifies,
+    getNoiseConstants:function(){ return {alpha:NOISE_ALPHA,c0All:NOISE_C0_ALL,c0Wd:NOISE_C0_WD,minLoggedDays:NOISE_MIN_LOGGED_DAYS,windowMinutes:NOISE_WINDOW_MINUTES}; },
+    suggestPackages:suggestPackages,
+    getSuggestStats:function(){ return {hits:suggestStats.hits,misses:suggestStats.misses}; },
+    resetSuggestCacheForTest:function(){ suggestCache=null; suggestStats.hits=0; suggestStats.misses=0; },
+    packageSteps:packageSteps,
+    stepFrequencies:stepFrequencies,
+    cardFigures:cardFigures,
+    rateWindow:rateWindow,
+    windowWeekdayCounts:windowWeekdayCounts,
+    rateText:rateText,
+    isoDaysBetween:isoDaysBetween,
+    dismissSuggestion:dismissSuggestion,
+    getDismissedSuggestions:dismissedSuggestions,
+    clearDismissedSuggestionsForTest:function(){ try{ localStorage.removeItem(SGKEY); }catch(e){} },
+    createSessionFromPackage:createSessionFromPackage,
+    getDetectConstants:function(){ return {tolerance:DETECT_TOLERANCE_MIN,top:SUGGEST_TOP}; },
+    setTestNow:function(d){ testNow=d; },
+    setSessionSchedule:setSessionSchedule,
+    pendingSessionPrompts:pendingSessionPrompts,
+    pendingSessionPromptsFor:pendingSessionPromptsFor,
+    dismissSessionPrompt:dismissSessionPrompt,
+    getDismissedSessionPrompts:dismissedPrompts,
+    getDismissedMax:function(){ return SESSION_DISMISSED_MAX; },
+    clearDismissedSessionPromptsForTest:function(){ try{ localStorage.removeItem(SDKEY); }catch(e){} },
+    renderSessionBanner:renderSessionBanner,
+    setSession:setSession,
+    setSessionStart:setSessionStart,
+    sessionStartFor:sessionStartFor,
+    validStart:validStart,
+    refreshLogButtons:refreshLogButtons,
+    removeSession:removeSession,
+    deleteSession:deleteSession,
+    saveSessionFromRange:saveSessionFromRange,
+    sessionSegments:sessionSegments,
+    sessionOverlap:sessionOverlap,
+    applySession:applySession,
+    flattenSessions:flattenSessions,
+    unflattenSessions:unflattenSessions,
+    getSessionFields:function(){ return SESSION_FIELDS; },
+    undoDepth:function(){ return undoStack.length; },
+    getUndoStack:function(){ return undoStack; },
     dayTotals:dayTotals,
     dayElapsedMinutes:dayElapsedMinutes,
     dayUnloggedMinutes:dayUnloggedMinutes,
@@ -4277,6 +5620,8 @@ if(TEST_MODE){
       try{ localStorage.removeItem(KEY); }catch(e){}
       try{ localStorage.removeItem(DEVICE_KEY); }catch(e){}
       try{ localStorage.removeItem(UKEY); }catch(e){}
+      try{ localStorage.removeItem(SDKEY); }catch(e){}
+      try{ localStorage.removeItem(SGKEY); }catch(e){}
     },
     persist:persist,
     doDeleteCategory:doDeleteCategory,

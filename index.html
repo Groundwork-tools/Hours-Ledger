@@ -23,7 +23,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,400..800&family=Spline+Sans+Mono:wght@300..600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=sessions1">
 </head>
 <body>
 <div class="wrap">
@@ -34,11 +34,16 @@
       <button class="stepper" id="prev" aria-label="Previous week">&larr;</button>
       <input type="date" id="anchor" aria-label="Jump to week">
       <button class="stepper" id="next" aria-label="Next week">&rarr;</button>
-      <button class="ghost" id="thisweek">This week</button>
-      <button class="ghost" id="closeoutBtn">Close out last week</button>
-      <button class="ghost" id="reviewToggle">Review</button>
+      <div class="navbtns">
+        <button class="ghost" id="thisweek">This week</button>
+        <button class="ghost" id="closeoutBtn">Close out last week</button>
+        <button class="ghost" id="reviewToggle">Review</button>
+        <button class="ghost" id="sessionsBtn" title="Save logged time as a reusable session, or log one">Sessions</button>
+      </div>
     </div>
   </header>
+
+  <div class="sess-banner" id="sessBanner" hidden></div>
 
   <div class="closeout-banner" id="closeoutBanner" hidden>
     <span>Last week's ready to close out.</span>
@@ -231,6 +236,56 @@
   </div>
 </div>
 
+<div class="scrim" id="sessScrim">
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sessTitle">
+    <h2 id="sessTitle">Sessions</h2>
+    <section class="sess-sec" id="sessMine" aria-labelledby="sessMineHead"><h3 class="sess-sec-h" id="sessMineHead">Your sessions</h3><div id="sessList"></div></section>
+    <div id="sessSched" hidden>
+      <h3 id="sessSchedTitle"></h3>
+      <div class="field">
+        <label>Days</label>
+        <div class="daychks"><label class="daychk"><input type="checkbox" id="sessSchedDay0"> Mon</label><label class="daychk"><input type="checkbox" id="sessSchedDay1"> Tue</label><label class="daychk"><input type="checkbox" id="sessSchedDay2"> Wed</label><label class="daychk"><input type="checkbox" id="sessSchedDay3"> Thu</label><label class="daychk"><input type="checkbox" id="sessSchedDay4"> Fri</label><label class="daychk"><input type="checkbox" id="sessSchedDay5"> Sat</label><label class="daychk"><input type="checkbox" id="sessSchedDay6"> Sun</label></div>
+      </div>
+      <div class="field">
+        <label for="sessSchedTime">Start time</label>
+        <input type="time" id="sessSchedTime">
+      </div>
+      <p class="hint">Once the session&rsquo;s time has passed, if nothing is logged in that window you&rsquo;ll be asked &ldquo;Did this happen?&rdquo;. Never automatic.</p>
+      <div class="sheet-actions">
+        <button class="solid" id="sessSchedGo">Save schedule</button>
+        <button class="ghost" id="sessSchedRemove">Remove schedule</button>
+        <button class="ghost" id="sessSchedCancel">Cancel</button>
+      </div>
+    </div>
+    <section class="sess-sec" id="sessSuggest" aria-labelledby="sessPatHead"></section>
+    <details id="sessSaveBox">
+      <summary>Save logged time as a session</summary>
+    <div class="field">
+      <label for="sessSaveDate">Day</label>
+      <input type="date" id="sessSaveDate">
+    </div>
+    <div class="field">
+      <label for="sessSaveFrom">From</label>
+      <input type="time" id="sessSaveFrom">
+    </div>
+    <div class="field">
+      <label for="sessSaveTo">To</label>
+      <input type="time" id="sessSaveTo">
+    </div>
+    <div class="field">
+      <label for="sessSaveName">Name</label>
+      <input type="text" id="sessSaveName" maxlength="60" autocomplete="off" placeholder="e.g. Muay Thai morning">
+    </div>
+    <div class="sheet-actions">
+      <button class="solid" id="sessSaveGo">Save session</button>
+    </div>
+    </details>
+    <div class="sheet-actions">
+      <button class="ghost" id="sessClose">Close</button>
+    </div>
+  </div>
+</div>
+
 <div class="day-tip" id="dayTip" role="tooltip" hidden></div>
 
 <button class="fab" id="fab">&#43; Log now</button>
@@ -244,9 +299,13 @@
 
 <script>
   /* cache-bust app.js on every load - see CLAUDE.md's backlog item 11 for
-     why a plain <script src="app.js"> isn't safe on a no-build-step site */
+     why a plain <script src="app.js"> isn't safe on a no-build-step site.
+     HL_ASSET_VERSION is the release version: bump it HERE and in the styles.css
+     link in <head> (selftest.html's AV tests fail if the two differ). The &t= part
+     is the per-load bust and stays. */
+  var HL_ASSET_VERSION="sessions1";
   var s=document.createElement("script");
-  s.src="app.js?v="+Date.now();
+  s.src="app.js?v="+HL_ASSET_VERSION+"&t="+Date.now();
   document.body.appendChild(s);
 </script>
 </body>

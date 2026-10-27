@@ -258,6 +258,19 @@ mutation on separate ports and run them in parallel.
 Push to `main`. GitHub Pages redeploys automatically, usually within a minute or
 two, and caches for up to ten. There is nothing else to run.
 
+**Release version (`HL_ASSET_VERSION`, added 2026-10-27).** `index.html` carries one release
+string, currently `sessions1`, in two places that must be equal: the `var HL_ASSET_VERSION`
+in the bootstrap script at the bottom (it builds `app.js?v=<version>&t=<Date.now()>`) and
+the `styles.css?v=<version>` link in `<head>`. **On every release that changes `styles.css`
+or `app.js`, bump both** (e.g. `sessions2`, or a date such as `2026-11-03a`), in the same
+commit; `selftest.html`'s AV tests fail if they differ or if either is missing. Why: the
+stylesheet has no per-load bust, so a device could run new markup with an old stylesheet;
+the version in the URL makes the browser fetch it fresh. It only helps if bumped, which is
+the "remember to do this" weakness backlog 16.11 rejected for `app.js` - that is why
+`app.js` keeps its `Date.now()` and only `styles.css` depends on the bump. GitHub Pages
+already revalidates after at most ten minutes, so a forgotten bump costs up to ten minutes
+of a stale stylesheet, not permanence.
+
 ## What's live and verified
 
 A running note of what's actually been confirmed working, and how — useful
@@ -3062,5 +3075,192 @@ dashboard styling.
     flaw. A fix would stamp in `closeoutSave` under the same `state.deletedEntries`
     gate and add the snapshot; it needs its own test written first (two devices,
     the offline edit ordering above) and its own decision.
+
+## Sessions design decisions
+
+Backlog 31, branch `feature/sessions` (built overnight 2026-10-22 under written instructions; NOT merged, NOT
+deployed, never tried on a real device or against a real Drive - see `OVERNIGHT-STATUS.md` for what was run).
+A session is a named, ordered set of blocks stored as offsets from a start time. Each decision below was made
+before the build and is recorded with its reason so it is not reopened by accident.
+
+**Stage 1 - the data, its sync, save-as-session, manual apply**
+- **Shape.** `state.sessions[id] = {id, name, blocks:[{offset,duration,label,cat}], schedule, updatedAt?,
+  updatedBy?}` and `state.deletedSessions[id] = {updatedAt, updatedBy, deletedAt}`. Both keys are optional and
+  additive (`migrateSessions` on load, import and undo/redo): `hours-ledger-v2` is unchanged (rule 1).
+  Applying creates ordinary entries. No link back, no planned/confirmed state, no new entry field.
+- **The whole session is the sync unit, last write wins.** Why: a session is edited as a unit; per-block records
+  would let two devices produce an interleaved session nobody wrote. The text that loses is `console.log`ged
+  (same precedent as day highlights), not shown.
+- **blocks and schedule are flattened to canonical JSON text for sync.** Why: `mergeRecords` compares content
+  with `===` (`sameContent`), so an array or object field from two separately built states never reads as
+  equal and would always fall through to last-write-wins. As text, equal blocks are equal strings and take case
+  2 ("same content"). `mergeRecords` itself is shared and untouched. Pinned by S06 (with a control row that
+  shows the raw-array trap).
+- **Random ids, no name dedup.** Why: nothing references a session id (entries carry no back-link), so a
+  duplicate cannot silently reassign anything, unlike categories (which is why category name dedup exists and
+  hurts). The user deletes the extra one. Rejected: an id derived from the pattern - it breaks the first time
+  the user edits the session.
+- **Tombstones only for a session that exists on this device; stamps at edit time, behind the
+  `state.deletedEntries` gate.** Same rules as the day highlights, for the same reasons (hard rule 7; the
+  stamped-at-sync flaw in backlog 30).
+- **Undo of sessions is a forward edit in stage 1** (`undoSessionsAsForwardEdits`), not a whole-snapshot
+  restore: a restore brings back the old stamp (a ghost after an undone create; last-write-wins lost after an
+  undone edit - the backlog 22 class). Guarded on ownership: a session another device last wrote is theirs. A
+  snapshot taken before this feature has no `sessions` key; undoing onto it keeps the current sessions.
+- **Category remaps.** `dedupeCategoriesByName` and `doDeleteCategory` (with a target) move block categories the
+  way they move entries', and restamp a session they change. Delete without a target leaves dangling ids, as
+  for entries; apply then treats a block whose category is gone as uncategorised.
+- **Apply.** Any start date, past or future. One `snapshot()` for the whole apply = one undo step. Midnight:
+  `sessionSegments` splits exactly as `putEntry` does (a block past 24:00 moves to the next date). Overlap with
+  existing entries is ALLOWED with a preview (the app has always allowed overlap and shows it as double-booked;
+  refusing would block pre-logging a day that already has something, overwriting would destroy data). Double
+  submit: the first click takes the session id out of `sessApplyId` before doing anything and disables the
+  button; the apply is synchronous so no flag can stay stuck (rule 9).
+- **Dismissed suggestions and banner dismissals are device-local, capped, never synced.** A dismissal is a
+  preference, not data. A suggestion's identity is a cluster whose centre moves as data grows, so a synced
+  dismissal would need fuzzy matching inside a merge record, and one that wrongly suppresses a real pattern
+  would be a silent loss. (Stages 2 and 3.)
+- **Known cost, not fixed (open issue):** applying to a future date creates ordinary entries, so the current
+  week's 168-hour bar, week totals and Export week count time that has not happened as logged. By instruction:
+  no marker, no new field.
+- **Known gap, same as the day highlights:** an already-open tab running pre-feature code has no `sessions` in
+  memory; its next save rewrites the ledger without them. Connected devices recover them from Drive.
+
+**Stage 2 - the optional schedule and the "Did this happen?" banner**
+- **Shape.** `schedule = {weekdays:[0..6, Mon=0], start:minutes, since:"YYYY-MM-DD"}` inside the session record (so it
+  syncs with it, and is in the content whitelist); anything malformed is null (the session stays, unscheduled).
+- **The prompt is DERIVED, never stored.** An occurrence (session, date) prompts only when: the schedule names that weekday;
+  date >= `since`; date is today or yesterday; the window (start .. start + the session's length) is over - strictly,
+  `now > end`; NO entry overlaps the window by even a minute; and this device has not dismissed it. Why "any overlap
+  silences it": someone who logged anything there has spoken for that time; asking again would be inferring. Why derived:
+  logging by hand, applying ahead, or another device's apply arriving by sync all make it vanish with no flag to sync or to
+  get stuck (rules 7 and 9). Cost: a neighbouring entry that ran one minute into the window silences it (the safe direction:
+  no nag). Why strictly after the end: the question is about something that has finished.
+- **Yes logs the session at its scheduled start on that date** as ordinary entries (one snapshot), and the toast says to
+  adjust them if it ran differently. The click handler re-derives the prompt before acting, so a stale row (window filled
+  since it rendered, e.g. by a sync) does nothing. No is a dismissal, not an edit: no snapshot.
+- **Dismissals** live in their own device-local key (`hours-ledger-sessions-dismissed-v1`, capped at 50, newest kept), not in
+  `state`, never pushed. Two devices can therefore ask the same question once each; if both press Yes before syncing, both
+  sets of entries survive (double-booked, visible, undoable) - documented and tested, not prevented.
+- **Declaring a schedule is an undoable edit** (`setSessionSchedule`, one snapshot, restamped). `since` is the day it is
+  declared and that day counts (a question recorded in OVERNIGHT-STATUS.md).
+- **Not tested because it cannot be under TEST_MODE:** the 60 s timer and the focus/visibility refresh (skipped there).
+
+**Stage 3 - the first detector (REMOVED in R4, 2026-10-24).** One-block clusters with a fixed 12-date minimum, ranked by weekday concentration. Measured wrong
+as the log grows (chance alone cleared a fixed 12 in 1.0% of scrambled logs at 88 days, 8.3% at 110, 75% at 150, always at 250), so it was replaced by the redesign
+below; its code, tests and `tools/derive-min-dates.py` are gone (`tools/validate-noise-filter.py` replaces the tool). Its dismissal key format `category@start` still
+hides a one-block package of that category.
+
+**Stage 3 REDESIGN (decided 2026-10-23/24; R1-R5 built on `feature/sessions`, NOT merged, never seen on a real screen; status in OVERNIGHT-STATUS.md)**
+- **Goal.** Detection exists to make logging as effortless as possible. Frequent habits are the best suggestions, daily ones included. Suggestions are
+  PACKAGES (a sequence of blocks, e.g. get ready > bike > Muay Thai); accepting one creates a multi-block session (no schedule). Detection still only
+  proposes creating a session and never logs entries. Weekly habits are found as well as daily ones. This replaces "rank by weekday concentration"
+  and the fixed 12-date minimum.
+- **Ranking: entries saved per week = recent weekly rate x number of blocks.** The rate counts full-package days in the last 56 days; the denominator is
+  the shorter of 56 days and the time since the package first appeared (floored at one week). **The 56-day window is a DESIGN CONSTANT, not derived**
+  (on the real export the top group of the ranking was stable across 84-, 56- and 28-day windows; 28 days was noisy). A habit that stops falls in rank as
+  its rate falls and rises back to the top if it resumes. No minutes figure in the UI (the seconds-per-entry cost is unknown).
+- **Noise filter, computed in the app from a closed form on each user's own log.** A first block qualifies if its distinct dates reach k_all (any-weekday
+  test) OR its dates on one weekday reach k_wd (weekday-specific test); each test is held to 2.5% so the union is at most 5%. The closed form
+  (per-category expected distinct dates in a 16-minute window, Poisson tail, one fitted constant c0 = 4.0) matched the time-scramble simulation within
+  one on the real log and on synthetic logs of four densities. Measured combined false-positive rate at the thresholds: 1.6% (60 days), 1.9% (88), 0.9% (150),
+  and, after the weekday constant was refitted (see "As built"), 0.7%-2.8% from 35 to 250 logged days. **There is NO bump above 150 logged days** (an earlier +1 patch was dropped 2026-10-24). **Thresholds above 150 logged days rest on resampled days (the simulation resamples the real 88 days) and are unvalidated until a real log of 150+ days exists.** Thresholds: 60 days 10/6, 88 days
+  12/6, 150 days 16/8, 250 days 21/10. **Gate: no suggestions below 35 logged days**, the smallest log at which a once-a-week habit logged every single week
+  can clear the weekday test. Claims are limited to this one real log (subsets from 14 days, bootstrap above 88) plus synthetic logs; a second real log is a
+  human gate before any merge.
+- **Decision D1 (2026-10-24): the filter stays as designed, so a habit dormant for months fades as the log grows. It is a chance filter, not a hide rule.**
+  The threshold rises with the log, so a habit that stops keeps its old count and is eventually overtaken. Measured (closed form, 2.5% per test): the school
+  package B1 (18 dates) fades at about 198 logged days (~16 weeks of no repeats, so a 7-week school break is safe); School 13:00 B4 (24 dates) at ~316
+  (~33 weeks); the Muay Thai first block (14 dates, 7 of them Fridays) at roughly 150-200 logged days (60-100 days of no repeats; CORRECTED 2026-10-24 - the first figure, ~127 logged days / ~39 days, counted the any-weekday test alone, but the habit also survives on the weekday-specific test until its 7 Fridays fall below k_wd); a weekly habit with 7 Fridays at ~150 (~62 days). If it resumes it
+  reappears as soon as its cumulative count clears the threshold again, and ranks high by recent rate. **Option (b), "never hide anything that ever passed", was rejected:**
+  repeated chances to pass inflate the false-positive rate with log length (measured 16.7% at 150 days at 2.5% per test; ~0.5% per test is needed to hold 5%), and
+  at 0.5% per test the Muay Thai weekday threshold at 88 days is 7 against 7 Fridays: zero margin.
+- **Packages.** Midnight halves of one entry (same category AND same normalized label, next calendar day, total under 1,440 minutes) are folded into one block,
+  so "Sleep" is the whole night; the evening date owns the occurrence; an unmatched evening half stays an ordinary block, and one on the log's last day is left out
+  until the next day exists. A package starts at a qualified first block (densest 15-minute window per category, one occurrence per date) and extends while
+  a later block, matched by category AND offset window (+/-15 min) so a short interposed entry does not break it, is present on at least 50% of the first
+  block's days (**the 50% retention is label-calibrated, not derived from the null**: the lowest labelled-"yes" retention was 57-62%). Eligibility is tested per
+  first-block cluster at the 16-minute-window threshold; qualified clusters with the same category sequence and first-block medians within 30 minutes (two
+  adjacent windows) merge into one suggestion with median offsets and durations (B2+B5, B6+B9); a lower-ranked package whose first block has the same category within
+  30 minutes of a block of a higher-ranked package is absorbed (this removes B14 and B15). A package that merely PREPENDS a block to a higher-ranked one is
+  not absorbed (B6 over B2), which is why B11 ("Fix hair > Journal", labelled "no") is still suggested: no rule separates it from B6/B9 (the share of the base's days
+  carrying the extra leading block was 18% for B11, 25% for B1, 40% for B6+B9, a three-point fit), so it stays showing with "Not now" and is pinned by a named test.
+- **As built (R1-R3), including three things that differ from the plan and why.** (1) The weekday constant: the closed form that the app uses keeps the log's REAL weekday mix, and with the first constant (4.0) it gave k_wd = 7 at the real 88-day log
+  where the simulation says 6 (zero margin for Muay Thai); refitted to **c0_wd = 3.25** (any value 3.0-3.5 matches the simulation at every size), c0_all stays 4.0; the combined false-positive rate at the shipped thresholds measured 0.7%-2.8% from 35 to 250 logged days.
+  The +1 above 150 days was dropped (decision 2026-10-24). **Hold-out for the refit (RAN 2026-10-24; there was NO hold-out when the constant was first chosen):** constants fitted on sizes up to 150 only, then predicting 200 and 250: combined false-positive rate 4.0% at 200 and 4.5% at 250 (margin to 5% is thin); on 36 independent synthetic logs of different densities the worst was 3.0%. Caveats: sizes above 88 resample the real 88 days, and the independent logs use uniform times. (2) Later blocks are matched by category and a +/-15-minute window (`PKG_MATCH_WINDOW_MINUTES`, a DESIGN CONSTANT, not derived from the null) around the END of the previous matched block plus the usual gap,
+  not an offset from the first block's start: the first version failed to form School > Walk and Girlfriend > Prep for bed > Sleep on the real log because an earlier block's length varies; a generated test with exact durations had missed it.
+  (3) Eligibility is tested per first-block window BEFORE merging variants (the noise null is calibrated for a 16-minute window), so a habit split into two time variants that are each too thin to clear the filter alone is not found.
+  On the real export (88 days) the detector lists 14 suggestions: all 12 "yes" habits, B11 (pinned), the three unlabelled candidates; B14 and B15 are absent.
+- **As built (R4): the Sessions sheet.** `suggestPackages(state)` runs `detectPackages` as of TODAY, drops this device's dismissals and keeps the top 3
+  (`SUGGEST_TOP`). A card shows the exact clock time of every step (anchor + offsets, a step past 24:00 marked "(next day)"), the full days (and how many days had the
+  first step), the weekday evidence and "about N entries a week" (= effort). Below 35 logged days the sheet says suggestions start at 35 and how many there are.
+  Accept (`createSessionFromPackage`) makes ONE session with every block, no schedule, logs nothing, one undo step; the first click takes the pending suggestion out
+  (double-click guard, no async flag, rule 9); any malformed block creates nothing. "Not now" = `dismissSuggestion`: device-local key
+  (`hours-ledger-sessions-dismissed-suggestions-v1`, capped at 50, never synced), remembered as `category sequence@anchor minute`, hides a package with the same
+  sequence whose anchor is within 30 minutes. Mitigation 1: the "Did this happen?" button reads "Yes, log 06:00-07:40" and the toast repeats the times and says they
+  are the session's stored times. Mitigation 2: a sentence appended to Export week's `definitions.logged` (key set unchanged). Not built: the device-local
+  unedited-entries list.
+- **Card layout (2026-10-25, after the owner's look at a real laptop screen).** The first card was a flex row (text column + non-shrinking buttons), which left the text a ~120 px column. Now a block that stacks: title; one `.sugg-step` row per step ("HH:MM-HH:MM  label  duration", category muted and shown only when it differs from the label); one meta line ("N full days of M, weekdays, about N entries a week"); two buttons in a row, at least 44 px tall. The "e.g. dates" line is gone. Layout and text only: detection, thresholds, ranking, memo unchanged. Tests RS17/RS17b (DOM order, no flex row, no repeated label, computed 44 px) and RS18 (a VISIBLE iframe of 390 px and 1000 px, measured Blink layout: widths, order, button row, no sideways scroll). They cannot prove it looks right, and not in WebKit or on a phone. **Polish (2026-10-25):** the title is short (the first step's label, plus the last one's when different: "Prep for bed, Sleep"; the full chain is only in the step rows) and the create button reads "Create session" so it stays on one line at 390 px (it wraps below about 350 px; measured at 320 px). Button-row tests now also require equal widths and at least 45% of the card each, so the stacked / not-stretched mutants fail at 390 px too.
+- **Card polish, round 2 (2026-10-25).** Title = the first step's label only (round 1 had "first, last"; reversed on the owner's request). "Create session" is the primary (`.solid`, the same fill as Save session), "Not now" a plain `.ghost`, both 44 px tall, equal width, same padding. Meta line: "N of M days · about N entries a week". Weekday counts: a seven-cell strip M T W T F S S, each with its count, zero days muted (`--none`). Intro: "Proposals only. Nothing is logged." (one line). "Save logged time as a session" is a `<details id="sessSaveBox">` under one 44 px row; open by default only when there are no suggestions, set when the sheet OPENS (a redraw never folds it); Close sits outside the fold. "(next day)" is a small line under the time range, so it cannot widen the time column; the three columns of a card are shared by its rows (subgrid), so labels and durations line up. Tests RS17-RS19b; 20 mutants, the first run left two survivors (subgrid removed; strip cells not filling the strip), fixed with two new assertions and killed. Not verified: the owner's screen, phones, WebKit; subgrid needs a current browser (a fallback keeps per-row columns).
+- **Cost and when it runs (R4, measured).** `suggestPackages` has NO cache. It runs when the Sessions sheet opens, after every action in the sheet, and on every
+  `render()` WHILE THE SHEET IS OPEN (`renderSessionsIfOpen`); with the sheet closed `render()` does not touch it. On the real 88-day export (1,892 entries; real
+  clock in the browser pane): `detectPackages` 31 ms first call / 19 ms median, `suggestPackages` 41 / 13 ms; `render()` 3 ms with the sheet closed, 10.7 ms median
+  with it open. Generated logs (same clock): 365 days realistic 36 ms, 1,000 days realistic 188 ms, 1,000 days dense (80 entries a day, 8 categories) 742 ms, 1,000
+  days in a 2-hour band 318 ms. **Decided 2026-10-24: memoized** (`suggestionKey` / `suggestCache`, one entry, memory only). The key is an exact string of the reference date, the raw dismissals, every category (id, name), the sessions (JSON) and every entry (date, id, start, end, category, label), so a change of any of them recomputes and nothing else does; the state is mutated in place all over the app, so identity could not be a version. Building the key is one linear pass over the entries. Tests RS16 (hit/miss counters). **Clock independence:** the detector reads no clock (its only default is `sessionNow()` in `suggestPackages`); RS15 runs the same fixtures with the page's `Date` replaced by a fixed instant and moved across midnight and expects identical results, except that a planted day leaving the 56-day window lowers the effort by exactly one day's worth.
+- **Complexity (REASONED from the code; the growth numbers above were RAN).** Entry passes (thresholds, fold, grouping) are O(E log E) in the number of entries. The
+  loop that grows fastest is the cluster extraction in `pkgClusters`: each pass is a sweep of one category's n occurrences, each pass removes at least the
+  minimum number of dates (about 6-20), so the worst case is O(n^2 / minDates) per category (n = that category's entries); a single category with 100,000
+  entries would be the slow case (not measured, not realistic). The second matching pass is O(first-block days x blocks x entries that day). Merge/absorb is
+  O(P^2 x blocks) for P qualifying packages (95 found on the dense 1,000-day log). Measured growth from 365 to 1,000 days (2.7x) was 3.8x-5.2x: mildly super-linear.
+- **Timing guard (RS14).** Seven generated logs (88/365/1,000 days; realistic, dense, tight), each call against a stated budget about 10x the measured time
+  (200/500/2000/2000/7500/1000/3000 ms). **The headless run's clock is frozen during synchronous work** (a 4.4 s busy loop inside a timer read 0 ms, measured), so the
+  guard calibrates its clock first: `performance.now()` if it sees a fixed busy loop, otherwise the Date header of a synchronous request to the serving
+  `http.server` (real time, 1 s resolution, budget widened by 2 s), otherwise the rows FAIL. In the headless gate only a gross slowdown is therefore caught; for
+  millisecond budgets run `selftest.html` in a normal browser. A loop that never returns cannot be caught from inside the page; the runner's own cap (NO SUMMARY after
+  ~22 min) stops it. Slow mutant (clustering repeated 25x) turns 5 rows red in the headless run.
+- **Window cap, RECOMMENDED NOT BUILT (2026-10-24):** scan only the last 250 calendar days before the reference date (the range the thresholds were tested on; 150 of it on real days). Measured (real clock): the real 88-day export gives the identical 14 packages with or without it; a 1,000-day generated log goes from 838 ms to 266 ms; a habit that stopped 600 days ago is still listed (effort 0, last) without the cap and gone with it; thresholds at 1,000 days are 35-42 / 13-15 without it and 15-17 / 7-8 with it. Cost of the cap: habits older than 250 days vanish and the fade of stopped habits changes from threshold-driven (D1) to window-driven. Needs a decision, its own tests and mutants.
+- **UNEXPLAINED, NOT REPRODUCED, NOT RESOLVED (2026-10-24).** The first full run of the new block produced no output for 13+ minutes (an empty dump); bisecting by
+  scenario (RS01-RS10, one run each) found no scenario that hung, the same code then completed, and a mutation run (m09) also ended with "NO SUMMARY" once. No input
+  that makes `app.js` loop was found. Suspected harness (background Chrome processes), but that is a suspicion, not a finding. A second, smaller unexplained item: RS01 failed (no package shown although 60 days were eligible) in 2 of 4 runs of one mutant and in 0 of about 15 runs of the unmutated code or after; a diagnostic row now records why if it recurs.
+- **Labels (2026-10-24).** Yes: B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B12, B13. No: B11, B14, B15. **STILL PENDING (must be filled before any merge):** Breakfast ~08:10 (30 min, 30 days),
+  Girlfriend ~19:00 (118 min), School 08:25 (30 min) - the owner's answers were left as placeholders; their ground-truth specs are not in the R3 tests yet.
+- **Rubber-stamp mitigations (decided):** exact times on the one-tap button and in the toast, and a sentence in Export week's `definitions.logged`; the device-local
+  unedited-entries list is deferred.
+
+**Log today (decided 2026-10-25, owner's answers A-D; built on `feature/sessions`, NOT merged, never seen on a real screen)**
+- **Detection still never logs.** "Create session" (from a suggestion) and "Save logged time as a session" only SAVE a session. Entries are created only from a SAVED session: a primary button "Log today HH:MM-HH:MM" on each session row, showing the exact times it will log (mitigation 1), and the toast repeats them. Default date is today; a small "Other day" control opens a date field (starting at tomorrow, past days allowed) and the button then names that day. No date picker in the main path. A tap logs exactly the date and start the button showed (data attributes), never a recomputation; a button that says "today" refuses after midnight, refreshes, and asks for another tap.
+- **`defaultStart`: one new optional field on the session record**, an integer 0..1439 (minutes from midnight) or null = unknown; a missing key reads as unknown. Set at creation (a suggestion: the package's median first-block start; Save logged time: where the first saved block starts, clipped to the range), editable later by one small "Start time" form on the row (one undo step; an empty field clears it; hidden for a session that has a schedule). Added to `SESSION_FIELDS` (so it is part of the record that last-write-wins compares), flattened as `null` never `undefined`, validated in `migrateSessions` and `unflattenSessions` (1440, -1, 600.5, "600", NaN, Infinity, true, objects, arrays all become null), carried through `setSession` when the argument is omitted (a rename or a schedule change must not drop it; an explicit null clears), and included in `sessionSig` (otherwise undoing a start-time edit would be a no-op). A remote record written before the field existed (no key) is read as null, so it is the same content as the local one and no conflict is decided.
+- **Hard rule 1:** touches its letter (the saved shape gains an optional field inside a record) but it is the same class as the optional `sessions` and `dayHighlights` keys: nothing renamed, no version bump, no data rewritten, missing = unknown, and sessions have never been deployed, so no released code can drop the field. **Hard rule 7:** not broken. The sync unit stays the whole session record decided last-write-wins; an absent defaultStart is "unknown", never a deletion, and clearing it is an ordinary edit with a fresh stamp. Residual risk, said plainly: a device running code WITHOUT the field that edits a session would drop it (the same gap recorded for day highlights); no such code exists.
+- **Precedence of the start:** a declared schedule's start, then `defaultStart`, then (today) the clock rounded to the nearest 5 minutes (at most 23:55), (any other day) `settings.startHour` (06:00 by default). A session without a stored start therefore logs "now, rounded" for today and the start of the displayed day for another day.
+- **Overlap:** a log that overlaps entries already on those days does not log silently: the row shows "Overlaps N entries, M min." with Log anyway / Cancel; Log anyway is one undo step and takes the pending prompt out before logging (a second tap finds nothing). A second tap on Log today after logging cannot log silently again for the same reason (it now overlaps its own entries).
+- **A session that runs past midnight** (bedtime 21:30 to 06:25) logs its second part on the next date, as `applySession` already did.
+- **A night that spans a clock change logs as CLOCK minutes** (the app's day is always 1,440 minutes): on the night the clocks go back (25 Oct 2026 in Europe) a Sleep session logs 21:30-06:25 as 535 minutes, which is an hour SHORT of the real elapsed time; on the night they go forward it is an hour long. Accepted, not fixed (same limitation as the week view, Export week and the day sheet).
+- The Export week sentence ("entries created from a saved session ... are not marked ...") stays. Tests: `runLogTodayTests` (LT01-LT14).
+
+**Sessions sheet flow (decided 2026-10-25, owner's list; built on `feature/sessions`, NOT merged, never seen on a real screen)**
+- **"Create session" on a suggestion saves the session at once.** The confirm step (the form with the name field and a second "Save session" button) is removed: it only asked for a name, the card title (the first step's label) is a sensible default, and a rename is one click on the saved row. It logs nothing (toast with Undo says so). The manual "Save logged time as a session" form stays. A fast double-tap creates exactly one session: the first tap re-renders the list, so the card under the finger changes; any `.sugg-create` tap within 700 ms of the last create is ignored (a timestamp compare, not a flag: it cannot stay set, hard rule 9). Not permanent: a tap 900 ms later creates the next one.
+- **The old manual Apply panel and button are removed, with all their code** (`#sessApply`, `sessApplyPreview`, `closeSessApply`, the handlers). `applySession`, `sessionOverlap` and `sessionSegments` stay: Log today uses them. Reason: two ways to log a session (a date picker panel and Log today) is one too many, and Log today already covers a day other than today (Other day), the overlap warning, the exact-times toast and one undo step. The tests that covered Apply were NOT deleted; they moved onto the Log today path (mapping in OVERNIGHT-STATUS.md).
+- **Log today closes the Sessions sheet** after a successful log (also Log anyway and Other day); it stays open on Cancel, while the overlap prompt is showing and on errors (not enough storage / could not log). The toast with Undo stays.
+- **Delete is a small trash icon (16 px drawn, 44 x 44 px tap area) with an inline two-step confirm, no browser dialog.** First tap: the icon turns into "Delete?". Second tap deletes (still one undo step, toast with Undo). It resets by itself after 4 seconds (a timer: it cannot stay armed) or on any tap elsewhere (pointerdown, without rebuilding the row, which would swallow the click). Reason: a big Delete button next to Log today invites a wrong tap; the browser confirm dialog is blocking and ugly; undo already exists but a two-step arm makes the accident rarer.
+- **Saved session rows show the same step list as a suggestion card** (square category dot, time range at the start Log today would use, label, duration), the session's start in the meta line (`starts 06:15`, `(now)` or `(day start)` when it is the fallback), a full-width dark Log today button, and under it the small controls: Other day, Start time (hidden when the session has a schedule), Schedule..., trash.
+- **Rename in place:** click the name, Enter or leaving the field saves, Escape cancels, an empty name reverts; one snapshot, a fresh sync stamp, `defaultStart` and the schedule kept.
+- **Suggestion cards:** the meta line says how often the PATTERN repeats ("about 6 nights a week", nights when a step runs past midnight, otherwise days), from the ranking's own 56-day rate; the weekday strip counts over the same 56 days and says so ("Weekdays, last 8 weeks"). A closed fold-out "How often each step" gives, per step, on how many of the last 56 days the log has an entry of that category within 15 minutes of that step's time. **That per-step count is computed in the UI from the log, not by the detector** (the detector keeps no per-step counts; adding them would have touched detection). Each step has a small SQUARE dot in its category colour (grey `--none` for no category or a deleted one); the category name stays on the line, colour is never the only signal.
+- **The Sessions button is NOT moved to the masthead.** Measured (real layout, 390 px): the masthead already fills its row (prev, date, next, This week, Review = 350 of 350 px); a sixth control (93 px) wraps onto a second row. Options on record: (1) leave it where it is; (2) a deliberate second masthead row holding This week / Review / Sessions as three equal 44 px buttons (about 44 px more height on a phone, always); (3) shorten labels ("This week" to "Today"). Not decided.
+
+**Masthead, card figures and fold-out (decided 2026-10-25, owner's list; built on `feature/sessions`, NOT merged, never seen on a real device)**
+- **Sessions button moved into the masthead; the old Your-data button is REMOVED (one entry point, not two).** Why removed rather than kept: two buttons for one thing makes "which one" a question, the Your-data panel is about data in and out, and it sits at the bottom of the page on a phone, far from where the work is. The id `sessionsBtn` moved with it, so nothing else changed. In Review the whole masthead is hidden (as before), so Sessions is not reachable there; the Your-data panel is hidden in Review too, so nothing was lost.
+- **Layout.** Wide (above 820 px): one row, Sessions to the right of Review, "Close out last week" between This week and Review when it shows. Phone (820 px and below, the app's own mobile breakpoint): row 1 previous / date / next; row 2 This week, Review, Sessions as three EQUAL buttons, each 44 px tall; "Close out last week" (only some weeks) gets its OWN full-width 44 px row UNDER the three, so the three never move when it appears. The four buttons sit in a wrapper `.navbtns` that is `display:contents` on wide screens (so the flex row is unchanged) and a 3-column grid on phones. No badge, count or dot. Measured (Blink, RS24) at 360, 390, 700, 820, 821, 1000 and 1360 px, with and without the close-out button.
+- **Found while checking 360 px, not caused by this change:** the Your-data buttons were squeezed into ONE row with their words overlapping and the page scrolling sideways by 8 px (a leftover `.tools .ghost{min-width:0}` from the single-file days). Fixed with CSS only: the 118 px minimum applies on phones too, so they wrap two to a row and are 44 px tall. Recorded here because it is a visible change to a panel the owner did not ask about.
+- **The card's "N of M days" and "about R a week" now describe the SAME window.** Found by running the real export: "33 of 33 days" beside "about 2 days a week", "42 of 44 days" beside "about 3.9 nights a week". The count was all-time and its "of M" was the days the FIRST STEP happened; the rate is the last 56 days. Now N = full-package days inside the rate's window, M = that window's length (the shorter of 56 days and the time since the habit's first full day, at least 7), R = N / M x 7; the weekday strip sums to N. The all-time numbers moved into the closed fold-out ("Whole sequence on 42 of the 44 days the first step happened (all time)"). The rate itself is unchanged (`recentRate` is now `rateWindow` plus a division, arithmetic identical; ranking identical, checked below).
+- **The fold-out has no matching of its own that can drift.** `detectPackages` now also returns `stepDates` (per step, the dates on which its own chain reached that step, merged variants included; nothing found or ranked changes). The fold-out counts a step on a day if the detector's chain reached it OR an entry of the category starts within `PKG_MATCH_WINDOW_MINUTES` (the detector's own constant) of its usual time. Why both: the chain alone hides a step that still happened after an earlier step was skipped (the Bike was skipped, Muay Thai still happened; RS21 pins this), the usual-time test alone undercounted a package merged from two time variants and a step whose start moves with the length of the step before it (8 against the detector's 16 for Breakfast; 28 against 31 for Prep for bed, on the real export). The union is never below the detector's full-day count for any step. Option not taken: refactor the detector's matching into a shared function used per step independently; it would touch detection code for a display count.
+- **Test harness fix (2026-10-26):** the RS01 "no categories" flake was a stale writer, not the detector. An earlier sandbox's 250-400 ms persist timer rewrote the shared test storage with a one-category state after the next scenario had wiped it (proven with a `setItem` spy). Inside the suggestion block `freshSandbox(true)` now removes every earlier sandbox (`isolateSandboxes`); older blocks keep frames alive and are untouched. H01/H01b pin it.
+- **Sessions sheet as two sections (2026-10-26, owner's request; layout and text only):** `Your sessions (N)` and `Patterns in your log` are the same mono uppercase label (`.sess-sec-h`), each in its own `<section>`; a 2 px ink rule (`#sessSuggest` border-top) with 32 px above and 20 px below separates them, against the 1 px rule and 12 px padding between cards; the last saved session and the last card lose their bottom rule so the divider is one line. Both empty states show under their heading: "No sessions yet..." and "No patterns to suggest right now." / the 35-day note (also for an empty ledger, which used to show nothing: RS02 changed on purpose; RS17's "1 px under the card" now holds for a card with another card after it). The "Save logged time as a session" fold-out is unchanged and has no heading or divider (RS29h). RS29 + 23 mutants (u1-u24), all killed; the tests cannot show that it LOOKS clear.
+- **Sparse categories (RS27, RS28):** thresholds and first-block candidates use the same set of known categories, so a log with no (or few) categories gets low thresholds only when there is nothing to apply them to; measured 0 suggestions in 90 generated logs (35/60/120 days; uncategorised, one, two categories). Regression guards, no code change.
+
+**Staging skipped; direct merge with backups (decided 2026-10-27, Sebastian).** Staging skipped (2026-10-27). The app is mostly for the owner. Mitigation: backup of the Drive file and an export from each device before the merge, one device first, hard reload on every device before first use, revert plan with the exact command. Remaining unverified: real Drive with real tombstones, a real phone, thresholds validated on one real log only, three candidate labels (Breakfast, Girlfriend, School) unlabelled, the old 13-minute silent run unexplained, the 250-day scan cap undecided, the two-tab overwrite limitation.
+- **Reasoning.** A staging site on the live host shares the live origin's storage, and any host with its own origin needs its own OAuth origin and a throwaway Google account to keep the real Drive file out of reach (the file is found by NAME under the `drive.file` scope, so the real account would open and overwrite it). That is real setup for an app with one main user. The merge itself, with a backup taken first, is the test.
+- **This narrows the standing rule** "touch or mobile layout is verified on a real device BEFORE merging" (same kind of narrowing as Export week, backlog 28). Unlike Export week, this change WRITES state and syncs, so it is not a precedent for the read-only reasoning. The risk is accepted by the owner; the backups and the revert are what make it recoverable.
+- **Old code against a file that has sessions (REASONED from `main`'s `app.js`, not run).** `main`'s two `driveWriteFile` calls (`connectDrive`, `runDriveSync`) PATCH the whole file with exactly five lists: categories, entries, verdicts, closeouts, dayHighlights. Any device still running pre-sessions code that syncs therefore replaces the file WITHOUT `sessions` (the session records, `defaultStart` inside them, and session tombstones). Its own local state keeps its unknown keys (`persist()` writes the whole state; the sync result is `Object.assign({}, localState, ...)`), and it ignores a `sessions` key on read. The new engine reads a missing `sessions` as `[]`, so the next new-code device re-pushes its local sessions (an absence is never a deletion, hard rule 7). Net: a session is not lost while any new-code device still holds it, but the file can lose it for a while, and a session DELETED on one device could briefly come back from another that still holds it live until the deleting device syncs its tombstone again. A tab left open on pre-merge code is the practical way this happens: it also rewrites its own local ledger without sessions created elsewhere.
+- **Rollback.** `git revert -m 1 <merge-sha>` on `main`, then push. It does not remove `sessions` already written to the Drive file or local storage; they stay as unknown keys, and old code drops them from the file on its next push (above).
 
 Feature creep is the known failure mode of this project.

@@ -42,6 +42,9 @@ button{cursor:pointer}
 .wordmark{font-size:clamp(26px,4.4vw,44px);font-weight:800;font-variation-settings:"wdth" 118;letter-spacing:-.02em;line-height:.9;text-transform:uppercase;margin:0;cursor:pointer}
 .wordmark span{display:block;font-size:.28em;font-weight:500;font-variation-settings:"wdth" 100;letter-spacing:.22em;color:var(--muted);margin-top:9px}
 .weeknav{display:flex;align-items:center;gap:8px;margin-left:auto}
+/* the four text buttons (This week, Close out last week, Review, Sessions): on a wide screen they are plain flex items of .weeknav,
+   one row; at phone widths (the 820 px mobile breakpoint, below) they become a second row of three equal buttons */
+.navbtns{display:contents}
 .weeknav input[type=date]{font-family:var(--mono);font-size:13px;padding:7px 9px;background:transparent;border:1px solid var(--rule);border-radius:0}
 .stepper{width:34px;height:34px;border:1px solid var(--ink);background:transparent;font-size:15px;line-height:1;display:grid;place-items:center}
 .stepper:hover{background:var(--ink);color:var(--paper)}
@@ -282,6 +285,65 @@ button{cursor:pointer}
 .repeat button{flex:1;border:1px solid var(--rule);background:transparent;padding:5px 0;font-family:var(--mono);font-size:10px;text-transform:uppercase}
 .repeat button[aria-pressed=true]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
 .sheet-actions{display:flex;gap:8px;margin-top:20px;align-items:center}
+.sheet h3{font-family:var(--mono);font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);margin:22px 0 10px;font-weight:600}
+/* the sheet reads as two labelled sections: Your sessions, then Patterns in your log, split by a 2 px ink rule and more space than between cards */
+.sheet .sess-sec-h{margin:0 0 10px}
+#sessMine{margin-top:20px}
+#sessList{margin-bottom:0}
+#sessList .sessrow:last-child{border-bottom:0}
+#sessSuggest{margin-top:32px;padding-top:20px;border-top:2px solid var(--ink)}
+#sessSuggest .sugg:last-child{border-bottom:0}
+/* a suggestion card is a plain block that stacks: title, one row per step, one meta line, the buttons. It was a flex row with
+   non-shrinking buttons, which left the text a ~120 px column. */
+.sugg{display:block;padding:12px 0;border-bottom:1px solid var(--rule);min-width:0}
+.sugg-title{display:block;font-size:14px;overflow-wrap:anywhere}
+.sugg-steps{display:grid;grid-template-columns:8px auto minmax(0,1fr) auto;column-gap:10px;margin-top:6px}
+/* the rows share the three columns of .sugg-steps (subgrid), so times, labels and durations line up from row to row */
+.sugg-step{display:grid;grid-column:1/-1;grid-template-columns:subgrid;align-items:baseline;padding:2px 0;font-size:12px}
+@supports not (grid-template-columns:subgrid){.sugg-step{grid-template-columns:8px auto minmax(0,1fr) auto;column-gap:10px}}
+/* a square dot in the step's category colour (grey: none / deleted); the category text stays, colour is never the only signal */
+.sugg-dot{display:block;width:8px;height:8px;align-self:center;border-radius:0}
+.sugg-time{display:flex;flex-direction:column;font-family:var(--mono);font-size:11px}
+.sugg-range{white-space:nowrap}
+.sugg-next{font-size:9px;color:var(--muted);white-space:nowrap}
+.sugg-label{min-width:0;overflow-wrap:anywhere}
+.sugg-cat{margin-left:6px;color:var(--muted);font-size:11px}
+.sugg-dur{font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap;text-align:right}
+.sugg-meta{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:6px;overflow-wrap:anywhere}
+.sugg-meta span{display:block}
+.sugg-cap{font-size:10px}
+.sugg-week{display:flex;margin-top:8px;border:1px solid var(--rule)}
+.sugg-day{flex:1 1 0;min-width:0;display:flex;flex-direction:column;align-items:center;padding:4px 0;border-left:1px solid var(--rule)}
+.sugg-day:first-child{border-left:0}
+.sugg-dl{font-family:var(--mono);font-size:10px;letter-spacing:.1em;color:var(--muted)}
+.sugg-dn{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--ink)}
+.sugg-day.zero .sugg-dn{font-weight:400;color:var(--none)}
+.sugg-btns{display:flex;gap:8px;margin-top:10px}
+.sugg-btns button{flex:1 1 0;min-width:0;min-height:44px;box-sizing:border-box;padding:8px 10px}
+/* "Save logged time as a session": one row that unfolds */
+#sessSaveBox{margin-top:18px}
+#sessSaveBox summary{display:flex;align-items:center;justify-content:space-between;min-height:44px;padding:0 12px;border:1px solid var(--rule);cursor:pointer;list-style:none;font-family:var(--mono);font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);font-weight:600}
+#sessSaveBox summary::-webkit-details-marker{display:none}
+#sessSaveBox summary::after{content:"+"}
+#sessSaveBox[open] summary::after{content:"\2212"}
+#sessSaveBox[open] summary{border-color:var(--ink);color:var(--ink)}
+#sessSaveBox summary+.field{margin-top:14px}
+.sess-banner{margin-top:16px;border:1px solid var(--ink)}
+.sessprompt{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;font-size:13px;font-weight:600}
+.sessprompt+.sessprompt{border-top:1px solid var(--rule)}
+.sessprompt-btns{display:flex;gap:6px}
+.daychks{display:flex;flex-wrap:wrap;gap:6px 12px}
+/* .field label is display:block + uppercase; the more specific rule wins (same lesson as .breaktoggle) */
+.field .daychk{display:inline-flex;align-items:center;gap:5px;font-size:13px;letter-spacing:0;text-transform:none;margin-bottom:0;cursor:pointer}
+.sessrow{display:block;padding:12px 0;border-bottom:1px solid var(--rule)}
+.sess-log{display:block;width:100%;min-height:44px;margin-top:8px;box-sizing:border-box}
+.sess-confirm,.sess-other,.sess-startedit{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px;font-family:var(--mono);font-size:11px}
+.sess-confirm span{flex:1 1 100%}
+.sess-confirm button,.sess-startedit button,.sess-other button{flex:1 1 0;min-height:44px}
+.sess-other label,.sess-startedit label{flex:1 1 100%;font-size:11px;color:var(--muted)}
+.sess-main{display:flex;flex-direction:column;min-width:0}
+.sess-main b{font-size:14px;overflow-wrap:anywhere}
+.sess-meta{font-family:var(--mono);font-size:11px;color:var(--muted)}
 .sheet-actions .solid{flex:1;padding:11px}
 .linkbtn{border:0;background:transparent;color:var(--flag);font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em}
 
@@ -319,14 +381,21 @@ button{cursor:pointer}
      so the hour labels and the slots they're meant to line up with can
      never drift apart again */
   :root{--row:30px}
+  /* masthead, phone widths: row 1 = previous / date / next; row 2 = This week, Review, Sessions as three EQUAL buttons, each at least
+     44 px tall. "Close out last week" (only some weeks) takes its own full-width row UNDER them, so the three never move. */
+  .weeknav{width:100%;margin-left:0;flex-wrap:wrap}
+  .weeknav input[type=date]{flex:1;min-width:0}
+  .navbtns{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;width:100%}
+  .navbtns .ghost{min-height:44px;padding:8px 4px;white-space:nowrap}
+  #closeoutBtn{grid-column:1/-1;order:4}
   .field input[type=text],.field select,.field input[type=time],.field input[type=date]{font-size:16px}
   button,a{-webkit-tap-highlight-color:rgba(22,33,27,.12)}
 }
 @media(max-width:700px){
   .wordmark{font-size:30px}
-  .weeknav{width:100%;margin-left:0;flex-wrap:wrap}
-  .weeknav input[type=date]{flex:1;min-width:0}
-  .tools .ghost{min-width:0}
+  /* was .tools .ghost{min-width:0} (from the single-file days): it let seven buttons shrink into ONE row, their words overlapping and
+     the page scrolling sideways at 360 px (seen in a screenshot 2026-10-25). Keeping the 118 px minimum lets them wrap, two to a row. */
+  .tools .ghost{min-height:44px}
   /* Real-phone bug (reported 2026-09-03): .trio's grid centering, confirmed
      correct on laptop and in headless Chrome at several widths, went wrong
      on a real iPhone specifically once the left item wrapped to 3 lines —
@@ -342,7 +411,25 @@ button{cursor:pointer}
   .colophon.trio{display:flex;justify-content:space-between}
 }
 @media print{
-  .weeknav,.tools,.hint,.emptyhint,.status,.panel-label button,.cat .sw,.cat .del,.verdict,.warn{display:none!important}
+  .weeknav,.tools,.sess-banner,.hint,.emptyhint,.status,.panel-label button,.cat .sw,.cat .del,.verdict,.warn{display:none!important}
   body{background:#fff}.wrap{padding:0}.cols{grid-template-columns:1fr 240px}.grid{min-width:0}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* per-step frequency, in a closed fold-out on each suggestion card */
+.sugg-more{margin-top:8px}
+.sugg-more summary{display:flex;align-items:center;justify-content:space-between;min-height:44px;cursor:pointer;list-style:none;font-family:var(--mono);font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.sugg-more summary::-webkit-details-marker{display:none}
+.sugg-more summary::after{content:"+"}
+.sugg-more[open] summary::after{content:"\2212"}
+.sugg-alltime{font-family:var(--mono);font-size:11px;color:var(--muted);padding:2px 0 6px;line-height:1.4}
+.sugg-freq{display:grid;grid-template-columns:8px minmax(0,1fr) auto;column-gap:10px;align-items:center;padding:2px 0;font-size:12px}
+/* saved session rows: same step list as a card, a rename-in-place name, small secondary controls under the Log button */
+.sess-name{display:flex;align-items:center;width:100%;min-height:44px;padding:0;border:0;background:none;font:inherit;font-weight:700;font-size:14px;text-align:left;cursor:text;overflow-wrap:anywhere}
+.sess-rename-in{display:block;width:100%;min-height:44px;box-sizing:border-box;padding:0 8px;border:1px solid var(--ink);border-radius:0;background:var(--paper);font:inherit;font-weight:700;font-size:14px}
+.sessrow>.sess-meta{display:block;margin-bottom:6px}
+.sess-small{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px}
+.sess-small .ghost{min-height:44px;flex:1 1 auto}
+.sess-del{display:inline-flex;align-items:center;justify-content:center;flex:0 0 44px;width:44px;height:44px;padding:0;border:0;background:transparent;color:var(--muted);cursor:pointer}
+.sess-del:hover{color:var(--flag)}
+.sess-del.armed{flex:0 0 auto;width:auto;min-width:88px;padding:0 12px;border:1px solid var(--flag);color:var(--flag);font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}
