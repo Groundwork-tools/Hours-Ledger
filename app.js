@@ -2990,16 +2990,61 @@ function findEntry(id){
     if(state.entries[k][i].id===id) return {date:k,e:state.entries[k][i]};
   return null;
 }
-function recentLabels(){
-  var seen={},out=[],keys=Object.keys(state.entries).sort().reverse();
-  for(var i=0;i<keys.length&&out.length<8;i++){
-    var list=state.entries[keys[i]];
-    for(var j=list.length-1;j>=0&&out.length<8;j--){
-      var l=list[j].label;
-      if(l&&!seen[l.toLowerCase()]){ seen[l.toLowerCase()]=1; out.push({label:l,cat:list[j].cat}); }
-    }
-  }
-  return out;
+/* Label presets for the entry sheet (replaces "recents"). Derived on every call from the entries, never stored.
+   entriesByDate is state.entries (date -> list), not a flat list, because a midnight-crossing activity is two
+   entries on two dates (putEntry: evening half ends 1440, the next date's half starts 0, same label and category,
+   no link between them) and has to be counted once. An evening half and a morning half are treated as one use when
+   they are on consecutive calendar dates, share the category and the normalized label, and total under 1440
+   minutes; each morning half pairs at most once. The use is dated by the evening half.
+   Labels are counted by normLabel() (trim, lower-case, whitespace collapsed); the shown text is the most common
+   original casing, trimmed (a casing tie goes to the most recently used one). Empty labels and the category's own
+   name are left out. Ranked by count, ties by most recent use; at most PRESET_MAX. No category (null/empty) = no presets: it is the default selection of a fresh sheet and the
+   uncategorised Break entries would dominate (design decision 2026-10-27). */
+var PRESET_MAX=5;
+function presetsForCategory(entriesByDate,catId,categoryName){
+  if(!catId) return [];
+  var want=catId,skip=normLabel(categoryName),dates=Object.keys(entriesByDate||{}).sort(),consumed={},tally={};
+  dates.forEach(function(d){
+    var list=entriesByDate[d]||[];
+    list.forEach(function(e,i){
+      if((e.cat||null)!==want) return;
+      if(consumed[d]&&consumed[d][i]) return;
+      var key=normLabel(e.label);
+      if(e.end===1440){
+        var nd=iso(addDays(parseIso(d),1)),next=entriesByDate[nd]||[];
+        for(var k=0;k<next.length;k++){
+          var b=next[k];
+          if(consumed[nd]&&consumed[nd][k]) continue;
+          if(b.start!==0||(b.cat||null)!==want||normLabel(b.label)!==key) continue;
+          if(1440+b.end-e.start>1439) continue;
+          (consumed[nd]=consumed[nd]||{})[k]=true;
+          break;
+        }
+      }
+    });
+  });
+  dates.forEach(function(d){
+    (entriesByDate[d]||[]).forEach(function(e,i){
+      if((e.cat||null)!==want||(consumed[d]&&consumed[d][i])) return;
+      var key=normLabel(e.label);
+      if(!key||key===skip) return;
+      var shown=String(e.label).trim(),when=d+" "+String(1e4+e.start),t=tally[key]||(tally[key]={n:0,last:"",forms:{}});
+      t.n++;
+      if(when>t.last) t.last=when;
+      var f=t.forms[shown]||(t.forms[shown]={n:0,last:""});
+      f.n++;
+      if(when>f.last) f.last=when;
+    });
+  });
+  return Object.keys(tally).map(function(k){
+    var t=tally[k],best=null;
+    Object.keys(t.forms).forEach(function(shown){
+      var f=t.forms[shown];
+      if(!best||f.n>best.n||(f.n===best.n&&f.last>best.last)) best={shown:shown,n:f.n,last:f.last};
+    });
+    return {label:best.shown,n:t.n,last:t.last};
+  }).sort(function(a,b){ return b.n-a.n||(a.last<b.last?1:a.last>b.last?-1:0); })
+    .slice(0,PRESET_MAX).map(function(x){ return x.label; });
 }
 
 function layout(list){
@@ -3551,6 +3596,16 @@ function paintChips(){
   document.getElementById("fChips").innerHTML=state.categories.map(function(c){
     return '<button class="chip" data-cat="'+c.id+'" aria-pressed="'+(c.id===chosenCat)+'"><i style="background:'+c.color+'"></i>'+escapeHtml(c.name)+"</button>";
   }).join("");
+  paintPresets();
+}
+/* the label presets always follow chosenCat: paintChips() is the one place the selection is drawn, so it calls this */
+function paintPresets(){
+  var el=document.getElementById("fPresets"),c=catById(chosenCat);
+  var list=presetsForCategory(state.entries,chosenCat,c?c.name:"");
+  el.innerHTML=list.map(function(l){
+    return '<button type="button" data-label="'+escapeHtml(l)+'" title="'+escapeHtml(l)+'">'+escapeHtml(l)+"</button>";
+  }).join("");
+  el.hidden=!list.length;
 }
 
 function openSheet(dayIdx,start,end,entryId){
@@ -3582,11 +3637,6 @@ function openSheet(dayIdx,start,end,entryId){
     return '<button data-d="'+i+'" aria-pressed="'+(i===dayIdx)+'">'+n+"</button>";
   }).join("");
   fDaySyncedIdx=dayIdx;
-
-  var rec=recentLabels();
-  document.getElementById("fRecent").innerHTML=entryId?"":rec.map(function(r){
-    return '<button data-label="'+escapeHtml(r.label)+'" data-cat="'+(r.cat||"")+'">'+escapeHtml(r.label)+"</button>";
-  }).join("");
 
   /* always reset to the top, not just on a fresh page load - nothing else
      in this function resets .sheet's own scroll position, and unlike every
@@ -3699,12 +3749,15 @@ document.getElementById("fChips").addEventListener("click",function(ev){
   }
 });
 
-document.getElementById("fRecent").addEventListener("click",function(ev){
+/* a preset only FILLS the label; it never logs and never changes the category (the chips follow the category, not the reverse) */
+document.getElementById("fPresets").addEventListener("click",function(ev){
   var b=ev.target.closest("button"); if(!b) return;
   fLabel.value=b.dataset.label;
   labelTouched=true;
-  chosenCat=b.dataset.cat||null;
-  paintChips();
+  /* the chip is inside the modal, so the page-level click-blur skips it, and the sheet's Enter-to-save ignores a BUTTON target:
+     left focused, Enter would just press the chip again instead of saving. Desktop: back to the label field (as openSheet does);
+     phone: let go of the chip without opening the keyboard. */
+  if(window.innerWidth>=820) fLabel.focus(); else b.blur();
 });
 
 document.getElementById("fRepeat").addEventListener("click",function(ev){
@@ -3971,6 +4024,21 @@ document.addEventListener("keydown",function(ev){
   var dayIdx=defaultAddDay();
   var times=defaultEntryTimes(iso(weekDates()[dayIdx]));
   openSheet(dayIdx,times.start,times.end,null);
+});
+
+/* Focus after a pointer click. A mouse/touch click on a <button> gives it keyboard focus (Chrome, Firefox), and it
+   keeps it. The Enter handler above deliberately ignores a keypress whose target is a BUTTON (so a button you reached
+   with Tab can be activated with Enter), which means that after clicking "next week" an Enter does what the focused
+   button does - another week - instead of opening a new entry. Fixed here once, for every page-level button, rather
+   than per button: when a click came from a pointer (event.detail > 0; a click made by Enter or Space on a focused
+   button has detail 0) and the button is still the focused element afterwards, blur it. Skipped inside the modals
+   (.scrim): there Enter on a focused toggle is part of using the dialog, and the dialogs close or move focus themselves.
+   Keyboard use is untouched: Tab still lands on buttons and Enter/Space still activate them. */
+document.addEventListener("click",function(ev){
+  if(!ev.detail) return;
+  var b=ev.target.closest&&ev.target.closest("button");
+  if(!b||b.closest(".scrim")) return;
+  if(document.activeElement===b) b.blur();
 });
 
 /* ---------------- grid interaction ---------------- */
@@ -5455,6 +5523,7 @@ document.getElementById("sessSaveGo").addEventListener("click",function(){
 if(TEST_MODE){
   window.__HL_TEST__={
     putEntry:putEntry,
+    presetsForCategory:presetsForCategory,
     putEntryWithBreaks:putEntryWithBreaks,
     entriesFor:entriesFor,
     findEntry:findEntry,
