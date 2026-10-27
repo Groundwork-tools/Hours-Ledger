@@ -3008,11 +3008,13 @@ function findEntry(id){
    whose evening half is outside the window is not counted as a use of its own).
    Labels are counted by normLabel() (trim, lower-case, whitespace collapsed); the shown text is the most common
    original casing, trimmed (a casing tie goes to the most recently used one). Empty labels and the category's own
-   name are left out. Ranked by in-window count, ties by most recent use. Always up to PRESET_BASE chips; positions
-   PRESET_BASE+1..PRESET_HARD_MAX only when the label has PRESET_EXTRA_MIN or more in-window uses. No category
+   name are left out. Ranked by in-window count, ties by most recent use. A label needs PRESET_MIN (2) or more in-window
+   uses to be shown at all (a count-1 chip is the old "recents" feature; a thin category shows nothing rather than
+   noise). Up to PRESET_BASE chips on that rule; positions PRESET_BASE+1..PRESET_HARD_MAX only when the label has
+   PRESET_EXTRA_MIN (3) or more in-window uses (decided 2026-10-27, changes "always up to 5"). No category
    (null/empty) = no presets: it is the default selection of a fresh sheet and the uncategorised Break entries would
    dominate (design decision 2026-10-27). */
-var PRESET_WINDOW_WEEKS=8, PRESET_BASE=5, PRESET_EXTRA_MIN=3, PRESET_HARD_MAX=8;
+var PRESET_WINDOW_WEEKS=8, PRESET_MIN=2, PRESET_BASE=5, PRESET_EXTRA_MIN=3, PRESET_HARD_MAX=8;
 function presetsForCategory(entriesByDate,catId,categoryName,today,windowWeeks){
   if(!catId||!isIsoDate(today)) return [];
   var weeks=windowWeeks>0?windowWeeks:PRESET_WINDOW_WEEKS,first=iso(addDays(parseIso(today),-(weeks*7-1)));
@@ -3058,7 +3060,7 @@ function presetsForCategory(entriesByDate,catId,categoryName,today,windowWeeks){
     });
     return {label:best.shown,n:t.n,last:t.last};
   }).sort(function(a,b){ return b.n-a.n||(a.last<b.last?1:a.last>b.last?-1:0); })
-    .filter(function(x,i){ return i<PRESET_BASE||x.n>=PRESET_EXTRA_MIN; })   /* sorted by count: the first failing one ends the extras */
+    .filter(function(x,i){ return x.n>=PRESET_MIN&&(i<PRESET_BASE||x.n>=PRESET_EXTRA_MIN); })   /* sorted by count: the first failing one ends the list */
     .slice(0,PRESET_HARD_MAX).map(function(x){ return x.label; });
 }
 
