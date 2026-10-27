@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1720;
+var EXPECTED_MIN_ROWS=1768;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -3021,6 +3021,8 @@ function runAsyncTests(H,d){
     .then(function(r){ return runMidnightFoldTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runPackageTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runLogTodayTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runPresetTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runUndoKeyInFieldTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runAssetVersionTests().then(function(more){ return r.concat(more); }); });
 }
 
@@ -6805,6 +6807,168 @@ function runMidnightFoldTests(){
       });
     }))
     .then(function(){ return results; });
+}
+
+/* ---------------------------------------------------------------------
+   Per-category label presets (replaces "recents" in the entry sheet). Written BEFORE the code.
+   presetsForCategory(entriesByDate, catId, categoryName) -> array of label strings, at most 5, for the chips under
+   the Activity field. Source: every entry of that category, all time. Rank: times used, descending; ties by most
+   recently used. Labels are compared trimmed, case-insensitive, whitespace-collapsed; the display text is the most
+   common original casing (trimmed). Empty labels and a label equal to the category name are left out. One activity
+   that crossed midnight is stored as two entries (evening half ends 1440, next date's morning half starts 0, same
+   label and category) and counts ONCE. catId null = NO presets (design decision 2026-10-27). Pure: the input is never changed.
+   Rows are tagged PS-xx. */
+function runPresetTests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  function J(x){ return JSON.stringify(x); }
+  var uidN=0;
+  function E(cat,start,end,label){ return {id:"p"+(uidN++),label:label,cat:cat,start:start,end:end}; }
+  /* spec: list of [date, cat, label] -> a date-keyed map of ordinary one-hour entries */
+  function build(spec){
+    var m={};
+    spec.forEach(function(s,i){ (m[s[0]]=m[s[0]]||[]).push(E(s[1],600+(i%5)*60,660+(i%5)*60,s[2])); });
+    return m;
+  }
+  function day(n){ return "2026-03-"+(n<10?"0":"")+n; }
+  return freshSandbox(true).then(function(f){
+    var h=f.H;
+    function run(m,cat,name){ return h.presetsForCategory(m,cat,name); }
+
+    var m1=build([[day(1),"W","Lecture"],[day(2),"W","Lecture"],[day(3),"W","Lecture"],[day(4),"W","Email"],[day(5),"W","Email"],[day(6),"W","Reading"]]);
+    check("PS-01 ranked by times used, most first",J(run(m1,"W","Work"))===J(["Lecture","Email","Reading"]),J(run(m1,"W","Work")));
+
+    var m2=build([[day(1),"W","lecture"],[day(2),"W","  LECTURE  "],[day(3),"W","Lecture"],[day(4),"W","Lecture"],[day(5),"W","Email"],[day(6),"W","Email"],[day(7),"W","Email"]]);
+    var r2=run(m2,"W","Work");
+    check("PS-02 case and surrounding whitespace are one label (4 uses beats Email's 3), shown in the most common casing",J(r2)===J(["Lecture","Email"]),J(r2));
+    var m2b=build([[day(1),"W","Deep   work"],[day(2),"W","deep work"]]);
+    check("PS-02 runs of inner whitespace collapse for counting",run(m2b,"W","Work").length===1,J(run(m2b,"W","Work")));
+
+    var m3=build([[day(1),"W","Alpha"],[day(2),"W","Beta"],[day(9),"W","Gamma"],[day(3),"W","Alpha"],[day(4),"W","Beta"],[day(8),"W","Gamma"]]);
+    check("PS-03 equal counts: the most recently used first (Gamma 9th, Beta 4th, Alpha 3rd)",J(run(m3,"W","Work"))===J(["Gamma","Beta","Alpha"]),J(run(m3,"W","Work")));
+    var m3b=build([[day(1),"W","Old"],[day(2),"W","Old"],[day(5),"W","New"]]);
+    check("PS-03 a higher count beats recency",J(run(m3b,"W","Work"))===J(["Old","New"]),J(run(m3b,"W","Work")));
+
+    var sp=[];["a","b","c","d","e","f","g"].forEach(function(l,i){ sp.push([day(i+1),"W","L-"+l]); });
+    check("PS-04 capped at 5 (7 distinct labels)",run(build(sp),"W","Work").length===5,J(run(build(sp),"W","Work")));
+    var sp2=sp.concat([[day(20),"W","L-g"],[day(21),"W","L-g"]]);
+    check("PS-04 the cap keeps the top 5 by rank (L-g, used 3 times, makes it and is first)",run(build(sp2),"W","Work").indexOf("L-g")===0,J(run(build(sp2),"W","Work")));
+
+    var m5=build([[day(1),"W","Work"],[day(2),"W","  work "],[day(3),"W","WORK"],[day(4),"W","Email"]]);
+    check("PS-05 a label equal to the category name (any case/spacing) is left out",J(run(m5,"W","Work"))===J(["Email"]),J(run(m5,"W","Work")));
+
+    var m6=build([[day(1),"W",""],[day(2),"W","   "],[day(3),"W",undefined],[day(4),"W",null],[day(5),"W","Email"]]);
+    check("PS-06 empty, whitespace-only, undefined and null labels are ignored",J(run(m6,"W","Work"))===J(["Email"]),J(run(m6,"W","Work")));
+
+    /* DESIGN DECISION (2026-10-27): uncategorised shows NO presets. It is the default selection on a fresh sheet, so chips
+       would appear every time, and the Break entries (uncategorised) would dominate them. */
+    var m7=build([[day(1),null,"Walk"],[day(2),null,"Walk"],[day(3),"W","Email"],[day(4),null,"Nap"],[day(5),null,"Break"],[day(6),null,"Break"],[day(7),null,"Break"]]);
+    check("PS-07 uncategorised (null) gives NO presets, even with plenty of uncategorised entries",J(run(m7,null,""))==="[]",J(run(m7,null,"")));
+    check("PS-07 ...also for undefined and empty-string category ids",J(run(m7,undefined,""))==="[]"&&J(run(m7,"","")) === "[]",J(run(m7,undefined,"")));
+    check("PS-07 a categorised group still does not include uncategorised entries",J(run(m7,"W","Work"))===J(["Email"]),J(run(m7,"W","Work")));
+
+    var m8=build([[day(1),"A","Alpha"],[day(2),"B","Beta"],[day(3),"B","Beta"]]);
+    check("PS-08 only the selected category's entries count",J(run(m8,"A","A-name"))===J(["Alpha"]),J(run(m8,"A","A-name")));
+
+    /* midnight: a night logged twice is 4 stored halves but 2 uses */
+    var m9b=build([[day(10),"S","Reading"],[day(11),"S","Reading"],[day(12),"S","Reading"]]);
+    m9b[day(1)]=[E("S",1320,1440,"Sleep")]; m9b[day(2)]=[E("S",0,405,"Sleep")]; m9b[day(3)]=[E("S",1380,1440,"Sleep")]; m9b[day(4)]=[E("S",0,420,"SLEEP")];
+    check("PS-09 ranking uses the folded count: 3 Reading beats 2 nights of Sleep (a naive count says Sleep 4)",J(run(m9b,"S","Rest"))===J(["Reading","Sleep"]),J(run(m9b,"S","Rest")));
+    var m9a={}; m9a[day(1)]=[E("S",1320,1440,"Sleep"),E("S",600,660,"Reading")]; m9a[day(2)]=[E("S",0,405,"Sleep")]; m9a[day(5)]=[E("S",600,660,"Reading")];
+    check("PS-09 one split night (2 stored halves) = ONE use, so it ranks below Reading's 2",J(run(m9a,"S","Rest"))===J(["Reading","Sleep"]),J(run(m9a,"S","Rest")));
+    var m2c=build([[day(1),"W","lecture"],[day(2),"W","Lecture"],[day(3),"W","lecture"]]);
+    check("PS-02 casing: the most common original casing is shown ('lecture' 2 vs 'Lecture' 1)",J(run(m2c,"W","Work"))===J(["lecture"]),J(run(m2c,"W","Work")));
+    var m9c={}; m9c[day(1)]=[E("S",1320,1440,"Sleep")]; m9c[day(2)]=[E("S",0,405,"Nap")];
+    check("PS-09 halves with DIFFERENT labels are two activities, one use each",run(m9c,"S","Rest").length===2,J(run(m9c,"S","Rest")));
+    var m9d={}; m9d["2026-02-28"]=[E("S",1320,1440,"Sleep")]; m9d["2026-03-01"]=[E("S",0,405,"Sleep")]; m9d["2026-03-10"]=[E("S",600,660,"Nap")];
+    check("PS-09 a pair across a month end still folds (Sleep 1 use ties Nap 1; Nap is newer)",J(run(m9d,"S","Rest"))===J(["Nap","Sleep"]),J(run(m9d,"S","Rest")));
+    var m9g={}; m9g[day(1)]=[E("S",1320,1440,"Sleep")]; m9g[day(2)]=[E("S",0,405,"Sleep")];
+    check("PS-09 the folded pair is exactly one preset",J(run(m9g,"S","Rest"))===J(["Sleep"]),J(run(m9g,"S","Rest")));
+
+    check("PS-10 a category with no qualifying entries gives an empty list",J(run(build([[day(1),"W","Work"],[day(2),"W",""]]),"W","Work"))==="[]");
+    check("PS-10 an unknown category and an empty ledger give an empty list",J(run(m1,"nope","X"))==="[]"&&J(run({},"W","Work"))==="[]"&&J(run(undefined,"W","Work"))==="[]");
+
+    var before=J(m1); run(m1,"W","Work");
+    check("PS-11 the input entries are not changed",J(m1)===before);
+    check("PS-12 returns plain strings",run(m1,"W","Work").every(function(x){ return typeof x==="string"; }));
+  }).catch(function(e){
+    check("PS scenario threw before finishing",false,String(e&&e.message||e));
+  }).then(function(){ return results; });
+}
+
+/* Ctrl/Cmd+Z (and redo) inside a text field. The app's global shortcut must NOT run while the event target is an input,
+   textarea or contenteditable element: it would block the browser's own text undo (preventDefault) and roll back a real
+   entry while the person is typing a label. Everywhere else it works as before. Rows are tagged UK-xx.
+   What this proves: the handler's decision for an event whose TARGET is a field. It dispatches real KeyboardEvents
+   from elements in the sandbox document, so it does not need real focus (the iframe cannot hold any). It does not
+   prove what a browser's native text undo then does with the keypress; that is the browser's, checked by hand. */
+function runUndoKeyInFieldTests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  var D="2026-03-04";
+  return freshSandbox(true).then(function(f){
+    var h=f.H,d=f.d,w=f.el.contentWindow;
+    function fire(target,opts){
+      var ev=new w.KeyboardEvent("keydown",{key:opts.key||"z",ctrlKey:!!opts.ctrl,metaKey:!!opts.meta,shiftKey:!!opts.shift,bubbles:true,cancelable:true});
+      target.dispatchEvent(ev);
+      return ev;
+    }
+    function mk(tag,attrs){
+      var el=d.createElement(tag); Object.keys(attrs||{}).forEach(function(k){ el.setAttribute(k,attrs[k]); });
+      d.body.appendChild(el); return el;
+    }
+    function fresh(){                       /* one real entry with a snapshot under it: one undo step available */
+      h.snapshot("add entry"); h.putEntry(D,"Typed in a field",null,540,600,null);
+    }
+    function has(){ return h.entriesFor(D).some(function(e){ return e.label==="Typed in a field"; }); }
+    function reset(){ var s=h.getState(); s.entries={}; }
+
+    var field={
+      "input[type=text]":mk("input",{type:"text"}),
+      "input (no type)":mk("input",{}),
+      "textarea":mk("textarea",{}),
+      "contenteditable div":mk("div",{contenteditable:"true"})
+    };
+    Object.keys(field).forEach(function(name){
+      [["ctrl",{ctrl:true}],["meta",{meta:true}]].forEach(function(m){
+        reset(); fresh();
+        var ev=fire(field[name],m[1]);
+        check("UK-01 "+m[0]+"+Z inside "+name+": the entry is NOT undone",has(),"present="+has());
+        check("UK-01 "+m[0]+"+Z inside "+name+": the keypress is left to the browser (not preventDefault-ed)",ev.defaultPrevented===false,"defaultPrevented="+ev.defaultPrevented);
+      });
+    });
+    /* a field the person is typing in, below the real label input */
+    reset(); fresh();
+    var lab=d.getElementById("fLabel"), evL=fire(lab,{ctrl:true});
+    check("UK-02 Ctrl+Z in the entry sheet's own label field does not undo and is not prevented",has()&&evL.defaultPrevented===false,"present="+has()+" prevented="+evL.defaultPrevented);
+
+    /* redo shortcuts are the same hijack, in both spellings */
+    reset(); fresh(); h.undo();
+    check("UK-03 precondition: a real undo from the body removed the entry",!has());
+    var evY=fire(field["input[type=text]"],{key:"y",ctrl:true}), evSZ=fire(field["textarea"],{key:"z",ctrl:true,shift:true});
+    check("UK-03 Ctrl+Y and Ctrl+Shift+Z inside a field do not redo",!has(),"present="+has());
+    check("UK-03 ...and are not prevented",evY.defaultPrevented===false&&evSZ.defaultPrevented===false,"Y="+evY.defaultPrevented+" ShiftZ="+evSZ.defaultPrevented);
+
+    /* controls: everywhere else it works exactly as before */
+    reset(); fresh();
+    var evB=fire(d.body,{ctrl:true});
+    check("UK-04 control: Ctrl+Z on the page body still undoes",!has(),"present="+has());
+    check("UK-04 control: ...and is prevented",evB.defaultPrevented===true);
+    var evR=fire(d.body,{key:"y",ctrl:true});
+    check("UK-04 control: Ctrl+Y on the page body still redoes",has()&&evR.defaultPrevented===true,"present="+has());
+    reset(); fresh();
+    var btn=mk("button",{type:"button"}); var evBt=fire(btn,{meta:true});
+    check("UK-04 control: Cmd+Z with a BUTTON as target still undoes",!has()&&evBt.defaultPrevented===true,"present="+has());
+    reset(); fresh();
+    var ced=mk("div",{contenteditable:"false"}); fire(ced,{ctrl:true});
+    check("UK-05 control: contenteditable=false is not editable: Ctrl+Z still undoes",!has(),"present="+has());
+  }).catch(function(e){
+    check("UK scenario threw before finishing",false,String(e&&e.message||e));
+  }).then(function(){ return results; });
 }
 
 /* ---------------------------------------------------------------------
