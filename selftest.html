@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1768;
+var EXPECTED_MIN_ROWS=1786;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -6835,7 +6835,8 @@ function runPresetTests(){
   function day(n){ return "2026-03-"+(n<10?"0":"")+n; }
   return freshSandbox(true).then(function(f){
     var h=f.H;
-    function run(m,cat,name){ return h.presetsForCategory(m,cat,name); }
+    var TODAY="2026-03-31";             /* the old fixtures are all in March; the 8-week window ending here covers them */
+    function run(m,cat,name,today,weeks){ return h.presetsForCategory(m,cat,name,today===undefined?TODAY:today,weeks===undefined?8:weeks); }
 
     var m1=build([[day(1),"W","Lecture"],[day(2),"W","Lecture"],[day(3),"W","Lecture"],[day(4),"W","Email"],[day(5),"W","Email"],[day(6),"W","Reading"]]);
     check("PS-01 ranked by times used, most first",J(run(m1,"W","Work"))===J(["Lecture","Email","Reading"]),J(run(m1,"W","Work")));
@@ -6893,6 +6894,58 @@ function runPresetTests(){
     var before=J(m1); run(m1,"W","Work");
     check("PS-11 the input entries are not changed",J(m1)===before);
     check("PS-12 returns plain strings",run(m1,"W","Work").every(function(x){ return typeof x==="string"; }));
+
+    /* ---- recency window (decided 2026-10-27, reverses the all-time ranking). presetsForCategory(entries, catId,
+       name, today, windowWeeks): only entries dated in [today-(windowWeeks*7-1), today] count (windowWeeks*7 days,
+       today included); a midnight pair is dated by its evening (start) day; slots 6-8 need 3+ uses in the window;
+       hard maximum 8; no filling from all-time; the function never reads the clock. ---- */
+    var T2="2026-06-30";                    /* window of 8 weeks = 2026-05-06 .. 2026-06-30 (56 days) */
+    function dJ(n){ return "2026-06-"+(n<10?"0":"")+n; }
+    check("PR-00 precondition: 8 weeks ending 2026-06-30 start on 2026-05-06 (so 2026-05-05 is one day outside)",h.iso(h.addDays(new Date(2026,5,30),-55))==="2026-05-06");
+    var mB2=build([["2026-05-06","W","Edge"]]), mB3=build([["2026-05-05","W","Before"]]);
+    check("PR-01 first day alone -> shown; day before alone -> nothing",J(run(mB2,"W","Work",T2))===J(["Edge"])&&J(run(mB3,"W","Work",T2))==="[]",J(run(mB2,"W","Work",T2))+" / "+J(run(mB3,"W","Work",T2)));
+    var mT=build([[T2,"W","Today"],["2026-07-01","W","Tomorrow"]]);
+    check("PR-01 today counts; the day after today does not",J(run(mT,"W","Work",T2))===J(["Today"]),J(run(mT,"W","Work",T2)));
+
+    var spOld=[]; for(var i1=0;i1<10;i1++) spOld.push(["2026-03-"+(i1<9?"0":"")+(i1+1),"W","Stale"]);
+    spOld.push([dJ(3),"W","Fresh"]);
+    check("PR-02 a stale label with a high all-time count (10 uses in March) drops out",J(run(build(spOld),"W","Work",T2))===J(["Fresh"]),J(run(build(spOld),"W","Work",T2)));
+
+    var spR=[]; for(var i2=0;i2<8;i2++) spR.push(["2026-03-"+(i2<9?"0":"")+(i2+1),"W","Veteran"]);
+    spR.push(["2026-05-10","W","Veteran"],["2026-05-11","W","Veteran"],[dJ(20),"W","Newcomer"],[dJ(21),"W","Newcomer"],[dJ(22),"W","Newcomer"]);
+    check("PR-03 a recently used label (3 in the window) outranks an older one with more total uses (10 total, 2 in the window)",J(run(build(spR),"W","Work",T2))===J(["Newcomer","Veteran"]),J(run(build(spR),"W","Work",T2)));
+
+    function many(counts){            /* counts: {label:n} -> a map with n in-window uses of each, spread over June */
+      var spec=[],k=0; Object.keys(counts).forEach(function(l){ for(var j=0;j<counts[l];j++){ spec.push([dJ(1+(k%28)),"W",l]); k++; } });
+      return build(spec);
+    }
+    var five={A:4,B:4,C:4,D:4,E:4};
+    var with3=Object.assign({},five,{F:3}), with2=Object.assign({},five,{F:2});
+    check("PR-04 a label with exactly 3 in-window uses earns slot 6",run(many(with3),"W","Work",T2).length===6&&run(many(with3),"W","Work",T2).indexOf("F")===5,J(run(many(with3),"W","Work",T2)));
+    check("PR-04 a label with 2 in-window uses does not (slot 6 stays empty)",run(many(with2),"W","Work",T2).length===5&&run(many(with2),"W","Work",T2).indexOf("F")<0,J(run(many(with2),"W","Work",T2)));
+    var ten={}; "ABCDEFGHIJ".split("").forEach(function(l){ ten[l]=3; });
+    check("PR-05 hard cap of 8 (ten labels with 3 uses each)",run(many(ten),"W","Work",T2).length===8,String(run(many(ten),"W","Work",T2).length));
+    var low={A:1,B:1,C:1,D:1,E:1,F:1,G:1};
+    check("PR-05 with only 1-use labels it stays at 5 (the extra slots need 3+)",run(many(low),"W","Work",T2).length===5,String(run(many(low),"W","Work",T2).length));
+    check("PR-06 an empty window gives no chips (entries exist, all older than the window)",J(run(build([["2026-03-02","W","Old"],["2026-04-01","W","Older"]]),"W","Work",T2))==="[]");
+
+    /* midnight pair across the window edge: dated by its start (evening) day */
+    var sA={}; sA["2026-05-05"]=[E("S",1320,1440,"Sleep")]; sA["2026-05-06"]=[E("S",0,405,"Sleep"),E("S",600,660,"Other")];
+    check("PR-07 a pair whose evening half is the day BEFORE the window is dated outside it: its morning half on the first day is not counted as a use",J(run(sA,"S","Rest",T2))===J(["Other"]),J(run(sA,"S","Rest",T2)));
+    var sB={}; sB["2026-06-29"]=[E("S",1320,1440,"Sleep")]; sB["2026-06-30"]=[E("S",0,405,"Sleep")]; sB["2026-06-01"]=[E("S",600,660,"X")]; sB["2026-06-02"]=[E("S",600,660,"X")];
+    check("PR-07 a pair inside the window counts ONCE (Sleep 1 < X 2, so X first)",J(run(sB,"S","Rest",T2))===J(["X","Sleep"]),J(run(sB,"S","Rest",T2)));
+    var sC={}; sC[T2]=[E("S",1320,1440,"Sleep")]; sC["2026-07-01"]=[E("S",0,405,"Sleep")]; sC["2026-06-01"]=[E("S",600,660,"X")]; sC["2026-06-02"]=[E("S",600,660,"X")];
+    check("PR-07 a pair starting on today whose morning half is tomorrow counts once, by its start day",J(run(sC,"S","Rest",T2))===J(["X","Sleep"]),J(run(sC,"S","Rest",T2)));
+    var sD={}; sD["2026-05-06"]=[E("S",1320,1440,"Sleep")]; sD["2026-05-07"]=[E("S",0,405,"Sleep")];
+    check("PR-07 a pair starting on the first day counts (once)",J(run(sD,"S","Rest",T2))===J(["Sleep"]),J(run(sD,"S","Rest",T2)));
+
+    /* today is a parameter, not the clock */
+    var mP=many({Tracked:3});
+    check("PR-08 same data, today moved 90 days on: nothing in the window any more",J(run(mP,"W","Work",T2))===J(["Tracked"])&&J(run(mP,"W","Work","2026-09-28"))==="[]",J(run(mP,"W","Work",T2))+" / "+J(run(mP,"W","Work","2026-09-28")));
+    var mQ=build([["2026-06-05","W","Early"],["2026-06-25","W","Late"]]);
+    check("PR-08 entries after 'today' are ignored (today = 2026-06-10 -> only Early)",J(run(mQ,"W","Work","2026-06-10"))===J(["Early"]),J(run(mQ,"W","Work","2026-06-10")));
+    check("PR-08 windowWeeks is a parameter: 1 week ending 2026-06-30 drops an entry from 2026-06-20",J(run(build([["2026-06-20","W","Old1"],["2026-06-29","W","New1"]]),"W","Work",T2,1))===J(["New1"]),J(run(build([["2026-06-20","W","Old1"],["2026-06-29","W","New1"]]),"W","Work",T2,1)));
+    check("PR-08 no 'today' given -> no chips (the function never falls back to the clock)",J(h.presetsForCategory(many({Tracked:3}),"W","Work"))==="[]"&&J(h.presetsForCategory(many({Tracked:3}),"W","Work","not a date",8))==="[]");
   }).catch(function(e){
     check("PS scenario threw before finishing",false,String(e&&e.message||e));
   }).then(function(){ return results; });
