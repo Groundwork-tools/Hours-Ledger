@@ -258,6 +258,19 @@ mutation on separate ports and run them in parallel.
 Push to `main`. GitHub Pages redeploys automatically, usually within a minute or
 two, and caches for up to ten. There is nothing else to run.
 
+**Release version (`HL_ASSET_VERSION`, added 2026-10-27).** `index.html` carries one release
+string, currently `sessions1`, in two places that must be equal: the `var HL_ASSET_VERSION`
+in the bootstrap script at the bottom (it builds `app.js?v=<version>&t=<Date.now()>`) and
+the `styles.css?v=<version>` link in `<head>`. **On every release that changes `styles.css`
+or `app.js`, bump both** (e.g. `sessions2`, or a date such as `2026-11-03a`), in the same
+commit; `selftest.html`'s AV tests fail if they differ or if either is missing. Why: the
+stylesheet has no per-load bust, so a device could run new markup with an old stylesheet;
+the version in the URL makes the browser fetch it fresh. It only helps if bumped, which is
+the "remember to do this" weakness backlog 16.11 rejected for `app.js` - that is why
+`app.js` keeps its `Date.now()` and only `styles.css` depends on the bump. GitHub Pages
+already revalidates after at most ten minutes, so a forgotten bump costs up to ten minutes
+of a stale stylesheet, not permanence.
+
 ## What's live and verified
 
 A running note of what's actually been confirmed working, and how — useful

@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1713;
+var EXPECTED_MIN_ROWS=1720;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -3020,7 +3020,8 @@ function runAsyncTests(H,d){
     .then(function(r){ return runNoiseFilterTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runMidnightFoldTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runPackageTests().then(function(more){ return r.concat(more); }); })
-    .then(function(r){ return runLogTodayTests().then(function(more){ return r.concat(more); }); });
+    .then(function(r){ return runLogTodayTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runAssetVersionTests().then(function(more){ return r.concat(more); }); });
 }
 
 /* ---------------------------------------------------------------------
@@ -4748,6 +4749,43 @@ function runSessionScheduleTests(){
    the old detector no longer exists (the cluster / ranking / threshold behaviour is pinned by R1-R3 instead); what still
    applies (cap of 3, dismissal, accept, UI, no network, privacy line) is re-written here for packages as RS03-RS11.
    All fixtures are GENERATED here (seeded PRNG); nothing comes from a real export. Rows are tagged RS00... */
+/* ---------------------------------------------------------------------
+   Asset version (2026-10-27). index.html names ONE constant, HL_ASSET_VERSION, and
+   both loads carry it: styles.css?v=<version> and app.js?v=<version>&t=<Date.now()>.
+   The &t= part is backlog 16.11's per-load bust and stays; the version is what makes a
+   release visible in the URL and re-fetches the stylesheet (which has no per-load bust).
+   Reads index.html and CLAUDE.md as TEXT: this proves the wiring, not what a browser
+   caches. */
+function runAssetVersionTests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  return fetch("index.html?v="+Date.now()).then(function(r){ return r.text(); }).then(function(html){
+    var decl=html.match(/var\s+HL_ASSET_VERSION\s*=\s*"([^"]+)"/g)||[];
+    var m=html.match(/var\s+HL_ASSET_VERSION\s*=\s*"([^"]+)"/);
+    var ver=m?m[1]:null;
+    check("AV01 index.html declares HL_ASSET_VERSION exactly once, non-empty",decl.length===1&&!!ver,decl.length+" declaration(s), value "+ver);
+    var css=html.match(/<link[^>]*rel="stylesheet"[^>]*href="(styles\.css[^"]*)"/);
+    check("AV02 the styles.css link carries ?v= equal to the constant",!!css&&!!ver&&css[1]==="styles.css?v="+ver,css&&css[1]);
+    var boot=html.match(/s\.src\s*=\s*([^;\n]+);/);
+    check("AV03 the app.js bootstrap builds its URL from the constant",!!boot&&/app\.js\?v=/.test(boot[1])&&/\+\s*HL_ASSET_VERSION\b/.test(boot[1]),boot&&boot[1]);
+    check("AV04 the app.js bootstrap still adds the per-load Date.now() bust (backlog 16.11)",!!boot&&/Date\.now\(\)/.test(boot[1]),boot&&boot[1]);
+    var bare=html.replace(/<!--[\s\S]*?-->/g,"").replace(/\/\*[\s\S]*?\*\//g,"");
+    var plain=bare.match(/["']\s*(?:styles\.css|app\.js)\s*["']/g)||[];
+    check("AV05 no unversioned reference to styles.css or app.js is left in index.html",plain.length===0,plain.join(" | "));
+    return fetch("styles.css?v="+(ver||"none")).then(function(r){ return r.text().then(function(t){
+      check("AV06 the versioned stylesheet URL is served and is the real stylesheet",r.ok&&/\.sess-sec-h/.test(t),r.status);
+    }); });
+  }).then(function(){
+    return fetch("CLAUDE.md?v="+Date.now()).then(function(r){ return r.text(); }).then(function(t){
+      check("AV07 CLAUDE.md says how to bump HL_ASSET_VERSION on the next release",/HL_ASSET_VERSION/.test(t)&&/bump/i.test(t.slice(t.indexOf("HL_ASSET_VERSION")-400,t.indexOf("HL_ASSET_VERSION")+800)));
+    });
+  }).catch(function(e){
+    check("AV00 asset-version block threw before finishing",false,String(e&&e.message||e));
+  }).then(function(){ return results; });
+}
+
 function runSuggestionTests(){
   var results=[];
   isolateSandboxes=true;
