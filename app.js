@@ -1749,6 +1749,7 @@ function syncEngine(localStateIn,remoteFile,deviceId){
    the local store is unusable, and a remote must not degrade with the device
    (quota-full tests, selftest-quota-frame.html, exempt this one key). */
 var FAKE_DRIVE_KEY="hours-ledger-fakedrive-TESTMODE";
+var TEST_MODE_DRIVE_FAULT=null; /* null | "network" | an HTTP status number; read only inside driveWriteFile's TEST_MODE branch */
 function fakeDriveRead(){
   if(!TEST_MODE) throw new Error("fakeDriveRead is TEST_MODE only");
   try{ return JSON.parse(localStorage.getItem(FAKE_DRIVE_KEY)); }catch(e){ return null; }
@@ -1988,6 +1989,17 @@ function handleTokenSuccess(settle,token,expiresInSec){
     runDriveSync(false);
   }
 }
+function needsReconnectError(){
+  var e=new Error("Drive needs you to reconnect");
+  e.needsReconnect=true;
+  return e;
+}
+/* TEST_MODE only. Off (the default): getAccessToken returns a fake token without reading the cache, as it always has. On: it
+   reads the real token cache and refuses a non-interactive call with no valid token, exactly as production does below, so the
+   expired-token branch can be tested. Structural limit: with the switch on, the TEST_MODE branch still returns in every case
+   (cached token, refusal, or the fake token for an interactive tap) BEFORE reaching loadGisScript or google.accounts, so it
+   cannot open a sign-in or reach googleapis.com. */
+var TEST_MODE_REAL_TOKEN_CACHE=false;
 function getAccessToken(cb,interactive){
   console.log("[drive] getAccessToken called: interactive="+interactive+" TEST_MODE="+TEST_MODE);
   if(TEST_MODE){
@@ -2002,6 +2014,11 @@ function getAccessToken(cb,interactive){
       }
       return; /* otherwise never resolves on its own - only the timeout (or a synthetic focus event, in tests) ever calls back */
     }
+    if(TEST_MODE_REAL_TOKEN_CACHE){
+      var tc=getCachedToken();
+      if(tc){ cb(null,tc); return; }
+      if(!interactive){ cb(needsReconnectError()); return; }
+    }
     cb(null,"fake-token-"+getDeviceId());
     return;
   }
@@ -2010,9 +2027,7 @@ function getAccessToken(cb,interactive){
   if(cached){ cb(null,cached); return; }
   if(!interactive){
     console.log("[drive] getAccessToken: non-interactive with no cached token - refusing to open the picker, returning needsReconnect");
-    var needsReconnect=new Error("Drive needs you to reconnect");
-    needsReconnect.needsReconnect=true;
-    cb(needsReconnect);
+    cb(needsReconnectError());
     return;
   }
   console.log("[drive] getAccessToken: interactive, no cached token - proceeding to loadGisScript/requestAccessToken");
@@ -2042,13 +2057,21 @@ function getAccessToken(cb,interactive){
    trusting a cached id (SYNC-LESSONS.md) - if more than one match turns up,
    that's logged as a warning, not silently resolved, since it means two
    histories may need reconciling by hand. */
+/* an HTTP failure from Drive, with the status kept as a number on the error (the message text is unchanged from before).
+   describeDriveFailure() reads .status; nothing else does. The TEST_MODE fault injection below builds its errors with this
+   same function, so a test exercises the real error shape, not a copy of it. */
+function driveHttpError(what,status){
+  var e=new Error(what+" ("+status+")");
+  e.status=status;
+  return e;
+}
 function driveFindFileId(token){
   if(TEST_MODE) return Promise.resolve(fakeDriveRead()!==null?"fake-file-id":null);
   var q="name='"+DRIVE_FILE_NAME+"' and trashed=false";
   return fetch("https://www.googleapis.com/drive/v3/files?q="+encodeURIComponent(q)+"&fields=files(id,name)",{
     headers:{Authorization:"Bearer "+token}
   }).then(function(r){
-    if(!r.ok) throw new Error("Drive search failed ("+r.status+")");
+    if(!r.ok) throw driveHttpError("Drive search failed",r.status);
     return r.json();
   }).then(function(data){
     var files=data.files||[];
@@ -2061,12 +2084,18 @@ function driveReadFile(token,fileId){
   return fetch("https://www.googleapis.com/drive/v3/files/"+fileId+"?alt=media",{
     headers:{Authorization:"Bearer "+token}
   }).then(function(r){
-    if(!r.ok) throw new Error("Drive read failed ("+r.status+")");
+    if(!r.ok) throw driveHttpError("Drive read failed",r.status);
     return r.json();
   });
 }
 function driveWriteFile(token,fileId,data){
-  if(TEST_MODE){ fakeDriveWrite(data); return Promise.resolve(fileId||"fake-file-id"); }
+  if(TEST_MODE){
+    /* TEST_MODE only: make the push fail the way a real one does. "network" is what fetch() rejects with when there is no connection
+       (a TypeError); a number is an HTTP status. Nothing here can reach the network: this whole branch returns before any fetch. */
+    if(TEST_MODE_DRIVE_FAULT==="network") return Promise.reject(new TypeError("Failed to fetch"));
+    if(typeof TEST_MODE_DRIVE_FAULT==="number") return Promise.reject(driveHttpError("Drive upload failed",TEST_MODE_DRIVE_FAULT));
+    fakeDriveWrite(data); return Promise.resolve(fileId||"fake-file-id");
+  }
   var body=JSON.stringify(data);
   function uploadContent(id){
     return fetch("https://www.googleapis.com/upload/drive/v3/files/"+id+"?uploadType=media",{
@@ -2074,7 +2103,7 @@ function driveWriteFile(token,fileId,data){
       headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},
       body:body
     }).then(function(r){
-      if(!r.ok) throw new Error("Drive upload failed ("+r.status+")");
+      if(!r.ok) throw driveHttpError("Drive upload failed",r.status);
       return id;
     });
   }
@@ -2084,7 +2113,7 @@ function driveWriteFile(token,fileId,data){
     headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},
     body:JSON.stringify({name:DRIVE_FILE_NAME})
   }).then(function(r){
-    if(!r.ok) throw new Error("Drive file creation failed ("+r.status+")");
+    if(!r.ok) throw driveHttpError("Drive file creation failed",r.status);
     return r.json();
   }).then(function(created){ return uploadContent(created.id); });
 }
@@ -2160,6 +2189,69 @@ function storageUsageText(){
   function kb(n){ return Math.round(n*2/1024).toLocaleString("en-US")+" KB"; }
   return kb(total)+" used: "+rows.slice(0,3).map(function(r){ return r.k+" "+kb(r.n); }).join(", ");
 }
+/* ---------------- changes not on Drive yet ----------------
+   Decision 2026-11-10 (CLAUDE.md, backlog 23 reversal): a real entry sat off Drive for 1h20 because one push failed, nothing
+   retried, and the token then expired. Nothing recorded "this device has changes Drive has not seen", so nothing could say so.
+   unsyncedCount is that record: every persist() on a connected device adds one, and only a push that actually landed takes
+   away the ones it covered (the count taken at the moment the merge read the state, so an edit made while a push is in flight
+   stays counted). It lives in its OWN device-local key, like DEVICE_ID: never in the ledger, never pushed, so hours-ledger-v2
+   keeps its shape (hard rule 1). Counts SAVES, not entries or records. The bar is hidden while the count is 0, hidden for
+   UNSYNCED_GRACE_MS after the first unsynced save (an ordinary save is on Drive within ~2s; a bar that flashed on every
+   edit would be noise), and shown at once on a recorded failure or when a reconnect is needed. unsyncedBarTimer only
+   re-evaluates the bar; it guards nothing (hard rule 9 has nothing to reset). */
+var UNSYNCED_KEY=TEST_MODE?"hours-ledger-unsynced-TESTMODE":"hours-ledger-unsynced-v1";
+var UNSYNCED_GRACE_MS=30000;
+var unsyncedCount=0, unsyncedSince=0, unsyncedBarTimer=null, lastDriveFailure=null;
+try{
+  var unsyncedStored=JSON.parse(readStore(UNSYNCED_KEY));
+  if(unsyncedStored&&isFinite(unsyncedStored.n)&&unsyncedStored.n>0&&isFinite(unsyncedStored.since)&&unsyncedStored.since>0){
+    unsyncedCount=Math.floor(unsyncedStored.n); unsyncedSince=unsyncedStored.since;
+  }
+}catch(e){}
+function saveUnsynced(){
+  if(unsyncedCount>0) writeStore(UNSYNCED_KEY,JSON.stringify({n:unsyncedCount,since:unsyncedSince}));
+  else{ try{ localStorage.removeItem(UNSYNCED_KEY); }catch(e){} }
+}
+function unsyncedBarShouldShow(){
+  if(!state.driveConnected||unsyncedCount<1) return false;
+  return !!lastDriveFailure||driveNeedsReconnect||(Date.now()-unsyncedSince>UNSYNCED_GRACE_MS);
+}
+function updateUnsyncedBar(){
+  var b=document.getElementById("unsyncedBar");
+  if(!b) return;
+  clearTimeout(unsyncedBarTimer);
+  var show=unsyncedBarShouldShow();
+  b.hidden=!show;
+  if(show){
+    b.textContent=unsyncedCount+(unsyncedCount===1?" change":" changes")+" not on Drive yet \u2014 tap to sync";
+  }else if(state.driveConnected&&unsyncedCount>0){
+    unsyncedBarTimer=setTimeout(updateUnsyncedBar,Math.max(100,UNSYNCED_GRACE_MS-(Date.now()-unsyncedSince)+100));
+  }
+}
+function noteUnsyncedChange(){
+  if(unsyncedCount===0) unsyncedSince=Date.now();
+  unsyncedCount++;
+  saveUnsynced(); updateUnsyncedBar();
+}
+function clearUnsynced(covered){
+  unsyncedCount=Math.max(0,unsyncedCount-covered);
+  unsyncedSince=unsyncedCount>0?Date.now():0;
+  saveUnsynced(); updateUnsyncedBar();
+}
+/* What went wrong with a push or pull, for the status line, the console and the tests. fromMerge: the failure came from
+   syncEngine (the merge), not from the network. A TypeError only counts as "no connection" when it reads like fetch's own
+   network error, so an ordinary code bug is not mislabelled as the network. Reads the error only: no data leaves the page. */
+var NETWORK_ERROR_RE=/failed to fetch|load failed|networkerror|network request failed/i;
+function describeDriveFailure(e,fromMerge){
+  var msg=(e&&e.message)?e.message:String(e);
+  if(fromMerge) return {kind:"merge",status:null,message:msg,reason:"could not merge with the Drive copy"};
+  var st=(e&&typeof e.status==="number")?e.status:null;
+  if(st===401) return {kind:"auth",status:401,message:msg,reason:"Google rejected the sign-in, 401"};
+  if(st!==null) return {kind:"http",status:st,message:msg,reason:"Drive answered "+st};
+  if(e instanceof TypeError&&NETWORK_ERROR_RE.test(msg)) return {kind:"network",status:null,message:msg,reason:"no connection"};
+  return {kind:"other",status:null,message:msg,reason:"unexpected error"};
+}
+function clearCachedToken(){ try{ localStorage.removeItem(ACCESS_TOKEN_KEY); }catch(e){} }
 function noteLocalSave(ok){
   localSaveFailed=!ok;
   var w=document.getElementById("warn");
@@ -2194,7 +2286,7 @@ function persist(){
      same status-line/linked-file behavior as any other save) - skipped here
      so applying a remote change never schedules syncing right back out
      again, which would otherwise loop forever between two devices */
-  if(state.driveConnected&&!driveSyncApplyingRemote) scheduleDriveSync();
+  if(state.driveConnected&&!driveSyncApplyingRemote){ noteUnsyncedChange(); scheduleDriveSync(); }
 }
 function clockNow(){
   var d=new Date();
@@ -2265,6 +2357,7 @@ function showDriveReconnectNeeded(){
   var b=document.getElementById("connectDrive");
   if(b){ b.disabled=false; b.textContent="Drive: tap to resume syncing"; }
   setStatus("Drive: tap anywhere in the app to resume syncing",true);
+  updateUnsyncedBar();
 }
 /* The shared decision behind both the eager load check and the refocus
    listener: a connected device whose cached token has silently lapsed with
@@ -2327,6 +2420,7 @@ function connectDrive(){
          local sweep already happened (it's part of syncResult.newLocalState,
          already persisted above) regardless of whether the push below
          succeeds, so both branches mention it if it happened. */
+      clearUnsynced(unsyncedCount); /* the whole merged state is what the push below sends */
       var sweptNote=(syncResult.sweptCompress&&syncResult.sweptCompress.length)?
         " "+describeCompressSweep(syncResult.sweptCompress):"";
       driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts,dayHighlights:syncResult.toPush.dayHighlights,sessions:syncResult.toPush.sessions}).then(function(){
@@ -2405,6 +2499,7 @@ function runDriveSync(manual){
       document.getElementById("connectDrive").disabled=false; /* markSigningIn() may have disabled it - always reset here regardless of whether this particular attempt was interactive */
       document.getElementById("connectDrive").textContent="Drive: tap to resume syncing";
       setStatus(err.needsReconnect?"Drive: tap anywhere in the app to resume syncing":"Drive sync needs reconnecting",true);
+      updateUnsyncedBar();
       return;
     }
     console.log("[drive] runDriveSync: got a real token, proceeding to sync");
@@ -2416,14 +2511,11 @@ function runDriveSync(manual){
       });
     }).then(function(res){
       var syncResult;
+      /* how many saves this merge covers: syncEngine reads state right here, so anything saved after this line is NOT in what
+         gets pushed and must stay counted */
+      var covered=unsyncedCount;
       try{ syncResult=syncEngine(state,res.remoteData,getDeviceId()); }
-      catch(e){
-        driveSyncInFlight=false;
-        document.getElementById("connectDrive").disabled=false;
-        document.getElementById("connectDrive").textContent="Drive: sync failed";
-        setStatus("Drive sync failed — press the Drive button to sync again",true);
-        return;
-      }
+      catch(e){ showDriveSyncFailed(e,true); return; }
       state=syncResult.newLocalState;
       state.driveConnected=true;
       driveSyncApplyingRemote=true;
@@ -2437,17 +2529,37 @@ function runDriveSync(manual){
       if(syncResult.sweptCompress&&syncResult.sweptCompress.length) showToast(describeCompressSweep(syncResult.sweptCompress),false);
       return driveWriteFile(token,res.fileId,{categories:syncResult.toPush.categories,entries:syncResult.toPush.entries,verdicts:syncResult.toPush.verdicts,closeouts:syncResult.toPush.closeouts,dayHighlights:syncResult.toPush.dayHighlights,sessions:syncResult.toPush.sessions}).then(function(){
         driveSyncInFlight=false;
+        lastDriveFailure=null;
+        clearUnsynced(covered); /* only now, after the push has landed */
         setStatus(syncedStatusText());
         document.getElementById("connectDrive").disabled=false;
         document.getElementById("connectDrive").textContent="Drive: synced";
       });
-    }).catch(function(){
-      driveSyncInFlight=false;
-      document.getElementById("connectDrive").disabled=false;
-      document.getElementById("connectDrive").textContent="Drive: sync failed";
-      setStatus("Drive sync failed — press the Drive button to sync again",true);
-    });
+    }).catch(function(e){ showDriveSyncFailed(e,false); });
   },manual);
+}
+/* The one place a failed sync is shown. Before 2026-11-10 the catch had no parameter: the cause (offline, a 401, a merge bug)
+   was thrown away and the status line said the same thing for all of them. Now the cause is kept (lastDriveFailure), logged to
+   the console (never sent anywhere - hard rule 4) and named in the status line. A 401 also drops the cached token: it looked
+   valid (not expired) but Google refused it, so reusing it, by a retry or by the next tap, could only fail the same way again;
+   the reconnect state it leads to is the one a real tap resolves. driveSyncInFlight is reset first, before anything that
+   could throw (hard rule 9). */
+function showDriveSyncFailed(e,fromMerge){
+  driveSyncInFlight=false;
+  var f=describeDriveFailure(e,fromMerge);
+  f.at=Date.now();
+  lastDriveFailure=f;
+  console.warn("[drive] sync failed: "+f.kind+(f.status?" "+f.status:"")+" - "+f.message,e);
+  document.getElementById("connectDrive").disabled=false;
+  if(f.kind==="auth"){
+    clearCachedToken();
+    showDriveReconnectNeeded();
+    setStatus("Drive sign-in rejected ("+f.status+") — tap anywhere in the app to resume syncing",true);
+  }else{
+    document.getElementById("connectDrive").textContent="Drive: sync failed";
+    setStatus("Drive sync failed ("+f.reason+") — press the Drive button to sync again",true);
+  }
+  updateUnsyncedBar();
 }
 
 /* ---------------- undo / redo ---------------- */
@@ -4909,8 +5021,8 @@ document.getElementById("connectDrive").addEventListener("click",connectDrive);
    which already has its own explicit click handler - no need to also
    race it from here. */
 document.addEventListener("pointerdown",function(ev){
-  if(ev.target&&ev.target.closest&&ev.target.closest("#connectDrive")){
-    console.log("[drive] pointerdown listener: tap was on #connectDrive itself, deferring to its own click handler");
+  if(ev.target&&ev.target.closest&&ev.target.closest("#connectDrive,#unsyncedBar")){
+    console.log("[drive] pointerdown listener: tap was on #connectDrive or #unsyncedBar itself, deferring to its own click handler");
     return;
   }
   if(!state.driveConnected||!driveNeedsReconnect||driveReconnectAttemptedThisSession||driveSyncInFlight){
@@ -4939,7 +5051,23 @@ document.addEventListener("pointerdown",function(ev){
    pageshow covers a bfcache restore where neither of the other two is
    guaranteed. All idempotent via surfaceDriveReconnectIfTokenLapsed's own
    guards. */
-function recheckDriveToken(){ surfaceDriveReconnectIfTokenLapsed(); }
+/* Coming back to the foreground with changes Drive has not seen and a token that is still valid: push now, without an edit and
+   without a tap (decision 2026-11-10; before it nothing ever retried a failed push). Non-interactive on purpose: with no valid
+   token this does nothing, and the reconnect state plus the bar (both already shown by surfaceDriveReconnectIfTokenLapsed)
+   wait for a real tap; a silent popup would be blocked on a phone anyway. runDriveSync's own in-flight guard makes the three
+   events a phone fires together (visibilitychange, focus, pageshow) one attempt. */
+function retryUnsyncedOnForeground(){
+  if(!state.driveConnected||unsyncedCount<1||driveSyncInFlight||driveNeedsReconnect) return false;
+  if(!getCachedToken()) return false;
+  console.log("[drive] foreground with "+unsyncedCount+" unsynced change(s) and a valid token - syncing now");
+  runDriveSync(false);
+  return true;
+}
+function recheckDriveToken(){
+  if(surfaceDriveReconnectIfTokenLapsed()) return;
+  retryUnsyncedOnForeground();
+}
+document.getElementById("unsyncedBar").addEventListener("click",function(){ runDriveSync(true); }); /* the tap is the user gesture the reconnect needs */
 document.addEventListener("visibilitychange",function(){ if(document.visibilityState==="visible") recheckDriveToken(); });
 window.addEventListener("focus",recheckDriveToken);
 window.addEventListener("pageshow",recheckDriveToken);
@@ -5134,6 +5262,8 @@ if(state.driveConnected){
     scheduleDriveSync();
   }
 }
+
+updateUnsyncedBar(); /* a count left by an earlier session (a discarded tab) shows straight away if it needs to */
 
 /* pre-warm the GIS script (just the JS library fetch - no account/network-
    auth interaction, nothing shown, same script this page already fetched
@@ -5693,6 +5823,11 @@ if(TEST_MODE){
     surfaceDriveReconnectIfTokenLapsed:surfaceDriveReconnectIfTokenLapsed,
     recheckDriveToken:recheckDriveToken,
     setTestHangToken:function(v){ TEST_MODE_HANG_TOKEN=v; },
+    setTestDriveFault:function(v){ TEST_MODE_DRIVE_FAULT=v; },
+    getUnsyncedCount:function(){ return unsyncedCount; },
+    getLastDriveFailure:function(){ return lastDriveFailure; },
+    setUnsyncedForTest:function(n,agoMs){ unsyncedCount=n; unsyncedSince=n>0?Date.now()-agoMs:0; lastDriveFailure=null; saveUnsynced(); updateUnsyncedBar(); },
+    setTestRealTokenCache:function(v){ TEST_MODE_REAL_TOKEN_CACHE=v; },
     setKeepUndoOnConnectForTest:function(v){ TEST_MODE_KEEP_UNDO_ON_CONNECT=v; },
     undoDepthForTest:function(){ return undoStack.length; },
     setTestLateSuccessMs:function(v){ TEST_MODE_LATE_SUCCESS_MS=v; },
