@@ -1749,6 +1749,13 @@ function syncEngine(localStateIn,remoteFile,deviceId){
    the local store is unusable, and a remote must not degrade with the device
    (quota-full tests, selftest-quota-frame.html, exempt this one key). */
 var FAKE_DRIVE_KEY="hours-ledger-fakedrive-TESTMODE";
+var TEST_MODE_DRIVE_HANG=null; /* TEST_MODE only: null | "find" | "read" | "write" - that request never settles, like a connection that went silent */
+var TEST_MODE_DRIVE_ABORTS=0; /* how many times a hung fake request saw its AbortController signal fire */
+/* TEST_MODE only: a request that never settles on its own, but reports the abort the timeout wrapper sends (what a real fetch
+   would do with the same signal), so a test can see the connection really being dropped. */
+function testHungRequest(signal){
+  return new Promise(function(){ if(signal) signal.addEventListener("abort",function(){ TEST_MODE_DRIVE_ABORTS++; }); });
+}
 var TEST_MODE_DRIVE_FAULT=null; /* null | "network" | an HTTP status number; read only inside driveWriteFile's TEST_MODE branch */
 function fakeDriveRead(){
   if(!TEST_MODE) throw new Error("fakeDriveRead is TEST_MODE only");
@@ -2060,62 +2067,101 @@ function getAccessToken(cb,interactive){
 /* an HTTP failure from Drive, with the status kept as a number on the error (the message text is unchanged from before).
    describeDriveFailure() reads .status; nothing else does. The TEST_MODE fault injection below builds its errors with this
    same function, so a test exercises the real error shape, not a copy of it. */
+/* A Drive request that never settles (a connection that went silent: no answer, no error) left driveSyncInFlight true for the
+   life of the page, so every later sync and a tap on the "not on Drive yet" bar returned at runDriveSync's guard and did
+   nothing (backlog 23(f), found by reading; hard rule 9: a guard flag needs a reset that does not depend on the guarded async
+   operation finishing). Every Drive request now runs through driveTimed: after DRIVE_REQUEST_TIMEOUT_MS it is aborted
+   (AbortController, so the browser drops the connection) and rejected with an error marked .timeout, which showDriveSyncFailed
+   records as kind "timeout". The timer is per REQUEST, not per sync (a sync is up to three in a row), and covers reading the
+   body as well as the headers. Whatever settles first wins and the other result is ignored, so an abort's own AbortError or a
+   response that arrives late changes nothing. A timed-out upload may still have reached Drive; the retry sends the whole
+   state again, which is an ordinary idempotent sync (reasoned, not run).
+   30 s: a ledger is ~350 KB, so an upload at a poor ~100 kbps takes ~28 s and must not be called hung, while a request that
+   is truly silent should free the bar within half a minute, not leave it dead. Chosen by that arithmetic, not measured on a
+   real network. Too short turns a slow but working upload into a failure that repeats on every retry; too long keeps the bar
+   dead for that long. 300 ms under TEST_MODE so the tests do not wait. */
+var DRIVE_REQUEST_TIMEOUT_MS=TEST_MODE?300:30000;
+function driveTimed(start){
+  return new Promise(function(resolve,reject){
+    var ctl=(typeof AbortController!=="undefined")?new AbortController():null, done=false;
+    var timer=setTimeout(function(){
+      if(done) return;
+      done=true;
+      try{ if(ctl) ctl.abort(); }catch(e){}
+      var e=new Error("Drive did not answer within "+Math.round(DRIVE_REQUEST_TIMEOUT_MS/1000)+" s");
+      e.timeout=true;
+      reject(e);
+    },DRIVE_REQUEST_TIMEOUT_MS);
+    var p;
+    try{ p=start(ctl?ctl.signal:undefined); }
+    catch(e){ done=true; clearTimeout(timer); reject(e); return; }
+    Promise.resolve(p).then(function(v){ if(done) return; done=true; clearTimeout(timer); resolve(v); },
+                            function(e){ if(done) return; done=true; clearTimeout(timer); reject(e); });
+  });
+}
 function driveHttpError(what,status){
   var e=new Error(what+" ("+status+")");
   e.status=status;
   return e;
 }
 function driveFindFileId(token){
-  if(TEST_MODE) return Promise.resolve(fakeDriveRead()!==null?"fake-file-id":null);
+  if(TEST_MODE){
+    if(TEST_MODE_DRIVE_HANG==="find") return driveTimed(testHungRequest);
+    return Promise.resolve(fakeDriveRead()!==null?"fake-file-id":null);
+  }
   var q="name='"+DRIVE_FILE_NAME+"' and trashed=false";
-  return fetch("https://www.googleapis.com/drive/v3/files?q="+encodeURIComponent(q)+"&fields=files(id,name)",{
-    headers:{Authorization:"Bearer "+token}
+  return driveTimed(function(signal){ return fetch("https://www.googleapis.com/drive/v3/files?q="+encodeURIComponent(q)+"&fields=files(id,name)",{
+    headers:{Authorization:"Bearer "+token},signal:signal
   }).then(function(r){
     if(!r.ok) throw driveHttpError("Drive search failed",r.status);
     return r.json();
-  }).then(function(data){
+  }); }).then(function(data){
     var files=data.files||[];
     if(files.length>1) console.warn('Hours Ledger: found '+files.length+' Drive files named "'+DRIVE_FILE_NAME+'" - using the first; the rest may need reconciling by hand');
     return files.length?files[0].id:null;
   });
 }
 function driveReadFile(token,fileId){
-  if(TEST_MODE) return Promise.resolve(fakeDriveRead());
-  return fetch("https://www.googleapis.com/drive/v3/files/"+fileId+"?alt=media",{
-    headers:{Authorization:"Bearer "+token}
+  if(TEST_MODE){
+    if(TEST_MODE_DRIVE_HANG==="read") return driveTimed(testHungRequest);
+    return Promise.resolve(fakeDriveRead());
+  }
+  return driveTimed(function(signal){ return fetch("https://www.googleapis.com/drive/v3/files/"+fileId+"?alt=media",{
+    headers:{Authorization:"Bearer "+token},signal:signal
   }).then(function(r){
     if(!r.ok) throw driveHttpError("Drive read failed",r.status);
     return r.json();
-  });
+  }); });
 }
 function driveWriteFile(token,fileId,data){
   if(TEST_MODE){
     /* TEST_MODE only: make the push fail the way a real one does. "network" is what fetch() rejects with when there is no connection
        (a TypeError); a number is an HTTP status. Nothing here can reach the network: this whole branch returns before any fetch. */
+    if(TEST_MODE_DRIVE_HANG==="write") return driveTimed(testHungRequest);
     if(TEST_MODE_DRIVE_FAULT==="network") return Promise.reject(new TypeError("Failed to fetch"));
     if(typeof TEST_MODE_DRIVE_FAULT==="number") return Promise.reject(driveHttpError("Drive upload failed",TEST_MODE_DRIVE_FAULT));
     fakeDriveWrite(data); return Promise.resolve(fileId||"fake-file-id");
   }
   var body=JSON.stringify(data);
   function uploadContent(id){
-    return fetch("https://www.googleapis.com/upload/drive/v3/files/"+id+"?uploadType=media",{
+    return driveTimed(function(signal){ return fetch("https://www.googleapis.com/upload/drive/v3/files/"+id+"?uploadType=media",{
       method:"PATCH",
       headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},
-      body:body
+      body:body,signal:signal
     }).then(function(r){
       if(!r.ok) throw driveHttpError("Drive upload failed",r.status);
       return id;
-    });
+    }); });
   }
   if(fileId) return uploadContent(fileId);
-  return fetch("https://www.googleapis.com/drive/v3/files",{
+  return driveTimed(function(signal){ return fetch("https://www.googleapis.com/drive/v3/files",{
     method:"POST",
     headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},
-    body:JSON.stringify({name:DRIVE_FILE_NAME})
+    body:JSON.stringify({name:DRIVE_FILE_NAME}),signal:signal
   }).then(function(r){
     if(!r.ok) throw driveHttpError("Drive file creation failed",r.status);
     return r.json();
-  }).then(function(created){ return uploadContent(created.id); });
+  }); }).then(function(created){ return uploadContent(created.id); });
 }
 
 var state;
@@ -2244,6 +2290,7 @@ function clearUnsynced(covered){
 var NETWORK_ERROR_RE=/failed to fetch|load failed|networkerror|network request failed/i;
 function describeDriveFailure(e,fromMerge){
   var msg=(e&&e.message)?e.message:String(e);
+  if(e&&e.timeout) return {kind:"timeout",status:null,message:msg,reason:"Drive did not answer in time"};
   if(fromMerge) return {kind:"merge",status:null,message:msg,reason:"could not merge with the Drive copy"};
   var st=(e&&typeof e.status==="number")?e.status:null;
   if(st===401) return {kind:"auth",status:401,message:msg,reason:"Google rejected the sign-in, 401"};
@@ -5824,6 +5871,8 @@ if(TEST_MODE){
     recheckDriveToken:recheckDriveToken,
     setTestHangToken:function(v){ TEST_MODE_HANG_TOKEN=v; },
     setTestDriveFault:function(v){ TEST_MODE_DRIVE_FAULT=v; },
+    setTestDriveHang:function(v){ TEST_MODE_DRIVE_HANG=v; },
+    getDriveAbortCount:function(){ return TEST_MODE_DRIVE_ABORTS; },
     getUnsyncedCount:function(){ return unsyncedCount; },
     getLastDriveFailure:function(){ return lastDriveFailure; },
     setUnsyncedForTest:function(n,agoMs){ unsyncedCount=n; unsyncedSince=n>0?Date.now()-agoMs:0; lastDriveFailure=null; saveUnsynced(); updateUnsyncedBar(); },
