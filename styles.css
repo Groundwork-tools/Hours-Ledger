@@ -238,6 +238,11 @@ button{cursor:pointer}
 .status{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:6px}
 .status i{width:6px;height:6px;background:#2F6B4F;display:block;border-radius:50%}
 .status.stale i{background:var(--flag)}
+/* "N changes not on Drive yet": ink on paper inverted, square, no shadow, NOT flag red. In normal flow above the masthead so it can
+   never sit over the grid, the log sheet or its Save button. */
+.unsynced{display:block;width:100%;min-height:44px;margin:0 0 12px;padding:10px 14px;background:var(--ink);color:var(--paper);border:1px solid var(--ink);border-radius:0;box-shadow:none;font-family:var(--mono);font-size:12px;letter-spacing:.04em;line-height:1.4;text-align:left;cursor:pointer}
+.unsynced[hidden]{display:none}
+.unsynced:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
 .warn{border:1px solid var(--flag);color:var(--flag);padding:8px 10px;font-family:var(--mono);font-size:11px;margin-bottom:14px;display:none;line-height:1.6}
 
 .scrim{position:fixed;inset:0;background:rgba(22,33,27,.5);display:none;align-items:center;justify-content:center;padding:20px;z-index:40}
@@ -413,7 +418,7 @@ button{cursor:pointer}
   .colophon.trio{display:flex;justify-content:space-between}
 }
 @media print{
-  .weeknav,.tools,.sess-banner,.hint,.emptyhint,.status,.panel-label button,.cat .sw,.cat .del,.verdict,.warn{display:none!important}
+  .weeknav,.tools,.sess-banner,.hint,.emptyhint,.status,.panel-label button,.cat .sw,.cat .del,.verdict,.warn,.unsynced{display:none!important}
   body{background:#fff}.wrap{padding:0}.cols{grid-template-columns:1fr 240px}.grid{min-width:0}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}

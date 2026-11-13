@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1799;
+var EXPECTED_MIN_ROWS=1918;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -2104,7 +2104,7 @@ function freshSandbox(clean,extraQuery){
     Array.prototype.slice.call(document.querySelectorAll("iframe")).forEach(function(el){ if(!isolateSandboxes) return; if(el.parentNode) el.parentNode.removeChild(el); });
     ["hours-ledger-selftest-v2","hours-ledger-device-id-TESTMODE",
      "hours-ledger-selftest-undo-v1","hours-ledger-fakedrive-TESTMODE",
-     "hours-ledger-access-token-TESTMODE","hours-ledger-selftest-sessions-dismissed-v1","hours-ledger-selftest-sessions-dismissed-suggestions-v1"].forEach(function(k){
+     "hours-ledger-access-token-TESTMODE","hours-ledger-unsynced-TESTMODE","hours-ledger-selftest-sessions-dismissed-v1","hours-ledger-selftest-sessions-dismissed-suggestions-v1"].forEach(function(k){
       try{ localStorage.removeItem(k); }catch(e){}
     });
   }
@@ -3008,6 +3008,9 @@ function runAsyncTests(H,d){
     .then(function(r){ return runUndoStaleSnapshotTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runUndoConnectRuleTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runFailedPushTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runPhoneBug3RecoveryTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runPhoneBug3FixTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runDriveTimeoutTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runQuotaSaveFailureTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runUndoCapTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runQuotaProbeTests().then(function(more){ return r.concat(more); }); })
@@ -9139,6 +9142,400 @@ function runFailedPushTests(){
         });
       });
     });
+  }).then(function(){ return results; });
+}
+
+/* ---------------------------------------------------------------------
+   PHONE BUG 3 REPRO (written failing in Phase 1 of hours-ledger-phone-bugs, passing since the fix).
+   Reported: an entry logged on the phone while the Drive button read "sync failed";
+   the phone was then left alone for ~1h20; the laptop never got the entry until the
+   user tapped the Drive button on the phone and signed in to Google again.
+
+   What this CAN reproduce in TEST_MODE: the "Drive: sync failed" state (the .catch in
+   runDriveSync, reached by a push that throws) and whether anything brings the entry
+   to Drive afterwards when the failure has cleared and the user does nothing except
+   come back to the app (visibilitychange / focus / pageshow, what a phone fires when
+   it is picked up again). It does NOT reproduce an expired token: under TEST_MODE
+   getAccessToken returns a fake token before it ever reads the cache, so that branch
+   is unreachable without changing app.js (see CLAUDE.md backlog 23(d) and DIAGNOSIS.md).
+   UPDATE 2026-11-10: this is now the retry-on-foreground test of the fix; it was written failing first and passes with
+   retryUnsyncedOnForeground() in app.js. The expired-token branch has its own tests in runPhoneBug3FixTests() (a TEST_MODE
+   switch, setTestRealTokenCache, makes it reachable).
+   An expired cached token shows "tap to resume syncing", never "sync failed", so this
+   failing path is the one the report's wording points at.
+
+   The assertion would flip if the app retried on its own after a failed push (on return
+   to the app, or on a short timer): the entry would reach the fake Drive inside the
+   window with no edit. It would NOT flip for a fix that only changes wording or only
+   adds a visible indicator. */
+function runPhoneBug3RecoveryTests(){
+  var results=[];
+  var TAG="retry on foreground: ";
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); }
+  var DATE="2026-04-20";
+  function btn(f){ return f.d.getElementById("connectDrive").textContent; }
+  function onDrive(h,label){
+    var r=h.fakeDriveRead();
+    return !!r&&r.entries.some(function(e){ return e.date===DATE&&!e.deleted&&e.label===label; });
+  }
+  function settle(h){
+    return delay(250).then(function(){ return waitFor(function(){ return !h.isDriveSyncInFlight(); },4000); }).then(function(){ return delay(50); });
+  }
+  return freshSandbox(true).then(function(f){
+    var h=f.H,w=f.el.contentWindow;
+    f.d.getElementById("connectDrive").click();
+    return waitFor(function(){ return btn(f)==="Drive: synced"; },4000).then(function(ok){
+      check("setup: fake Drive connect completed",ok);
+      return settle(h);
+    }).then(function(){
+      var realStringify=w.JSON.stringify;
+      w.JSON.stringify=function(v){
+        if(v&&Array.isArray(v.verdicts)&&Array.isArray(v.closeouts)) throw new Error("simulated push failure");
+        return realStringify.apply(this,arguments);
+      };
+      var cat=h.getState().categories[0].id;
+      h.snapshot("add entry"); h.putEntry(DATE,"PhoneBug3",cat,600,660,null); h.persist();
+      return delay(600).then(function(){
+        check("setup: the push failed and the button reads 'Drive: sync failed'",btn(f)==="Drive: sync failed",btn(f));
+        check("setup: the entry is saved locally but not on Drive",h.entriesFor(DATE).length===1&&!onDrive(h,"PhoneBug3"));
+        w.JSON.stringify=realStringify; /* the cause clears (signal back, say) */
+        /* a real phone has a still-valid cached token at this point (a token that had lapsed would read "tap to resume syncing", not "sync failed");
+           TEST_MODE never caches one, which would make the foreground check below flip the button to "tap to resume" - a test-mode artifact */
+        try{ localStorage.setItem("hours-ledger-access-token-TESTMODE",JSON.stringify({token:"still-valid",expiresAt:Date.now()+3000000})); }catch(e){}
+        /* the user picks the phone up again: only the events a phone fires, no tap, no edit */
+        f.d.dispatchEvent(new w.Event("visibilitychange"));
+        w.dispatchEvent(new w.Event("focus"));
+        w.dispatchEvent(new w.Event("pageshow"));
+        return delay(5000);
+      }).then(function(){
+        /* failed against the code before 2026-11-10 (nothing retried after a failed push); passes with retryUnsyncedOnForeground */
+        check(TAG+"5s after the failure cleared and the app was brought back to the foreground, with no edit and no tap, the entry is on Drive",
+          onDrive(h,"PhoneBug3"),"on Drive: "+onDrive(h,"PhoneBug3")+"; button: "+btn(f));
+        /* control, passes today: the recovery that does exist is a later edit */
+        if(!onDrive(h,"PhoneBug3")){
+          h.snapshot("add entry"); h.putEntry(DATE,"Unrelated",cat,700,760,null); h.persist();
+          return waitFor(function(){ return onDrive(h,"PhoneBug3"); },3000).then(function(ok){
+            check("control: a later edit pushes the stuck entry",ok);
+          });
+        }
+      });
+    });
+  }).then(function(){ return results; });
+}
+
+/* ---------------------------------------------------------------------
+   Phone bug 3, the fix (decision recorded in CLAUDE.md, backlog 23 reversal): a failed push keeps its cause, the app retries
+   when it comes back to the foreground with a valid token, and a bar says "N changes not on Drive yet, tap to sync".
+   The unsynced count lives in its own device-local key (hours-ledger-unsynced-v1; TESTMODE suffix here), never in the ledger.
+
+   The expired-token scenarios turn on setTestRealTokenCache: getAccessToken then reads the real token cache and refuses a
+   non-interactive call with no valid token, exactly as production does. Structural limit, asserted below: it cannot reach
+   Google (window.fetch is replaced by a counter that rejects, and no <script> for Google may appear in the page).
+   Written BEFORE the fix. Rows that need the new code read it defensively, so against the old code they FAIL as assertions
+   rather than crashing the chain. */
+function runPhoneBug3FixTests(){
+  var results=[];
+  function check(name,cond,observed){
+    results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond});
+  }
+  function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); }
+  var DATE="2026-04-20", TOKEN_KEY="hours-ledger-access-token-TESTMODE", UNSYNCED_KEY="hours-ledger-unsynced-TESTMODE";
+  function btn(f){ return f.d.getElementById("connectDrive").textContent; }
+  function stat(f){ return f.d.getElementById("statusText").textContent; }
+  function bar(f){ return f.d.getElementById("unsyncedBar"); }
+  function barShown(f){ var b=bar(f); return !!b&&!b.hidden&&f.el.contentWindow.getComputedStyle(b).display!=="none"; }
+  function barGone(f){ return !!bar(f)&&!barShown(f); } /* the element must exist: "no element" is not "hidden" */
+  function barText(f){ var b=bar(f); return b?b.textContent:"(no bar element)"; }
+  function cnt(h){ return h.getUnsyncedCount?h.getUnsyncedCount():"(no hook)"; }
+  function onDrive(h,label){
+    var r=h.fakeDriveRead();
+    return !!r&&r.entries.some(function(e){ return e.date===DATE&&!e.deleted&&e.label===label; });
+  }
+  function settle(h){
+    return delay(250).then(function(){ return waitFor(function(){ return !h.isDriveSyncInFlight(); },4000); }).then(function(){ return delay(50); });
+  }
+  function edit(h,label,start){
+    var cat=h.getState().categories[0].id;
+    h.snapshot("add entry"); h.putEntry(DATE,label,cat,start,start+60,null); h.persist();
+  }
+  function connected(){
+    return freshSandbox(true).then(function(f){
+      f.d.getElementById("connectDrive").click();
+      return waitFor(function(){ return btn(f)==="Drive: synced"; },4000).then(function(ok){
+        check("setup: fake Drive connect completed",ok);
+        return settle(f.H);
+      }).then(function(){ return f; });
+    });
+  }
+  /* no request may leave the page: fetch is a counter that rejects; a Google <script> would be a sign-in being prepared */
+  function blockNetwork(f){
+    var w=f.el.contentWindow; f.fetchCalls=0;
+    w.fetch=function(){ f.fetchCalls++; return Promise.reject(new TypeError("blocked in test")); };
+  }
+  function googleScripts(f){ return f.d.querySelectorAll('script[src*="google"],script[src*="gsi"]').length; }
+  function spyWarn(f){
+    var w=f.el.contentWindow; f.logged=[];
+    var orig=w.console.warn;
+    w.console.warn=function(){ f.logged.push(Array.prototype.join.call(arguments," ")); };
+    f.restoreWarn=function(){ w.console.warn=orig; };
+  }
+  function expireToken(){ try{ localStorage.setItem(TOKEN_KEY,JSON.stringify({token:"old",expiresAt:Date.now()-1000})); }catch(e){} }
+  function validToken(){ try{ localStorage.setItem(TOKEN_KEY,JSON.stringify({token:"still-valid",expiresAt:Date.now()+3000000})); }catch(e){} }
+  function foreground(f){
+    var w=f.el.contentWindow;
+    f.d.dispatchEvent(new w.Event("visibilitychange"));
+    w.dispatchEvent(new w.Event("focus"));
+    w.dispatchEvent(new w.Event("pageshow"));
+  }
+
+  var statusSeen={};
+  /* ---- (a) the expired-token path, reachable now ---- */
+  function expiredScenario(viaBar){
+    var tag=viaBar?"expired token, tap on the bar: ":"expired token, tap anywhere: ";
+    return connected().then(function(f){
+      var h=f.H,w=f.el.contentWindow;
+      h.setTestRealTokenCache(true); blockNetwork(f); expireToken();
+      edit(h,"Expired1",600);
+      return delay(600).then(function(){
+        check(tag+"[regression guard] the button reads 'Drive: tap to resume syncing' and reconnect is armed",
+          btn(f)==="Drive: tap to resume syncing"&&h.getDriveNeedsReconnect(),btn(f));
+        check(tag+"[new] a bar is shown saying '1 change not on Drive yet' and 'tap to sync'",
+          barShown(f)&&/1 change not on Drive yet/.test(barText(f))&&/tap to sync/.test(barText(f)),barText(f));
+        check(tag+"the unsynced count is 1",cnt(h)===1,cnt(h));
+        check(tag+"the entry is saved locally and NOT on Drive",h.entriesFor(DATE).length===1&&!onDrive(h,"Expired1"));
+        /* the phone is picked up again: foreground events must NOT try a silent sign-in */
+        foreground(f);
+        return delay(500);
+      }).then(function(){
+        check(tag+"foreground events with an expired token do not push (no silent popup attempt)",!onDrive(h,"Expired1"));
+        check(tag+"...and still show the reconnect state and the bar",btn(f)==="Drive: tap to resume syncing"&&barShown(f),btn(f)+" / "+barText(f));
+        check(tag+"structural: no request left the page and no Google script was added",f.fetchCalls===0&&googleScripts(f)===0,"fetch calls "+f.fetchCalls+", google scripts "+googleScripts(f));
+        if(viaBar){
+          var b=bar(f); if(b) b.click();
+        }else{
+          f.d.body.dispatchEvent(new w.Event("pointerdown",{bubbles:true}));
+        }
+        return waitFor(function(){ return onDrive(h,"Expired1"); },4000);
+      }).then(function(ok){
+        check(tag+"the tap is the gesture: it drives the reconnect through and the entry reaches Drive",ok);
+        return settle(h);
+      }).then(function(){
+        check(tag+"afterwards the bar is hidden (element still there) and the count is 0",barGone(f)&&cnt(h)===0,barText(f)+" / "+cnt(h));
+        check(tag+"afterwards the button reads 'Drive: synced'",btn(f)==="Drive: synced",btn(f));
+        return f;
+      });
+    });
+  }
+  /* ---- the bar survives a reload (a phone discards backgrounded tabs) ---- */
+  function reloadScenario(){
+    return connected().then(function(f){
+      var h=f.H; h.setTestRealTokenCache(true); blockNetwork(f); expireToken();
+      edit(h,"Reload1",600); edit(h,"Reload2",700);
+      return delay(600).then(function(){
+        check("reload: two saves under an expired token count 2 and the count is stored in its own key",
+          cnt(h)===2&&/"n":2/.test(localStorage.getItem(UNSYNCED_KEY)||""),cnt(h)+" / "+localStorage.getItem(UNSYNCED_KEY));
+        var raw=null; try{ raw=JSON.parse(localStorage.getItem("hours-ledger-selftest-v2")); }catch(e){}
+        check("reload: the ledger itself carries no unsynced field (hard rule 1)",!!raw&&!("unsynced" in raw)&&!("unsyncedCount" in raw)&&!JSON.stringify(raw).match(/unsynced/i));
+        return killSandboxAndOpenFresh(f.d);
+      }).then(function(f2){
+        check("reload: a fresh page (token still expired) shows the bar with the same count",
+          barShown(f2)&&/2 changes not on Drive yet/.test(barText(f2))&&cnt(f2.H)===2,barText(f2));
+        check("reload: the fresh page is in the reconnect state",f2.H.getDriveNeedsReconnect()===true);
+      });
+    });
+  }
+  /* ---- (c) the cause of a failed push ---- */
+  function causeScenario(name,setup,kind,statusRe,extra){
+    return connected().then(function(f){
+      var h=f.H; spyWarn(f);
+      setup(f);
+      edit(h,"Cause",600);
+      return delay(700).then(function(){
+        var lf=h.getLastDriveFailure?h.getLastDriveFailure():null;
+        statusSeen[name]=stat(f);
+        check(name+": the failure kind is recorded as '"+kind+"'",!!lf&&lf.kind===kind,JSON.stringify(lf));
+        check(name+": the status line gives a short reason",statusRe.test(stat(f)),stat(f));
+        check(name+": the cause is logged to the console",f.logged.some(function(l){ return l.indexOf("[drive] sync failed")>=0&&l.indexOf(kind)>=0; }),f.logged.join(" | "));
+        check(name+": the bar shows (the failure makes it visible at once)",barShown(f)&&/1 change not on Drive yet/.test(barText(f)),barText(f));
+        if(extra) extra(f);
+        f.restoreWarn();
+      });
+    });
+  }
+
+  return expiredScenario(false).then(function(){ return expiredScenario(true); }).then(function(){
+    return reloadScenario();
+  }).then(function(){
+    /* design of the bar, read from the first expired-token page */
+    return connected().then(function(f){
+      var h=f.H,w=f.el.contentWindow;
+      h.setTestRealTokenCache(true); blockNetwork(f); expireToken(); edit(h,"Design1",600);
+      return delay(600).then(function(){
+        var b=bar(f);
+        if(!b){ check("design: the bar element exists",false); return; }
+        var cs=w.getComputedStyle(b);
+        check("design: it sits in normal flow (not fixed/sticky/absolute), so it cannot cover the grid, the log sheet or Save",
+          cs.position==="static"||cs.position==="relative",cs.position);
+        check("design: it is inside .wrap, before the masthead (above everything, never over it)",
+          !!b.parentElement&&b.parentElement.className.indexOf("wrap")>=0&&(b.compareDocumentPosition(f.d.querySelector(".masthead"))&4)===4);
+        check("design: square corners",cs.borderTopLeftRadius==="0px"&&cs.borderBottomRightRadius==="0px",cs.borderTopLeftRadius);
+        check("design: no shadow",cs.boxShadow==="none",cs.boxShadow);
+        check("design: not flag red (#B23A2F) in background, text or border",
+          [cs.backgroundColor,cs.color,cs.borderTopColor].every(function(c){ return c!=="rgb(178, 58, 47)"; }),cs.backgroundColor+" / "+cs.color+" / "+cs.borderTopColor);
+        check("design: a real <button> with a 44px minimum height (touch target)",b.tagName==="BUTTON"&&cs.minHeight==="44px",b.tagName+" "+cs.minHeight);
+      });
+    });
+  }).then(function(){
+    /* ---- (c) distinct causes ---- */
+    return causeScenario("network failure",function(f){ f.H.setTestDriveFault("network"); },"network",/no connection/i);
+  }).then(function(){
+    return causeScenario("HTTP 401",function(f){ validToken(); f.H.setTestDriveFault(401); },"auth",/401/,function(f){
+      check("HTTP 401: the rejected token is dropped from the cache so it is not reused",f.H.getCachedToken()===null,String(f.H.getCachedToken()));
+      check("HTTP 401: the button asks for a reconnect (a retry with the same token could only fail again)",btn(f)==="Drive: tap to resume syncing"&&f.H.getDriveNeedsReconnect(),btn(f));
+    });
+  }).then(function(){
+    return causeScenario("HTTP 500",function(f){ f.H.setTestDriveFault(500); },"http",/500/);
+  }).then(function(){
+    return causeScenario("merge exception",function(f){ f.H.fakeDriveWrite({categories:5,entries:[],verdicts:[],closeouts:[]}); },"merge",/merge/i);
+  }).then(function(){
+    var texts=Object.keys(statusSeen).map(function(k){ return statusSeen[k]; });
+    var uniq=texts.filter(function(t,i){ return texts.indexOf(t)===i; });
+    check("the four failure causes show four different status lines",texts.length===4&&uniq.length===4,texts.join(" || "));
+  }).then(function(){
+    /* ---- (d) the count: two failing saves, then a success ---- */
+    return connected().then(function(f){
+      var h=f.H; h.setTestDriveFault(500);
+      edit(h,"Count1",600);
+      return delay(500).then(function(){
+        check("count: after one failing save it is 1",cnt(h)===1,cnt(h));
+        edit(h,"Count2",700);
+        return delay(500);
+      }).then(function(){
+        check("count: after two failing saves it is 2",cnt(h)===2,cnt(h));
+        check("count: the bar reads '2 changes not on Drive yet'",barShown(f)&&/2 changes not on Drive yet/.test(barText(f)),barText(f));
+        check("count: neither entry is on Drive",!onDrive(h,"Count1")&&!onDrive(h,"Count2"));
+        check("count: its storage key holds n=2 while they are unsynced",/"n":2/.test(localStorage.getItem(UNSYNCED_KEY)||""),String(localStorage.getItem(UNSYNCED_KEY)));
+        h.setTestDriveFault(null);
+        var b=bar(f); if(b) b.click();
+        return waitFor(function(){ return onDrive(h,"Count1")&&onDrive(h,"Count2"); },4000);
+      }).then(function(ok){
+        check("count: after the cause clears, tapping the bar pushes both entries",ok);
+        return settle(h);
+      }).then(function(){
+        check("count: a successful sync returns it to 0",cnt(h)===0,cnt(h));
+        check("count: the bar is hidden (element still there)",barGone(f),barText(f));
+        check("count: its storage key is removed",localStorage.getItem(UNSYNCED_KEY)===null,String(localStorage.getItem(UNSYNCED_KEY)));
+        check("count: the button reads 'Drive: synced' again",btn(f)==="Drive: synced",btn(f));
+      });
+    });
+  }).then(function(){
+    /* ---- a normal, healthy save never flashes the bar ---- */
+    return connected().then(function(f){
+      var h=f.H,seen=false;
+      var iv=f.el.contentWindow.setInterval(function(){ if(barShown(f)) seen=true; },5);
+      edit(h,"Healthy1",600);
+      return waitFor(function(){ return onDrive(h,"Healthy1"); },4000).then(function(ok){
+        check("healthy: the entry reaches Drive",ok);
+        return settle(h);
+      }).then(function(){
+        f.el.contentWindow.clearInterval(iv);
+        check("healthy: the bar element exists and was never shown during the 2s-debounce window of an ordinary save",!!bar(f)&&!seen);
+        check("healthy: the count ends at 0",cnt(h)===0,cnt(h));
+      });
+    });
+  }).then(function(){
+    /* ---- silent case: unsynced for a long time with no failure and no reconnect state ---- */
+    return connected().then(function(f){
+      var h=f.H;
+      if(!h.setUnsyncedForTest){ check("silent: test hook exists",false); return; }
+      h.setUnsyncedForTest(2,5*1000);
+      check("silent: 2 changes unsynced for 5 seconds, no failure: bar hidden (a sync is probably about to run)",!barShown(f),barText(f));
+      h.setUnsyncedForTest(2,5*60*1000);
+      check("silent: the same for 5 minutes: bar shown (something is stuck)",barShown(f)&&/2 changes not on Drive yet/.test(barText(f)),barText(f));
+    });
+  }).then(function(){ return results; });
+}
+
+/* ---------------------------------------------------------------------
+   A hung Drive request (follow-up to phone bug 3). A request that never settles left driveSyncInFlight true for the life of
+   the page: every later sync, and a tap on the "N changes not on Drive yet" bar, returned at runDriveSync's guard and did
+   nothing, while the button still said "synced". Now each Drive request has a timeout (DRIVE_REQUEST_TIMEOUT_MS; 300 ms under
+   TEST_MODE) and a hung one becomes an ordinary recorded failure of kind "timeout". setTestDriveHang makes the named request
+   never settle. Written BEFORE the fix. */
+function runDriveTimeoutTests(){
+  var results=[];
+  function check(name,cond,observed){ results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond}); }
+  function delay(ms){ return new Promise(function(resolve){ setTimeout(resolve,ms); }); }
+  var DATE="2026-04-20";
+  function btn(f){ return f.d.getElementById("connectDrive").textContent; }
+  function stat(f){ return f.d.getElementById("statusText").textContent; }
+  function bar(f){ return f.d.getElementById("unsyncedBar"); }
+  function barShown(f){ var b=bar(f); return !!b&&!b.hidden&&f.el.contentWindow.getComputedStyle(b).display!=="none"; }
+  function onDrive(h,label){ var r=h.fakeDriveRead(); return !!r&&r.entries.some(function(e){ return e.date===DATE&&!e.deleted&&e.label===label; }); }
+  function edit(h,label,start){ var cat=h.getState().categories[0].id; h.snapshot("add entry"); h.putEntry(DATE,label,cat,start,start+60,null); h.persist(); }
+  function settle(h){ return delay(250).then(function(){ return waitFor(function(){ return !h.isDriveSyncInFlight(); },4000); }).then(function(){ return delay(50); }); }
+  function connected(){
+    return freshSandbox(true).then(function(f){
+      f.d.getElementById("connectDrive").click();
+      return waitFor(function(){ return btn(f)==="Drive: synced"; },4000).then(function(ok){
+        check("setup: fake Drive connect completed",ok);
+        return settle(f.H);
+      }).then(function(){ return f; });
+    });
+  }
+  function hangScenario(which){
+    return connected().then(function(f){
+      var h=f.H,w=f.el.contentWindow,logged=[];
+      var orig=w.console.warn; w.console.warn=function(){ logged.push(Array.prototype.join.call(arguments," ")); };
+      h.setTestDriveHang(which);
+      edit(h,"Hang-"+which,600);
+      return delay(150).then(function(){
+        check(which+" hangs: while the request is silent the sync is in flight (the bar is not shown yet, nothing has failed)",h.isDriveSyncInFlight()===true);
+        return waitFor(function(){ return !h.isDriveSyncInFlight(); },2500);
+      }).then(function(freed){
+        check(which+" hangs: the in-flight flag is released without any tap or reload",freed,String(h.isDriveSyncInFlight()));
+        var lf=h.getLastDriveFailure();
+        check(which+" hangs: recorded as a failure of kind 'timeout'",!!lf&&lf.kind==="timeout",JSON.stringify(lf));
+        check(which+" hangs: the hung request was actually aborted (AbortController signal fired once)",h.getDriveAbortCount()===1,String(h.getDriveAbortCount()));
+        check(which+" hangs: the status line says Drive did not answer",/did not answer/i.test(stat(f))&&!/no connection/i.test(stat(f)),stat(f));
+        check(which+" hangs: the button reads 'Drive: sync failed' and is enabled",btn(f)==="Drive: sync failed"&&!f.d.getElementById("connectDrive").disabled,btn(f));
+        check(which+" hangs: the failure is logged to the console",logged.some(function(l){ return l.indexOf("[drive] sync failed")>=0&&l.indexOf("timeout")>=0; }),logged.join(" | "));
+        check(which+" hangs: it is a counted failure - count 1 and the bar is shown",h.getUnsyncedCount()===1&&barShown(f)&&/1 change not on Drive yet/.test(bar(f)?bar(f).textContent:""),h.getUnsyncedCount()+" / "+(bar(f)?bar(f).textContent:"(no bar)"));
+        check(which+" hangs: the entry is not on Drive",!onDrive(h,"Hang-"+which));
+        h.setTestDriveHang(null);
+        var b=bar(f); if(b) b.click();
+        return waitFor(function(){ return onDrive(h,"Hang-"+which); },4000);
+      }).then(function(ok){
+        check(which+" hangs: once the request answers again, a tap on the bar is not swallowed - the entry reaches Drive",ok);
+        return settle(h);
+      }).then(function(){
+        check(which+" hangs: afterwards the count is 0 and the button reads 'Drive: synced'",h.getUnsyncedCount()===0&&btn(f)==="Drive: synced",h.getUnsyncedCount()+" / "+btn(f));
+        w.console.warn=orig;
+      });
+    });
+  }
+  return hangScenario("write").then(function(){ return hangScenario("read"); }).then(function(){ return hangScenario("find"); }).then(function(){
+    /* a foreground event retries after a timeout, exactly as after any other failure */
+    return connected().then(function(f){
+      var h=f.H,w=f.el.contentWindow;
+      h.setTestDriveHang("write"); edit(h,"HangFg",600);
+      return waitFor(function(){ return !h.isDriveSyncInFlight()&&h.getLastDriveFailure()!==null; },2500).then(function(){
+        h.setTestDriveHang(null);
+        try{ localStorage.setItem("hours-ledger-access-token-TESTMODE",JSON.stringify({token:"still-valid",expiresAt:Date.now()+3000000})); }catch(e){}
+        f.d.dispatchEvent(new w.Event("visibilitychange")); w.dispatchEvent(new w.Event("focus")); w.dispatchEvent(new w.Event("pageshow"));
+        return waitFor(function(){ return onDrive(h,"HangFg"); },4000);
+      }).then(function(ok){ check("after a timeout, coming back to the foreground pushes the entry (retry works from this failure too)",ok); });
+    });
+  }).then(function(){
+    /* every real request goes through the timeout wrapper (the real fetch calls are unreachable in TEST_MODE, so this reads the source) */
+    var src=""; try{ var x=new XMLHttpRequest(); x.open("GET","app.js?v="+Date.now(),false); x.send(); src=x.responseText; }catch(e){}
+    var calls=src.split('return fetch("https://www.googleapis.com').length-1;
+    var wrapped=src.split('driveTimed(function(signal){ return fetch("https://www.googleapis.com').length-1;
+    check("source: app.js has the four Drive requests",calls===4,String(calls));
+    check("source: every Drive request is inside driveTimed (an AbortController timeout), none left bare",calls===4&&wrapped===4,wrapped+" of "+calls);
   }).then(function(){ return results; });
 }
 
