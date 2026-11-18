@@ -3869,54 +3869,6 @@ if(window.visualViewport){
 
 fLabel.addEventListener("input",function(){ labelTouched=true; });
 
-/* TEMPORARY, branch hours-ledger-save-button: on-screen readout of the entry sheet's geometry, only with ?hldebug=1. Read-only (it
-   never changes layout or state), no network, no storage. Lives in its own commit so it is reverted before any merge. */
-if(/[?&]hldebug=1/.test(location.search)){
-  (function(){
-    var box=document.createElement("pre");
-    box.style.cssText="position:fixed;left:0;right:0;top:0;z-index:99999;margin:0;padding:6px 8px;background:#000;color:#0f0;font:11px/1.35 monospace;white-space:pre-wrap;pointer-events:none";
-    document.body.appendChild(box);
-    var probe=document.createElement("div");
-    probe.style.cssText="position:fixed;left:-9999px;top:0;width:1px;visibility:hidden;pointer-events:none";
-    document.body.appendChild(probe);
-    function px(css){ probe.style.height=css; var h=probe.getBoundingClientRect().height; return (h>0)?Math.round(h*10)/10:"n/a"; }
-    function r1(n){ return Math.round(n*10)/10; }
-    var last="load", n=0;
-    function paint(why){
-      if(why) last=why; n++;
-      var vv=window.visualViewport, sh=scrim.querySelector(".sheet"), act=document.querySelector("#scrim .sheet-actions");
-      var sr=sh.getBoundingClientRect(), ar=act.getBoundingClientRect(), cr=scrim.getBoundingClientRect();
-      var open=scrim.classList.contains("on");
-      var ae=document.activeElement;
-      box.style.top=(vv?vv.offsetTop:0)+"px";
-      box.textContent=
-        "ver "+window.HL_ASSET_VERSION+"  #"+n+" ev:"+last+"  open:"+open+"\n"+
-        "innerH "+window.innerHeight+"  vv.h "+(vv?r1(vv.height):"-")+"  vv.top "+(vv?r1(vv.offsetTop):"-")+"  vv.scale "+(vv?r1(vv.scale):"-")+"\n"+
-        "92vh "+px("92vh")+"  100vh "+px("100vh")+"  100dvh "+px("100dvh")+"  100svh "+px("100svh")+"\n"+
-        ".vv "+scrim.classList.contains("vv")+"  coarse "+(!!(window.matchMedia&&window.matchMedia("(pointer:coarse)").matches))+"  scrim top "+r1(cr.top)+" bot "+r1(cr.bottom)+"\n"+
-        "sheet top "+r1(sr.top)+" bot "+r1(sr.bottom)+" h "+r1(sr.height)+"  maxH "+getComputedStyle(sh).maxHeight+"\n"+
-        "sheet scrollTop "+r1(sh.scrollTop)+" scrollH "+sh.scrollHeight+" clientH "+sh.clientHeight+"\n"+
-        "SAVE row top "+r1(ar.top)+" bot "+r1(ar.bottom)+"  (vv bottom "+(vv?r1(vv.offsetTop+vv.height):"-")+")\n"+
-        "focus "+(ae?ae.tagName+(ae.id?"#"+ae.id:""):"-");
-    }
-    function burst(why){ paint(why); setTimeout(function(){ paint(why+"+0"); },0); setTimeout(function(){ paint(why+"+300"); },300); }
-    new MutationObserver(function(){ burst(scrim.classList.contains("on")?"sheet-open/class":"sheet-closed"); }).observe(scrim,{attributes:true,attributeFilter:["class","style"]});
-    document.addEventListener("click",function(ev){
-      var t=ev.target.closest&&ev.target.closest("#fPresets button,#fChips .chip");
-      burst(t?(t.closest("#fPresets")?"PRESET-tap":"CATEGORY-tap"):"click");
-    });
-    document.addEventListener("focusin",function(){ burst("focusin"); });
-    document.addEventListener("focusout",function(){ burst("focusout"); });
-    scrim.addEventListener("scroll",function(){ paint("scrim-scroll"); },true);
-    window.addEventListener("resize",function(){ burst("win-resize"); });
-    if(window.visualViewport){
-      window.visualViewport.addEventListener("resize",function(){ paint("vv-resize"); });
-      window.visualViewport.addEventListener("scroll",function(){ paint("vv-scroll"); });
-    }
-    paint("load");
-  })();
-}
-
 /* native <input type=time> doesn't self-close its picker/stepper once both
    segments are filled on some DESKTOP browsers - there's no custom picker
    in this codebase to control, so the best available fix is handing focus
