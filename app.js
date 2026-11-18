@@ -2178,25 +2178,6 @@ migrateVerdictScale(state);
 migrateVerdictTombstoneCollisions(state);
 migrateRecentColors(state);
 
-/* TEMPORARY, branch hours-ledger-save-button (debug commits only, reverted before merge): seed ONE category with 8 distinct notes so
-   the entry sheet's label-chip row is at its maximum height. Runs only when ALL of: TEST_MODE (?hltest=1, which switches every storage
-   key to its -selftest/-TESTMODE twin, so the real "hours-ledger-v2" is never read or written here), ?hldebug=1, ?hlseed=1, and the
-   test-mode ledger key is absent (empty test storage). Each note is logged 3 times, not 2: slots 6-8 of the chip row need 3 uses
-   (PRESET_EXTRA_MIN), so 2 would give only 5 chips. One entry per day on the last 24 days, so everything is inside the 8-week window. */
-if(TEST_MODE&&/[?&]hldebug=1/.test(location.search)&&/[?&]hlseed=1/.test(location.search)&&readStore(KEY)===null){
-  (function(){
-    var cat={id:"dbgseed",name:"Debug seed",color:"#2F6B8A"};
-    state.categories.push(cat);
-    var notes=["Deep work block","Email and admin","Read the long chapter about distributed systems","Gym","Cook dinner","Call family","Plan the week","Walk"];
-    var today=new Date(), n=0;
-    for(var u=0;u<3;u++) for(var i=0;i<notes.length;i++){
-      n++;
-      push(iso(addDays(today,-n)),notes[i],cat.id,540,600);
-    }
-    writeStore(KEY,JSON.stringify(state));
-  })();
-}
-
 /* ---------------- file linking (Chrome / Edge) ---------------- */
 var fileHandle=null, fileName="", writeTimer=null;
 
