@@ -40,7 +40,7 @@ var allResults=[];
    EXPECTED_MIN_ROWS is the row count of the last green full run: raise it in
    the same commit that adds tests. Deleting tests on purpose means lowering
    it on purpose - that is the point. */
-var EXPECTED_MIN_ROWS=1918;
+var EXPECTED_MIN_ROWS=1939;
 var finished=false;
 function renderResults(){
   var failing=allResults.filter(function(r){ return !r.pass; }).length;
@@ -3011,6 +3011,8 @@ function runAsyncTests(H,d){
     .then(function(r){ return runPhoneBug3RecoveryTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runPhoneBug3FixTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runDriveTimeoutTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runSaveFooterTests().then(function(more){ return r.concat(more); }); })
+    .then(function(r){ return runVisualViewportTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runQuotaSaveFailureTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runUndoCapTests().then(function(more){ return r.concat(more); }); })
     .then(function(r){ return runQuotaProbeTests().then(function(more){ return r.concat(more); }); })
@@ -9536,6 +9538,84 @@ function runDriveTimeoutTests(){
     var wrapped=src.split('driveTimed(function(signal){ return fetch("https://www.googleapis.com').length-1;
     check("source: app.js has the four Drive requests",calls===4,String(calls));
     check("source: every Drive request is inside driveTimed (an AbortController timeout), none left bare",calls===4&&wrapped===4,wrapped+" of "+calls);
+  }).then(function(){ return results; });
+}
+
+/* ---------------------------------------------------------------------
+   Entry sheet: Save stays in the sheet's visible scroll window (branch hours-ledger-save-button). These rows pin the CSS only
+   (computed style in a hidden iframe). They CANNOT show that Save is visible with a real on-screen keyboard on a phone: the
+   iframe has no keyboard, no visual viewport and no real layout (display:none). That needs a real device. */
+function runSaveFooterTests(){
+  var results=[];
+  function check(name,cond,observed){ results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond}); }
+  return freshSandbox(true).then(function(f){
+    var w=f.el.contentWindow,d=f.d;
+    var row=d.querySelector("#scrim .sheet-actions"),other=d.querySelector("#closeoutScrim .sheet-actions")||d.querySelectorAll(".sheet-actions")[0];
+    check("SB01 the entry sheet has an actions row with the Save button inside it",!!row&&!!row.querySelector("#fSave"));
+    if(!row) return;
+    var cs=w.getComputedStyle(row);
+    check("SB02 the entry sheet's actions row is sticky to the bottom of the sheet",cs.position==="sticky"&&cs.bottom==="0px",cs.position+" / "+cs.bottom);
+    check("SB03 it has an opaque paper background, so scrolled content never shows through",cs.backgroundColor==="rgb(250, 250, 247)",cs.backgroundColor);
+    check("SB04 square corners, no shadow",cs.borderTopLeftRadius==="0px"&&cs.boxShadow==="none",cs.borderTopLeftRadius+" / "+cs.boxShadow);
+    check("SB05 the sheet itself is still the scroll container (overflow auto) and still capped in height",
+      w.getComputedStyle(row.closest(".sheet")).overflowY==="auto"&&w.getComputedStyle(row.closest(".sheet")).maxHeight!=="none",w.getComputedStyle(row.closest(".sheet")).overflowY);
+    var others=[].slice.call(d.querySelectorAll(".sheet-actions")).filter(function(e){ return e!==row; });
+    check("SB06 no other sheet's actions row became sticky (intro, close-out, day sheets unchanged)",others.length>=3&&others.every(function(e){ return w.getComputedStyle(e).position!=="sticky"; }),others.length+" others");
+  }).then(function(){ return results; });
+}
+
+/* ---------------------------------------------------------------------
+   Entry sheet on a touch device with the keyboard up (second attempt, branch hours-ledger-save-button). On iPhone the keyboard
+   does not resize the layout viewport; only window.visualViewport shrinks. applyVisualViewportFit(vv, coarse) sizes the entry
+   scrim to the visual viewport (top = offsetTop, height = height) and caps the sheet inside it. These rows drive that function
+   with FAKE visualViewport values (a real keyboard cannot be produced here) and read computed style. They prove the decision
+   logic and the CSS wiring, NOT that it works on an iPhone. */
+function runVisualViewportTests(){
+  var results=[];
+  function check(name,cond,observed){ results.push({name:name+(observed!==undefined?"  [observed: "+observed+"]":""),pass:!!cond}); }
+  return freshSandbox(true).then(function(f){
+    var w=f.el.contentWindow,d=f.d,h=f.H,scrim=d.getElementById("scrim"),sheet=scrim.querySelector(".sheet");
+    var fit=h.applyVisualViewportFit;
+    check("VV01 the fit function exists",typeof fit==="function");
+    if(typeof fit!=="function") return;
+    function cs(el){ return w.getComputedStyle(el); }
+    scrim.classList.add("on");
+    /* keyboard up on a phone: visual viewport 420px tall, panned 30px */
+    var r=fit({height:420,offsetTop:30,scale:1},true);
+    check("VV02 touch + sheet open + keyboard: applied",r===true&&scrim.classList.contains("vv"),String(r));
+    check("VV03 the scrim is placed at the visual viewport's top and sized to its height",cs(scrim).top==="30px"&&cs(scrim).height==="420px"&&cs(scrim).bottom==="auto",cs(scrim).top+" / "+cs(scrim).height+" / "+cs(scrim).bottom);
+    check("VV04 the sheet is capped to the visual viewport minus the scrim's 20px padding (calc 420-40 = 380px)",cs(sheet).maxHeight==="380px",cs(sheet).maxHeight);
+    var sa=d.querySelector("#scrim .sheet-actions");
+    check("VV05 the Save row is still the sticky row of the entry sheet",cs(sa).position==="sticky");
+    /* the keyboard goes away: a new reading replaces the old one */
+    fit({height:700,offsetTop:0,scale:1},true);
+    check("VV06 a new reading updates the size (700px visual viewport -> 660px sheet cap)",cs(scrim).height==="700px"&&cs(sheet).maxHeight==="660px",cs(scrim).height+" / "+cs(sheet).maxHeight);
+    /* desktop and other non-applying cases leave everything as it was */
+    check("VV07 desktop (not a coarse pointer): not applied and cleared",fit({height:420,offsetTop:0,scale:1},false)===false&&!scrim.classList.contains("vv"));
+    fit({height:420,offsetTop:0,scale:1},true);
+    check("VV08 pinch-zoomed (scale 1.5): not applied and cleared",fit({height:420,offsetTop:0,scale:1.5},true)===false&&!scrim.classList.contains("vv"));
+    fit({height:420,offsetTop:0,scale:1},true);
+    check("VV09 no visualViewport (older browser): not applied and cleared",fit(null,true)===false&&!scrim.classList.contains("vv"));
+    check("VV10 cleared state restores the original CSS (inset 0, sheet capped at 92vh)",cs(scrim).top==="0px"&&cs(sheet).maxHeight!=="380px"&&cs(sheet).maxHeight!=="660px",cs(scrim).top+" / "+cs(sheet).maxHeight);
+    fit({height:420,offsetTop:0,scale:1},true);
+    scrim.classList.remove("on");
+    check("VV11 a reading arriving after the sheet closed is not applied (the class is cleared)",fit({height:420,offsetTop:0,scale:1},true)===false&&!scrim.classList.contains("vv"));
+    /* the real open/close path */
+    scrim.classList.add("on");
+    fit({height:420,offsetTop:0,scale:1},true);
+    var appliedBeforeClose=scrim.classList.contains("vv");
+    h.closeSheet&&h.closeSheet();
+    check("VV12 closeSheet clears the fit (it was applied just before)",appliedBeforeClose&&!scrim.classList.contains("vv"),appliedBeforeClose+" / "+scrim.className);
+    var others=["intro","closeoutScrim","dayScrim","sessScrim"].map(function(id){ var e=d.getElementById(id); return e&&e.classList.contains("vv"); });
+    check("VV13 no other scrim ever gets the class",others.every(function(x){ return !x; }));
+    var src=""; try{ var x=new XMLHttpRequest(); x.open("GET","app.js?v="+Date.now(),false); x.send(); src=x.responseText; }catch(e){}
+    check("VV14 source: the visualViewport resize and scroll events are wired to the fit, and openSheet calls it",
+      src.indexOf('window.visualViewport.addEventListener("resize",fitSheetToVisualViewport)')>=0&&src.indexOf('window.visualViewport.addEventListener("scroll",fitSheetToVisualViewport)')>=0&&/lockBodyScroll\(\);\s*fitSheetToVisualViewport\(\);/.test(src));
+    /* the real open path on this (non-touch) browser: desktop behaviour is untouched */
+    if(h.openSheet){ h.openSheet(0,600,660,null);
+      check("VV15 desktop: opening the real entry sheet does not apply the fit (no class, no custom properties)",scrim.classList.contains("on")&&!scrim.classList.contains("vv")&&scrim.style.getPropertyValue("--vvh")==="",scrim.className+" / "+scrim.style.cssText);
+      h.closeSheet(); }
+    else check("VV15 openSheet hook exists",false);
   }).then(function(){ return results; });
 }
 

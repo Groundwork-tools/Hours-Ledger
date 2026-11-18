@@ -3829,12 +3829,43 @@ function openSheet(dayIdx,start,end,entryId){
   scrim.querySelector(".sheet").scrollTop=0;
   scrim.classList.add("on");
   lockBodyScroll();
+  fitSheetToVisualViewport();
   /* autofocus only where there's no on-screen keyboard to fight - on a phone
      it used to cover the category chips and time fields the instant the
      sheet opened, before the user got a chance to see them */
   if(window.innerWidth>=820) fLabel.focus();
 }
-function closeSheet(){ scrim.classList.remove("on"); editing=null; unlockBodyScroll(); }
+function closeSheet(){ scrim.classList.remove("on"); applyVisualViewportFit(null,false); editing=null; unlockBodyScroll(); }
+/* Keeps the entry sheet, and so its Save button, above the on-screen keyboard on a touch device (branch
+   hours-ledger-save-button, second attempt: a sticky Save row alone was not enough on iPhone Chrome). On iOS the keyboard does
+   NOT resize the layout viewport that a position:fixed element and 92vh are measured against: only window.visualViewport
+   shrinks, and iOS may also pan it (offsetTop > 0) to reveal the focused field. So the scrim, which is inset:0 of the LAYOUT
+   viewport, still reaches under the keyboard and the centered sheet's bottom, Save included, sits there. While the entry sheet
+   is open on a coarse-pointer device this sets --vvh/--vvt from visualViewport and adds .vv to the scrim; the stylesheet then
+   places the scrim at the visual viewport's top with its height and caps the sheet inside it. Applied only for: the entry sheet
+   open, a coarse pointer (a phone or tablet), no pinch zoom (scale > 1 makes visualViewport.height the zoomed-in window, not the
+   keyboard-free area), and a visualViewport that exists. Otherwise it removes .vv, so desktop and every other case keep exactly
+   the previous CSS. No flag and no timer: each call recomputes from the current reading, and closeSheet clears it, so there is
+   nothing to get stuck (hard rule 9). vv and coarse are parameters so a test can drive it without a real keyboard. */
+function applyVisualViewportFit(vv,coarse){
+  if(!vv||!coarse||!scrim.classList.contains("on")||(vv.scale&&vv.scale>1.01)){
+    scrim.classList.remove("vv");
+    scrim.style.removeProperty("--vvh"); scrim.style.removeProperty("--vvt");
+    return false;
+  }
+  scrim.style.setProperty("--vvh",vv.height+"px");
+  scrim.style.setProperty("--vvt",vv.offsetTop+"px");
+  scrim.classList.add("vv");
+  return true;
+}
+function fitSheetToVisualViewport(){
+  applyVisualViewportFit(window.visualViewport,!!(window.matchMedia&&window.matchMedia("(pointer:coarse)").matches));
+}
+if(window.visualViewport){
+  /* the keyboard opening/closing resizes it; iOS panning it to a focused field scrolls it */
+  window.visualViewport.addEventListener("resize",fitSheetToVisualViewport);
+  window.visualViewport.addEventListener("scroll",fitSheetToVisualViewport);
+}
 
 fLabel.addEventListener("input",function(){ labelTouched=true; });
 
@@ -5872,6 +5903,9 @@ if(TEST_MODE){
     setTestHangToken:function(v){ TEST_MODE_HANG_TOKEN=v; },
     setTestDriveFault:function(v){ TEST_MODE_DRIVE_FAULT=v; },
     setTestDriveHang:function(v){ TEST_MODE_DRIVE_HANG=v; },
+    applyVisualViewportFit:applyVisualViewportFit,
+    closeSheet:closeSheet,
+    openSheet:openSheet,
     getDriveAbortCount:function(){ return TEST_MODE_DRIVE_ABORTS; },
     getUnsyncedCount:function(){ return unsyncedCount; },
     getLastDriveFailure:function(){ return lastDriveFailure; },

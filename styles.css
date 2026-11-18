@@ -292,6 +292,17 @@ button{cursor:pointer}
 .repeat button{flex:1;border:1px solid var(--rule);background:transparent;padding:5px 0;font-family:var(--mono);font-size:10px;text-transform:uppercase}
 .repeat button[aria-pressed=true]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
 .sheet-actions{display:flex;gap:8px;margin-top:20px;align-items:center}
+/* The entry sheet's Save/Cancel row stays inside the sheet's visible scroll window instead of being the last thing below the
+   fold (the label presets of 2026-10-27 made the sheet taller on a phone, so with the keyboard up Save sat below the fold).
+   Sticky inside the sheet's own scroll container: no JS, no change to the sheet's size. The negative margins let the paper
+   background and the rule span the sheet's padding, so scrolled content never shows around or under the buttons, and when the
+   sheet is short the row sits exactly where it did before. Entry sheet only (#scrim): the intro, close-out and day sheets are
+   left as they were. Square, no shadow. */
+/* set by applyVisualViewportFit() in app.js, only while the entry sheet is open on a touch device: the scrim follows the visual
+   viewport (what is left above the on-screen keyboard) instead of the layout viewport. Never present on desktop. */
+#scrim.vv{top:var(--vvt);bottom:auto;height:var(--vvh)}
+#scrim.vv .sheet{max-height:calc(var(--vvh) - 40px)}
+#scrim .sheet-actions{position:sticky;bottom:0;margin:20px -20px -20px;padding:12px 20px 20px;background:var(--paper);border-top:1px solid var(--rule)}
 .sheet h3{font-family:var(--mono);font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);margin:22px 0 10px;font-weight:600}
 /* the sheet reads as two labelled sections: Your sessions, then Patterns in your log, split by a 2 px ink rule and more space than between cards */
 .sheet .sess-sec-h{margin:0 0 10px}
